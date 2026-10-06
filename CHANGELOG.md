@@ -12,6 +12,7 @@ section to the released version and opens a fresh empty one (see `docs/RELEASING
 
 ### Changed
 - **Polling sync flag hardcodes its Acquire/Release ordering (#759).** `Polling::is_syncing()` and `Polling::set_syncing(value)` no longer take an `Ordering` parameter — the Acquire load / Release store pair lives inside the type, so no call site can silently drop the poller-exit → tray/UI happens-before chain with a weaker ordering. `try_claim()` keeps its AcqRel CAS. No behaviour change.
+- **Redaction formatting unified behind one shared helper (#910).** `pkce::redact_len` / `pkce::redact_prefix` (both dead, `#[allow(dead_code)]`) are replaced by a single `redact::redact_len` module that owns the `[REDACTED len N]` construction; every deep-link, startup-URL, Spotify-auth, and diagnostics-snapshot site routes through it. The 4-character secret prefix the deep-link logs used to print (24 bits of a base64url secret) is deleted — those lines now log length only. No public function prints a secret prefix anymore.
 
 ## [5.0.0] - 2026-10-06
 

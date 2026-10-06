@@ -801,6 +801,7 @@ pub mod pkce;
 pub mod platform;
 pub mod polling;
 pub mod profanity;
+pub mod redact;
 pub mod serve;
 pub mod sources;
 pub mod spotify;
@@ -1043,11 +1044,11 @@ where
     S: FnOnce() -> Option<Arc<AppState>>,
     D: FnOnce(String, Option<String>),
 {
-    // #228: never log raw callback URL (contains code + state). Log only length/prefix.
+    // #228: never log raw callback URL (contains code + state). Log length
+    // only (#910 deleted the 4-char prefix: 24 bits of secret in the log).
     log::debug!(
-        "[DEEP_LINK] handle_deep_link: ENTRY - url_len={} prefix={}…[REDACTED]",
-        url.len(),
-        url.chars().take(4).collect::<String>()
+        "[DEEP_LINK] handle_deep_link: ENTRY - url {}",
+        crate::redact::redact_len(url)
     );
 
     if let Ok(parsed) = url::Url::parse(url) {
@@ -1154,52 +1155,42 @@ where
                                             match binding.validate(parts[1], &pending.verifier) {
                                                 Ok(()) => true,
                                                 Err(reason) => {
-                                                    let prefix: String =
-                                                        st.chars().take(4).collect();
                                                     log::warn!(
-                                                        "[DEEP_LINK] handle_deep_link: launch binding rejected ({}) — state prefix={}… len={} — ignoring callback (possible hijack/replay) [REDACTED len {}]",
+                                                        "[DEEP_LINK] handle_deep_link: launch binding rejected ({}) — state {} — ignoring callback (possible hijack/replay)",
                                                         reason,
-                                                        prefix,
-                                                        st.len(),
-                                                        st.len()
+                                                        crate::redact::redact_len(st)
                                                     );
                                                     false
                                                 }
                                             }
                                         }
                                         Some(_) => {
-                                            let prefix: String = st.chars().take(4).collect();
                                             log::warn!(
-                                                "[DEEP_LINK] handle_deep_link: state mismatch vs pending auth — state prefix={}… len={} — ignoring callback (possible hijack) [REDACTED len {}]",
-                                                prefix,
-                                                st.len(),
-                                                st.len()
+                                                "[DEEP_LINK] handle_deep_link: state mismatch vs pending auth — state {} — ignoring callback (possible hijack)",
+                                                crate::redact::redact_len(st)
                                             );
                                             false
                                         }
                                         None => {
                                             log::warn!(
-                                                "[DEEP_LINK] handle_deep_link: no pending Spotify auth in AppState — ignoring callback (stale or replayed) [REDACTED len {}]",
-                                                st.len()
+                                                "[DEEP_LINK] handle_deep_link: no pending Spotify auth in AppState — ignoring callback (stale or replayed) {}",
+                                                crate::redact::redact_len(st)
                                             );
                                             false
                                         }
                                     }
                                 } else {
-                                    let prefix: String = st.chars().take(4).collect();
                                     log::warn!(
-                                        "[DEEP_LINK] handle_deep_link: malformed state (expected <csrf>.<secret>) — state prefix={}… len={} — ignoring callback (possible truncation/hijack) [REDACTED len {}]",
-                                        prefix,
-                                        st.len(),
-                                        st.len()
+                                        "[DEEP_LINK] handle_deep_link: malformed state (expected <csrf>.<secret>) — state {} — ignoring callback (possible truncation/hijack)",
+                                        crate::redact::redact_len(st)
                                     );
                                     false
                                 }
                             }
                             None => {
                                 log::warn!(
-                                    "[DEEP_LINK] handle_deep_link: no launch binding in AppState — ignoring callback [REDACTED len {}]",
-                                    st.len()
+                                    "[DEEP_LINK] handle_deep_link: no launch binding in AppState — ignoring callback {}",
+                                    crate::redact::redact_len(st)
                                 );
                                 false
                             }
@@ -2932,7 +2923,7 @@ pub fn run() {
                 if let Ok(Some(urls)) = start_urls {
                     log::info!("[APP] setup: found {} start URL(s)", urls.len());
                     for url in urls {
-                        log::info!("[APP] setup: processing start URL: [REDACTED len {}] prefix={}…", url.as_str().len(), url.as_str().chars().take(4).collect::<String>());
+                        log::info!("[APP] setup: processing start URL: {}", crate::redact::redact_len(url.as_str()));
                         handle_deep_link_from_app(url.as_str(), app.handle().clone());
                     }
                 } else {
@@ -2946,7 +2937,7 @@ pub fn run() {
                     let urls = event.urls();
                     log::info!("[APP] on_open_url: received {} URL(s)", urls.len());
                     for url in urls {
-                        log::info!("[APP] on_open_url: processing URL: [REDACTED len {}] prefix={}…", url.as_str().len(), url.as_str().chars().take(4).collect::<String>());
+                        log::info!("[APP] on_open_url: processing URL: {}", crate::redact::redact_len(url.as_str()));
                         handle_deep_link_from_app(url.as_str(), app_handle.clone());
                     }
                 });

@@ -4,8 +4,8 @@
 //! app/OS version info, a sanitized config summary, token *metadata only*
 //! (expiry timestamps + presence flags — never token values), keychain
 //! presence flags, and the tail of the on-disk log file with a defensive
-//! second-pass redaction applied (`[REDACTED len N]`, same pattern as the
-//! #228 auth-log redaction in `pkce::redact_len`).
+//! second-pass redaction applied (`[REDACTED len N]`, built only by
+//! `crate::redact::redact_len` — the #228 auth-log pattern, issue #910).
 //!
 //! **No network calls. No telemetry endpoint.** This mirrors the
 //! SECURITY.md "No Telemetry" promise: everything here can be pasted by
@@ -335,8 +335,8 @@ const SECRET_KEYS: &[&str] = &[
     "bearer",
 ];
 
-/// Defensive second-pass redaction for one log line, reusing the
-/// `[REDACTED len N]` format established by #228 / `pkce::redact_len`.
+/// Defensive second-pass redaction for one log line, emitting the
+/// `crate::redact::redact_len` format (established by #228, unified by #910).
 ///
 /// The auth/deep-link paths already redact at write time; this catches
 /// anything that reaches the log file unredacted (third-party messages,
@@ -450,9 +450,16 @@ pub fn redact_sensitive(line: &str) -> String {
             run_start = None;
         }
     }
-    // Rebuild: each masked run becomes `[REDACTED len N]` — same pattern
-    // as `pkce::redact_len` (#228), inlined here to avoid allocating a
-    // dummy string just to measure its length.
+    // Rebuild: each masked run becomes `crate::redact::redact_len` output
+    // (#228 pattern, single construction site per issue #910). The length
+    // is summed as bytes over the masked `chars` range — no allocation,
+    // and indexing a `Vec<char>` never splits a code point. Pass-2 opaque
+    // runs are `is_opaque_char` ASCII by construction, so byte length
+    // equals the old char count exactly. Pass-1 keyed values use the
+    // wider `is_value_char` set and may contain non-ASCII, in which case
+    // the marker now prints the byte length rather than the old char
+    // count — immaterial in practice, since every secret-shaped value we
+    // log is ASCII.
     let mut out = String::with_capacity(n);
     let mut idx = 0;
     while idx < n {
@@ -461,7 +468,8 @@ pub fn redact_sensitive(line: &str) -> String {
             while idx < n && masked[idx] {
                 idx += 1;
             }
-            out.push_str(&format!("[REDACTED len {}]", idx - run_start));
+            let byte_len: usize = chars[run_start..idx].iter().map(|c| c.len_utf8()).sum();
+            out.push_str(&crate::redact::redact_len_len(byte_len));
         } else {
             out.push(chars[idx]);
             idx += 1;

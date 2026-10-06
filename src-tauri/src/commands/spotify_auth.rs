@@ -304,8 +304,8 @@ fn run_spotify_oauth_flow(
     binding.bind_verifier(&verifier);
     let csrf_state = format!("{}.{}", csrf_state, binding.launch_secret.clone());
     log::info!(
-        "{CMD} run_spotify_oauth_flow: state generated, len={} [REDACTED]",
-        csrf_state.len()
+        "{CMD} run_spotify_oauth_flow: state generated, {}",
+        crate::redact::redact_len(&csrf_state)
     );
 
     // `show_dialog=true` forces the consent screen even for users who have
@@ -626,9 +626,9 @@ pub async fn complete_spotify_auth_manual(
     // Issue #241: detached windows never legitimately complete the OAuth flow.
     super::require_main_window(&window)?;
     log::info!(
-        "{CMD} complete_spotify_auth_manual: ENTRY - code.len={}, oauth_state.len={} [REDACTED]",
-        code.len(),
-        oauth_state.len()
+        "{CMD} complete_spotify_auth_manual: ENTRY - code {}, oauth_state {}",
+        crate::redact::redact_len(&code),
+        crate::redact::redact_len(&oauth_state)
     );
 
     // Issue #351 + #555: peek → validate → take → exchange → consume,
@@ -674,9 +674,9 @@ pub async fn complete_spotify_auth_manual(
             }
             ManualPasteOutcome::StateMismatch => {
                 log::error!(
-                    "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected [REDACTED len {} vs {}]",
-                    oauth_state.len(),
-                    peeked.state.len()
+                    "{CMD} complete_spotify_auth_manual: state mismatch - CSRF attack detected {} vs {}",
+                    crate::redact::redact_len(&oauth_state),
+                    crate::redact::redact_len(&peeked.state)
                 );
                 return Err("State mismatch - possible CSRF attack".to_string());
             }
