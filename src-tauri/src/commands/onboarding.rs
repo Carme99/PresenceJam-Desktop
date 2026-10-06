@@ -315,11 +315,12 @@ fn spotify_session_verdict(
 /// silently degrades back into "not configured".
 fn record_client_secret_state(state: &Arc<AppState>, presence: &KeychainPresence) {
     let mut guard = state.config.get_mut();
-    let Some(config) = guard.as_mut() else {
+    let Some(slot) = guard.as_mut() else {
         // The frontend has not loaded a config yet: there is nothing to
         // correct, and the next load stamps the state itself.
         return;
     };
+    let config = Arc::make_mut(slot);
     config.spotify.client_secret_state = config::ClientSecretState::from(presence);
     config.spotify.client_secret_set = matches!(presence, KeychainPresence::Present);
 }
@@ -875,10 +876,10 @@ mod tests {
     #[test]
     fn boot_gate_observation_lands_in_the_in_memory_config() {
         let state = Arc::new(AppState::new());
-        *state.config.get_mut() = Some(AppConfig::default());
+        *state.config.get_mut() = Some(Arc::new(AppConfig::default()));
 
         record_client_secret_state(&state, &KeychainPresence::Unavailable("locked".into()));
-        let config = state.config.get().clone().expect("config was just stored");
+        let config = state.config.snapshot().expect("config was just stored");
         assert_eq!(
             config.spotify.client_secret_state,
             ClientSecretState::Unavailable
@@ -890,7 +891,7 @@ mod tests {
 
         // The other two observations are mirrored the same way.
         record_client_secret_state(&state, &KeychainPresence::Present);
-        let config = state.config.get().clone().unwrap();
+        let config = state.config.snapshot().unwrap();
         assert_eq!(
             config.spotify.client_secret_state,
             ClientSecretState::Present
@@ -898,7 +899,7 @@ mod tests {
         assert!(config.spotify.client_secret_set);
 
         record_client_secret_state(&state, &KeychainPresence::Absent);
-        let config = state.config.get().clone().unwrap();
+        let config = state.config.snapshot().unwrap();
         assert_eq!(
             config.spotify.client_secret_state,
             ClientSecretState::Absent

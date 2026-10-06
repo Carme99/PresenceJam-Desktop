@@ -1244,10 +1244,10 @@ mod tests {
 
         {
             let mut guard = state.config.get_mut();
-            *guard = Some(crate::config::AppConfig {
+            *guard = Some(std::sync::Arc::new(crate::config::AppConfig {
                 locale: Some("de".to_string()),
                 ..Default::default()
-            });
+            }));
         }
         assert_eq!(install_from_app_state(&state), "de");
         assert_eq!(
@@ -1258,10 +1258,10 @@ mod tests {
 
         {
             let mut guard = state.config.get_mut();
-            *guard = Some(crate::config::AppConfig {
+            *guard = Some(std::sync::Arc::new(crate::config::AppConfig {
                 locale: Some("zz".to_string()),
                 ..Default::default()
-            });
+            }));
         }
         assert_eq!(install_from_app_state(&state), "en");
         assert_eq!(current().show_window, EN.show_window);

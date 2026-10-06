@@ -19,7 +19,9 @@ const DEFAULT_PAUSED_STATUS_FORMAT: &str = crate::i18n::EN.status_paused_default
 
 /// Resolve the paused text from one locale-explicit config snapshot. Only an
 /// empty field or a byte-equal shipped English value is localized; every other
-pub(crate) fn paused_status_text(config: &Option<crate::config::AppConfig>) -> &str {
+pub(crate) fn paused_status_text(
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
+) -> &str {
     let locale = config.as_ref().and_then(|cfg| cfg.locale.as_deref());
     let configured = config
         .as_ref()
@@ -31,7 +33,9 @@ pub(crate) fn paused_status_text(config: &Option<crate::config::AppConfig>) -> &
 }
 
 /// Add the standard music prefix to the shared paused-text result.
-pub(crate) fn paused_status_placeholder(config: &Option<crate::config::AppConfig>) -> String {
+pub(crate) fn paused_status_placeholder(
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
+) -> String {
     format!(
         "{} {}",
         crate::polling::MUSIC_EMOJI,
@@ -973,7 +977,7 @@ mod tests {
         let state = AppState::new();
         let mut config = crate::config::AppConfig::default();
         config.spotify.client_id = "spotify-client".to_string();
-        *state.config.get_mut() = Some(config);
+        *state.config.get_mut() = Some(std::sync::Arc::new(config));
 
         let spotify_tokens = crate::spotify::SpotifyTokens {
             access_token: "spotify-access".to_string(),
@@ -1230,7 +1234,7 @@ mod tests {
         let state = Arc::new(AppState::new());
         let mut config = crate::config::AppConfig::default();
         config.spotify.client_id = "spotify-client".to_string();
-        *state.config.get_mut() = Some(config);
+        *state.config.get_mut() = Some(std::sync::Arc::new(config));
         *state.tokens.spotify_mut() = Some(crate::spotify::SpotifyTokens {
             access_token: "spotify-access".to_string(),
             refresh_token: "spotify-refresh".to_string(),
@@ -1424,7 +1428,7 @@ mod tests {
             };
             for configured in ["", "Paused", "   "] {
                 config.teams.paused_status_format = configured.to_string();
-                *state.config.get_mut() = Some(config.clone());
+                *state.config.get_mut() = Some(std::sync::Arc::new(config.clone()));
                 assert_eq!(
                     safe_placeholder_text(&state),
                     format!("🎵 {fallback}"),
@@ -1433,7 +1437,7 @@ mod tests {
             }
 
             config.teams.paused_status_format = custom.to_string();
-            *state.config.get_mut() = Some(config);
+            *state.config.get_mut() = Some(std::sync::Arc::new(config));
             assert_eq!(
                 safe_placeholder_text(&state),
                 format!("🎵 {custom}"),

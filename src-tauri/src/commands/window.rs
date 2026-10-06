@@ -153,7 +153,7 @@ pub async fn set_autostart_enabled(
     let persisted = tauri::async_runtime::spawn_blocking(move || {
         let mut config_guard = state_clone.config.get_mut();
         let mut merged = match config_guard.as_ref() {
-            Some(current) => current.clone(),
+            Some(current) => (**current).clone(),
             None => config::load_config().map_err(|e| {
                 log::error!("{CMD} set_autostart_enabled: config load FAILED - {}", e);
                 ShortcutReason::autostart(&e)
@@ -167,7 +167,7 @@ pub async fn set_autostart_enabled(
         config::stamp_schema_version(&mut persisted);
         match config::save_config(&persisted) {
             Ok(()) => {
-                *config_guard = Some(persisted.clone());
+                *config_guard = Some(Arc::new(persisted.clone()));
                 log::info!(
                     "{CMD} set_autostart_enabled: config persisted (autostart={})",
                     enabled

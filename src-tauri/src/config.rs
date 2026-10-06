@@ -471,7 +471,7 @@ pub fn preferred_presence_expiry_duration(teams: &TeamsConfig) -> String {
 /// issue #538) into the slice shape `profanity::filter_status` expects. The
 /// function is `None`-aware — a hand-edited config that lacks the section
 /// reads as the empty slice, reproducing the pre-#538 behaviour exactly.
-pub fn profanity_extra_words_for_filter(config: Option<&AppConfig>) -> &[String] {
+pub fn profanity_extra_words_for_filter(config: Option<&std::sync::Arc<AppConfig>>) -> &[String] {
     config
         .map(|c| c.teams.profanity_extra_words.as_slice())
         .unwrap_or(&[])
@@ -763,6 +763,17 @@ pub fn effective_config(config: &AppConfig) -> AppConfig {
         out.notifications = notifications.clone();
     }
     out
+}
+
+/// Issue #893: the hot-path twin of [`effective_config`]. When no profile is
+/// active (the common case) the base pointer is shared — no deep copy — and
+/// only an active overlay allocates. Poll-iteration readers take their
+/// snapshot through this so one iteration performs no `AppConfig` clone.
+pub fn effective_snapshot(config: &std::sync::Arc<AppConfig>) -> std::sync::Arc<AppConfig> {
+    if config.active_profile.is_none() {
+        return std::sync::Arc::clone(config);
+    }
+    std::sync::Arc::new(effective_config(config))
 }
 
 /// Rewrite a rule's pair in place to its canonical form, or clear BOTH fields

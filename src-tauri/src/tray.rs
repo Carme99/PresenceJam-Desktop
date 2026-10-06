@@ -895,7 +895,7 @@ fn snooze_dedup_key(status: &crate::config::SnoozeStatus) -> String {
 /// (4.7.0, S9 / issue #677). Absent config, absent field and an already-passed
 /// deadline all mean "not snoozed", which is what makes the tray agree with the
 /// poller without a second source of truth.
-fn resolve_snooze(config: Option<&crate::config::AppConfig>) -> Option<TraySnooze> {
+fn resolve_snooze(config: Option<&std::sync::Arc<crate::config::AppConfig>>) -> Option<TraySnooze> {
     let status = crate::config::snooze_status(config?, chrono::Utc::now())?;
     Some(TraySnooze {
         minutes_left: crate::config::snooze_minutes_left(status.remaining_seconds),
@@ -1826,7 +1826,7 @@ fn store_snooze(
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let mut guard = state.config.get_mut();
     let base = match guard.as_ref() {
-        Some(current) => current.clone(),
+        Some(current) => (**current).clone(),
         None => crate::config::load_config()?,
     };
     let mut next = base;
@@ -1835,7 +1835,7 @@ fn store_snooze(
     let mut persisted = crate::config::clamped_config(&next);
     crate::config::stamp_schema_version(&mut persisted);
     crate::config::save_config(&persisted)?;
-    *guard = Some(persisted);
+    *guard = Some(std::sync::Arc::new(persisted));
 
     Ok(())
 }
@@ -1887,7 +1887,7 @@ fn store_active_profile(app: &AppHandle, name: Option<String>) -> Result<(), Str
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     let mut guard = state.config.get_mut();
     let base = match guard.as_ref() {
-        Some(current) => current.clone(),
+        Some(current) => (**current).clone(),
         None => crate::config::load_config()?,
     };
     let mut next = base;
@@ -1895,7 +1895,7 @@ fn store_active_profile(app: &AppHandle, name: Option<String>) -> Result<(), Str
     let mut persisted = crate::config::clamped_config(&next);
     crate::config::stamp_schema_version(&mut persisted);
     crate::config::save_config(&persisted)?;
-    *guard = Some(persisted);
+    *guard = Some(std::sync::Arc::new(persisted));
     Ok(())
 }
 
@@ -3709,11 +3709,11 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A config carrying `snooze_until` as stored.
-    fn snoozed_config(stored: &str) -> crate::config::AppConfig {
-        crate::config::AppConfig {
+    fn snoozed_config(stored: &str) -> std::sync::Arc<crate::config::AppConfig> {
+        std::sync::Arc::new(crate::config::AppConfig {
             snooze_until: Some(stored.to_string()),
             ..crate::config::AppConfig::default()
-        }
+        })
     }
 
     /// A deadline `seconds` from now, in the stored spelling.
@@ -3806,7 +3806,10 @@ mod tests {
     #[test]
     fn resolve_snooze_accepts_only_a_live_deadline() {
         assert!(resolve_snooze(None).is_none(), "no config loaded");
-        assert!(resolve_snooze(Some(&crate::config::AppConfig::default())).is_none());
+        assert!(resolve_snooze(Some(&std::sync::Arc::new(
+            crate::config::AppConfig::default()
+        )))
+        .is_none());
         assert!(resolve_snooze(Some(&snoozed_config(&deadline_in(-60)))).is_none());
         assert!(resolve_snooze(Some(&snoozed_config("not a timestamp"))).is_none());
 
@@ -3992,7 +3995,7 @@ mod tests {
             "crate::config::clamped_config(&next)",
             "crate::config::stamp_schema_version(&mut persisted)",
             "crate::config::save_config(&persisted)",
-            "*guard = Some(persisted)",
+            "*guard = Some(std::sync::Arc::new(persisted))",
         ] {
             assert!(
                 body.contains(marker),
@@ -4004,7 +4007,9 @@ mod tests {
         // never renders a snooze that is not on disk.
         assert!(
             body.find("save_config(&persisted)?").unwrap_or(usize::MAX)
-                < body.find("*guard = Some(persisted)").unwrap_or(0),
+                < body
+                    .find("*guard = Some(std::sync::Arc::new(persisted))")
+                    .unwrap_or(0),
             "the store must happen only after a successful save"
         );
         // The write half holds no log lines: the copy belongs to the caller, so
@@ -4063,7 +4068,7 @@ mod tests {
             "crate::config::clamped_config(&next)",
             "crate::config::stamp_schema_version(&mut persisted)",
             "crate::config::save_config(&persisted)?",
-            "*guard = Some(persisted)",
+            "*guard = Some(std::sync::Arc::new(persisted))",
         ] {
             assert!(
                 store.contains(marker),

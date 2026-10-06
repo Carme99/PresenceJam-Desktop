@@ -510,7 +510,7 @@ fn config_or_default(app: &AppHandle) -> AppConfig {
     // The config guard is cloned out inside the closure: `Config::get` returns
     // a read guard, which cannot leave the expression that created it.
     app.try_state::<Arc<crate::AppState>>()
-        .and_then(|state| state.config.get().as_ref().cloned())
+        .and_then(|state| state.config.get().as_ref().map(|c| (**c).clone()))
         .unwrap_or_default()
 }
 
