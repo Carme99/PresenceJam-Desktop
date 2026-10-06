@@ -215,7 +215,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             let before = app
                 .state::<std::sync::Arc<crate::AppState>>()
                 .polling
-                .is_syncing(Ordering::Acquire);
+                .is_syncing();
             let _ = app.emit("toggle-pause", ());
             let app_handle = app.clone();
             std::thread::spawn(move || {
@@ -740,7 +740,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // to explain the wait, and could never take the "nothing changed" early
     // return.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing();
     let current_track = state.polling.current_track().clone();
     if let Err(e) = update_tray_menu_startup(app.handle(), is_syncing, current_track) {
         log::warn!(
@@ -1996,12 +1996,12 @@ fn run_player_action(
                     let _reset = ResetOnDrop;
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     let state = app_clone.state::<std::sync::Arc<crate::AppState>>();
-                    if !state.polling.is_syncing(Ordering::Acquire) {
+                    if !state.polling.is_syncing() {
                         log::debug!("[TRAY] {}: delayed refresh skipped (sync off)", label_owned);
                         return;
                     }
                     crate::polling::run_oneshot(state.inner(), &app_clone);
-                    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                    let is_syncing = state.polling.is_syncing();
                     let current_track = state.polling.current_track().clone();
                     if let Err(e) = update_tray_menu(&app_clone, is_syncing, current_track) {
                         log::warn!(
@@ -2058,7 +2058,7 @@ fn repaint_tray_from_state(app: &AppHandle, context: &str) {
         );
         return;
     };
-    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing();
     let current_track = state.polling.current_track().clone();
     if let Err(e) = update_tray_menu(app, is_syncing, current_track) {
         log::warn!("[TRAY] {}: tray repaint failed: {}", context, e);
@@ -2100,7 +2100,7 @@ fn await_sync_toggle(app: &AppHandle, before: bool) -> bool {
         let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() else {
             return false;
         };
-        if state.polling.is_syncing(Ordering::Acquire) != before {
+        if state.polling.is_syncing() != before {
             return true;
         }
     }
@@ -2181,7 +2181,7 @@ fn force_tray_refresh(
         );
         return;
     };
-    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing();
     let current_track = state.polling.current_track().clone();
     // S9 (issue #677): the snooze is read here only for the dedup key below —
     // while one is active the rebuild renders the CACHED Devices/Up Next lists
@@ -4663,7 +4663,6 @@ mod tests {
     #[test]
     fn force_tray_refresh_tolerates_missing_state_issue_937() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
-        use std::sync::atomic::Ordering;
         use std::sync::Arc;
 
         // Arm 1: an unmanaged state. A lookup that returns `None` is exactly
@@ -4691,7 +4690,7 @@ mod tests {
         // Arm 2: the normal launch. A managed state proceeds, and the rebuild
         // sees the sync flag the function read out of it.
         let state = Arc::new(crate::AppState::new());
-        state.polling.set_syncing(true, Ordering::Release);
+        state.polling.set_syncing(true);
         let mut rebuilds: Vec<(bool, Option<crate::spotify::TrackInfo>)> = Vec::new();
         force_tray_refresh(&|| Some(state.clone()), &mut |is_syncing, track| {
             rebuilds.push((is_syncing, track));

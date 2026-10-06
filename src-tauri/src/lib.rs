@@ -219,10 +219,12 @@ impl Default for Config {
 }
 
 /// Live polling state: the sync flag, the worker thread handle, the
-/// stop-channel sender, and the last observed track. The atomic flag
-/// keeps its original orderings (Acquire load, Release store, AcqRel
-/// compare-exchange) so the happens-before chain with the polling
-/// loop and tray menu stays identical to the pre-refactor code.
+/// stop-channel sender, and the last observed track. The sync flag
+/// hardcodes its ordering pair — Acquire load, Release store (AcqRel
+/// compare-exchange in `try_claim`) — so the happens-before chain
+/// between the poller's exit path and the tray menu rebuild or the
+/// UI's sync state holds by construction and no call site can
+/// silently drop it with a weaker ordering (issue #759).
 pub struct Polling {
     is_syncing: AtomicBool,
     handle: RwLock<Option<thread::JoinHandle<()>>>,
@@ -246,17 +248,19 @@ impl Polling {
         }
     }
 
-    /// Load the sync flag with the caller's chosen ordering. Preserves
-    /// the original `state.is_syncing.load(Ordering::Acquire)` semantics.
-    pub fn is_syncing(&self, ordering: std::sync::atomic::Ordering) -> bool {
-        self.is_syncing.load(ordering)
+    /// Load the sync flag with Acquire ordering, so a poller-exit
+    /// store is observed before the tray menu rebuild or UI sync
+    /// state reads that follow (issue #759).
+    pub fn is_syncing(&self) -> bool {
+        self.is_syncing.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Store a new value into the sync flag with the caller's chosen
-    /// ordering. Preserves the original `state.is_syncing.store(.., Ordering::Release)`
-    /// semantics.
-    pub fn set_syncing(&self, value: bool, ordering: std::sync::atomic::Ordering) {
-        self.is_syncing.store(value, ordering);
+    /// Store a new value into the sync flag with Release ordering,
+    /// publishing all prior writes to the next Acquire load
+    /// (issue #759).
+    pub fn set_syncing(&self, value: bool) {
+        self.is_syncing
+            .store(value, std::sync::atomic::Ordering::Release);
     }
 
     /// Attempt to atomically claim the sync flag (false -> true). Returns
@@ -3295,24 +3299,45 @@ mod tests {
 
     #[test]
     fn test_polling_sub_struct_lock_and_invalidate() {
-        use std::sync::atomic::Ordering;
         use std::sync::mpsc;
         let polling = Polling::new();
-        assert!(!polling.is_syncing(Ordering::Acquire));
+        assert!(!polling.is_syncing());
         assert!(polling.current_track().is_none());
         assert!(polling.handle().is_none());
         assert!(polling.stop_tx().is_none());
         assert!(polling.try_claim());
-        assert!(polling.is_syncing(Ordering::Acquire));
+        assert!(polling.is_syncing());
         assert!(!polling.try_claim());
-        polling.set_syncing(false, Ordering::Release);
-        assert!(!polling.is_syncing(Ordering::Acquire));
+        polling.set_syncing(false);
+        assert!(!polling.is_syncing());
         let (tx, _rx) = mpsc::channel::<()>();
         *polling.stop_tx_mut() = Some(tx);
         assert!(polling.stop_tx().is_some());
         let handle = std::thread::Builder::new().spawn(|| {}).expect("spawn");
         *polling.handle_mut() = Some(handle);
         assert!(polling.handle().is_some());
+    }
+
+    /// Issue #759: the sync flag hardcodes Acquire-load / Release-store
+    /// (no `Ordering` parameter). A Release store of `true` must be
+    /// observable from another thread's Acquire load — the
+    /// poller-exit-then-observe chain the menu/tray rebuilds rely on —
+    /// and clearing the flag the same way must read back `false`.
+    #[test]
+    fn test_polling_sync_flag_publish_then_observe() {
+        use std::sync::Arc;
+        let polling = Arc::new(Polling::new());
+        assert!(!polling.is_syncing());
+        let polling_writer = Arc::clone(&polling);
+        let writer = std::thread::spawn(move || {
+            polling_writer.set_syncing(true);
+        });
+        writer.join().expect("writer thread panicked");
+        assert!(polling.is_syncing());
+        polling.set_syncing(false);
+        assert!(!polling.is_syncing());
+        assert!(polling.try_claim());
+        assert!(polling.is_syncing());
     }
 
     /// Issue #813 acceptance: the setup hook must persist a

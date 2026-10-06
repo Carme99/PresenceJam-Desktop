@@ -324,12 +324,12 @@ pub fn start_polling(
                     // (the only other emitter) marks `self_terminated: false`.
                     let _ = app.emit("sync-stopped", json!({ "self_terminated": true }));
                 }
-                if state_for_cleanup.polling.is_syncing(Ordering::Acquire) {
+                if state_for_cleanup.polling.is_syncing() {
                     log::warn!(
                         "[POLLING] start_polling: polling thread {:?} exited without stop_syncing; cleaning up sync state for owner",
                         this_tid
                     );
-                    state_for_cleanup.polling.set_syncing(false, Ordering::Release);
+                    state_for_cleanup.polling.set_syncing(false);
                 }
                 *state_for_cleanup.polling.stop_tx_mut() = None;
                 *state_for_cleanup.polling.thread_id_mut() = None;
@@ -345,7 +345,7 @@ pub fn start_polling(
         .map_err(|e| {
             log::error!("[POLLING] start_polling: thread spawn failed - {}", e);
             // Reset is_syncing so future start_polling calls are not permanently wedged.
-            state.polling.set_syncing(false, Ordering::Release);
+            state.polling.set_syncing(false);
             // Also clean up the stop channel sender and thread_id we just stored.
             *state.polling.stop_tx_mut() = None;
             *state.polling.thread_id_mut() = None;

@@ -24,7 +24,6 @@ use crate::commands;
 use crate::commands::shortcut_reason::ShortcutReason;
 use crate::config::{AppConfig, ShortcutsConfig};
 use serde::Serialize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_global_shortcut::{
@@ -631,7 +630,7 @@ fn handle_press(app: &AppHandle, slot: ShortcutSlot) {
         ShortcutSlot::ToggleSync => {
             let is_syncing = app
                 .try_state::<Arc<crate::AppState>>()
-                .map(|state| state.polling.is_syncing(Ordering::Acquire))
+                .map(|state| state.polling.is_syncing())
                 .unwrap_or(false);
             run_effect(app, sync_effect(is_syncing));
         }

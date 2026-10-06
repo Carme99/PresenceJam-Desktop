@@ -104,7 +104,7 @@ pub fn run(state: Arc<AppState>, app: AppHandle, shutdown: Arc<AtomicBool>) -> D
     //    (issue #941 drain, five-strike auth exit, manual stop);
     //    either is a clean-exit candidate and returns Ok(()).
     while !shutdown.load(Ordering::Acquire) {
-        if !state.polling.is_syncing(Ordering::Acquire) {
+        if !state.polling.is_syncing() {
             log::info!(
                 "{MODULE} run: poller self-exited (is_syncing=false); supervisor returning Ok"
             );

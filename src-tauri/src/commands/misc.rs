@@ -108,9 +108,7 @@ pub async fn update_tray_menu_state(app: AppHandle) -> Result<(), String> {
         let Some(state) = app_clone.try_state::<Arc<crate::AppState>>() else {
             return Err("AppState not registered".to_string());
         };
-        let is_syncing = state
-            .polling
-            .is_syncing(std::sync::atomic::Ordering::Acquire);
+        let is_syncing = state.polling.is_syncing();
         let current_track = state.polling.current_track().clone();
         tray::update_tray_menu(&app_clone, is_syncing, current_track)
     })

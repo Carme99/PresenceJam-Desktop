@@ -696,9 +696,7 @@ fn sync_state(state: &crate::AppState) -> SyncState {
     let (transient_failure_count, consecutive_network_failures) =
         crate::polling::load_failure_counters();
     SyncState {
-        is_syncing: state
-            .polling
-            .is_syncing(std::sync::atomic::Ordering::Acquire),
+        is_syncing: state.polling.is_syncing(),
         snoozed,
         snooze_minutes_left,
         manual_status_blocks: crate::polling::load_exit_snapshot().manual_status_blocks,
@@ -2438,14 +2436,13 @@ mod tests {
     /// all, so every assertion below fails on the old shape.
     #[test]
     fn test_sync_state_plants_survive_into_snapshot_json() {
-        use std::sync::atomic::Ordering;
         let _guard = crate::polling::global_state_lock();
         crate::polling::reset_sync_state();
         crate::polling::record_failure_counters(3, 7);
         crate::polling::record_gate_reason(Some("busy".to_string()));
         crate::polling::record_manual_status_blocks(true);
         let state = crate::AppState::default();
-        state.polling.set_syncing(true, Ordering::Release);
+        state.polling.set_syncing(true);
         {
             let cfg = crate::config::AppConfig {
                 snooze_until: Some(
