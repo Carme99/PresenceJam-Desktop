@@ -88,12 +88,12 @@ The UI is localized to **English, German, and French** via the i18n barrel
   Detached Logs/Settings windows own independent locale instances, so a `storage`
   listener converges them on the main window's write (the same pattern as the
   `#423` theme listener, with a same-value guard that stops a write loop) (#620).
-- **Native surfaces (4.7.0, #674):** the tray menu (`tray.rs`) and the native
+- **Native surfaces (4.7.0, #674):** the tray menu (`tray/`) and the native
   application menu (`menu.rs`) render from a Rust string table
   (`src-tauri/src/i18n.rs`: one `Strings` field per literal, with `EN`/`DE`/`FR`
   tables). An unknown `locale` falls back to English and is logged, and a Rust
   parity test fails when the three tables drift apart or a label is hard-coded
-  back into `tray.rs`/`menu.rs`.
+  back into `tray/`/`menu.rs`.
 - Known limitation: Rust-side error strings surfaced through `invoke()`
   rejections and event payloads remain English, as does the app name.
 
@@ -195,7 +195,7 @@ matrix builds **aarch64 macOS only** — Intel Macs never receive updates
 
 ## System Tray (v4.6)
 
-`tray.rs` builds the menu natively, from in-process state:
+`tray/mod.rs` builds the menu natively, from in-process state:
 
 - **Shuffle / Repeat are real toggles (#582).** Both are
   `CheckMenuItemBuilder` items; Shuffle's mark reads `LAST_SHUFFLE_STATE` and
@@ -222,7 +222,7 @@ matrix builds **aarch64 macOS only** — Intel Macs never receive updates
   Devices/Queue listings; those are display fetches, not playback commands.
 - **Refresh cadence:** the polling loop calls `update_tray_menu` after every
   iteration, behind a dedup key built by `tray_snapshot_for`
-  (`src-tauri/src/tray.rs::tray_snapshot_for`) from `(is_syncing, is_window_visible,
+  (`src-tauri/src/tray/dedup.rs::tray_snapshot_for`) from `(is_syncing, is_window_visible,
   "artist|title|is_playing", shuffle, repeat, snooze deadline + minute bucket)`.
   The mode atoms and the snooze key are in the key on purpose: a Shuffle/Repeat
   change made from another Spotify client has to force a rebuild, otherwise the

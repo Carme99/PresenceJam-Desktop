@@ -481,7 +481,7 @@ mod tests {
         // (`tray::handle_menu_event`) — this handler keeps only the
         // window-menu-only arms, so the graceful-shutdown routing is pinned
         // from the dispatcher side instead.
-        let src = include_str!("tray.rs");
+        let src = include_str!("tray/mod.rs");
         let sig_idx = src
             .find("pub fn handle_menu_event(")
             .expect("handle_menu_event must exist");

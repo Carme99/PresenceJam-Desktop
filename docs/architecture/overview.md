@@ -63,7 +63,7 @@ graph TD
         SpotifyAPI["spotify.rs<br/>Spotify Web API (Authorization Code + PKCE)"]
         TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]
         Keychain["keychain.rs<br/>OS keychain wrapper<br/>(Secret Service on Linux)"]
-        Tray["tray.rs / menu.rs<br/>system tray + app menu"]
+        Tray["tray/ / menu.rs<br/>system tray + app menu"]
     end
 
     subgraph Storage ["Storage"]

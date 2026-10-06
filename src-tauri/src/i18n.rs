@@ -9,7 +9,7 @@
 //! `tables_carry_an_identical_field_set` parses the struct declaration out of
 //! this file and fails when a table misses a field or falls out of order, and
 //! `no_user_visible_literal_stays_hard_coded` scans production literals in
-//! `tray.rs`/`menu.rs` and fails when user-visible copy is not in these tables.
+//! `tray/`/`menu.rs` and fails when user-visible copy is not in these tables.
 //! Deliberate exceptions, mirroring the frontend's documented limitation:
 //! error strings surfaced through `invoke()` rejections or event payloads
 //! (e.g. `playback-error`) stay English, and the app name ("PresenceJam",
@@ -1311,7 +1311,12 @@ mod tests {
     fn no_user_visible_literal_stays_hard_coded() {
         let mut offenders = Vec::new();
         for (module, src) in [
-            ("tray.rs", include_str!("tray.rs")),
+            ("tray/mod.rs", include_str!("tray/mod.rs")),
+            ("tray/cache.rs", include_str!("tray/cache.rs")),
+            ("tray/dedup.rs", include_str!("tray/dedup.rs")),
+            ("tray/snooze.rs", include_str!("tray/snooze.rs")),
+            ("tray/devices.rs", include_str!("tray/devices.rs")),
+            ("tray/actions.rs", include_str!("tray/actions.rs")),
             ("menu.rs", include_str!("menu.rs")),
         ] {
             offenders.extend(

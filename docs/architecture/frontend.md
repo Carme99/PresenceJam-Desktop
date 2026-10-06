@@ -247,7 +247,7 @@ PresenceJam-Desktop/
 │   │   ├── profanity.rs                   # Curated profanity word list
 │   │   ├── spotify.rs                      # PKCE OAuth client + Web API (ts-rs TS)
 │   │   ├── teams.rs                        # Device-code + MS Graph (ts-rs TS)
-│   │   ├── tray.rs                        # System tray + dedup snapshot (native CheckMenuItem Play/Pause + live tooltip, v4.0)
+│   │   ├── tray/                         # System tray menu (mod + cache/dedup/snooze/devices/actions, #756) (native CheckMenuItem Play/Pause + live tooltip, v4.0)
 │   │   ├── updater_bg.rs                  # Background update checks + stage_deferred_update / PendingUpdate (v4.0)
 │   │   ├── diagnostics.rs                 # Telemetry-free get_diagnostics_snapshot (v4.0)
 │   │   ├── menu.rs                        # macOS / Windows app menu bar
