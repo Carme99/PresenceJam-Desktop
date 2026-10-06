@@ -22,7 +22,7 @@
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
   import { pickReconnectProvider } from '$lib/utils/routeReconnect';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, WEEKDAY_KEYS, type Locale, type TKey } from '$lib/i18n';
+  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
   import { theme, density } from '$lib/stores/theme';
   import {
     NOTIFICATION_CLASSES,

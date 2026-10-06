@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { t } from '$lib/i18n';
-import { SHORTCUT_SLOTS, shortcutBindingsOf, type ShortcutSlot } from '$lib/stores/config';
+import { shortcutBindingsOf, type ShortcutSlot } from '$lib/stores/config';
 import type { AppConfig, ShortcutReason } from '$lib/types';
 
 /**
