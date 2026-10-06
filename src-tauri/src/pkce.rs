@@ -174,19 +174,6 @@ impl LaunchBinding {
     }
 }
 
-/// Redact a sensitive value for logging: `[REDACTED len N]`.
-#[allow(dead_code)]
-pub fn redact_len(s: &str) -> String {
-    format!("[REDACTED len {}]", s.len())
-}
-
-/// Redact showing only a 4-char prefix: `abcd…[REDACTED len N]`.
-#[allow(dead_code)]
-pub fn redact_prefix(s: &str) -> String {
-    let prefix: String = s.chars().take(4).collect();
-    format!("{}…[REDACTED len {}]", prefix, s.len())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
