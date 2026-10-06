@@ -5,25 +5,43 @@
 //! unchanged from the pre-split single file; this is a cut-and-paste refactor.
 //!
 //! Submodule map (each lists every `#[tauri::command]` it owns):
-//!   - `config` — load_config, save_config, update_config, export_config, import_config
-//!   - `spotify_auth` — start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual, refresh_spotify, is_spotify_client_secret_set, reconnect_spotify_session
-//!   - `playback` — get_spotify_granted_scopes (issue #770 deleted the seven
-//!     callerless playback_* / get_playback_* commands; the tray and the global
-//!     hotkeys call `playback::player_with_refresh_typed` / `player_with_refresh`
+//!   - `config` — `load_config`, `save_config`, `update_config`,
+//!     `import_working_hours`, `export_config`, `import_config`, `set_locale`
+//!   - `spotify_auth` — `start_spotify_auth`, `start_spotify_reconnect`,
+//!     `reconnect_spotify_session`, `complete_spotify_auth_manual`,
+//!     `refresh_spotify`, `is_spotify_client_secret_set`
+//!   - `playback` — `set_volume`, `seek`, `get_spotify_granted_scopes`
+//!     (issue #770 deleted the seven callerless playback_* /
+//!     get_playback_* commands; the tray and the global hotkeys call
+//!     `playback::player_with_refresh_typed` / `player_with_refresh`
 //!     directly, with no IPC hop)
-//!   - `teams_auth` — start_teams_auth_device_code, poll_teams_auth, refresh_teams, cancel_teams_auth_poll, get_teams_granted_scopes
-//!   - `sync` — start_syncing, stop_syncing, get_sync_status, app_exit
-//!   - `window` — show_window, set_autostart_enabled, open_logs_folder, open_external_url
-//!   - `onboarding` — is_onboarding_complete, complete_onboarding, reconnect_spotify, reconnect_teams
-//!   - `misc` — preview_status, update_tray_menu_state
-//!   - `logs` — get_recent_logs (LogViewer history backfill, issue #595)
-//!   - `shortcuts` — register_shortcuts, unregister_shortcuts, validate_shortcut (global hotkeys, issue #676)
-//!   - `status` — set_manual_status, clear_manual_status (issue #870, user-composed
-//!     Teams status with an expiry, mirrored by a Dashboard composer, a tray
-//!     "Recent statuses" submenu, and a `--set-status` CLI flag)
-//!   - `rules` — explain_rules (issue #868, track-rule dry-run tester; a
+//!   - `teams_auth` — `start_teams_auth_device_code`, `poll_teams_auth`,
+//!     `cancel_teams_auth_poll`, `refresh_teams`, `get_teams_granted_scopes`
+//!   - `sync` — `start_syncing`, `stop_syncing`, `get_sync_status`,
+//!     `refresh_status`, `app_exit`
+//!   - `window` — `show_window`, `set_autostart_enabled`, `open_logs_folder`,
+//!     `open_external_url`
+//!   - `onboarding` — `is_onboarding_complete`, `complete_onboarding`,
+//!     `reconnect_spotify`, `reconnect_teams`
+//!   - `misc` — `preview_status`, `update_tray_menu_state`, `relaunch_app`,
+//!     `reset_local_token_storage`
+//!   - `logs` — `get_recent_logs` (LogViewer history backfill, issue #595)
+//!   - `shortcuts` — `register_shortcuts`, `unregister_shortcuts`,
+//!     `validate_shortcut` (global hotkeys, issue #676)
+//!   - `status` — `set_manual_status`, `clear_manual_status_command`,
+//!     `load_manual_status_command` (issue #870, user-composed Teams status
+//!     with an expiry, mirrored by a Dashboard composer, a tray "Recent
+//!     statuses" submenu, and a `--set-status` CLI flag)
+//!   - `rules` — `explain_rules` (issue #868, track-rule dry-run tester; a
 //!     pure projection that runs the same walker the live `process_track`
 //!     path uses, against a Settings-typed synthetic track)
+//!   - `updater_bg` (in crate root, not `commands/`) —
+//!     `check_for_update`, `stage_deferred_update`,
+//!     `clear_failed_update_install`, `cancel_deferred_update`
+//!   - `diagnostics` (in crate root) — `get_diagnostics_snapshot`,
+//!     `save_diagnostics_snapshot`
+//!   - `history` (in crate root) — `get_presence_history`
+//!   - `lib.rs` (crate root) — `detach_pane`
 
 pub mod config;
 pub mod logs;
@@ -72,67 +90,128 @@ pub fn require_main_window(window: &tauri::Window) -> Result<(), String> {
     }
 }
 
-/// Issue #485 caller-location matrix: which commands are guarded by
-/// `require_main_window`, which are intentionally unguarded, and why.
+/// Issue #485 caller-location matrix: which commands are guarded by the
+/// main-window guard, which are intentionally unguarded, and why.
 /// Commands without a `tauri::Window` param cannot call the guard (it
 /// needs the caller label); their main-only status is justified by caller
 /// location instead -- every frontend call site lives in a main-window-only
 /// view (Dashboard, +page, UpdatePrompt, Diagnostics-as-main-route).
 /// Detached windows (`logs-detached` / `settings-detached`) host only
 /// Settings + LogViewer, whose invokes are the allowlist below.
-///
 /// GUARDED (take `window` and reject non-main first):
-/// start_syncing, stop_syncing, app_exit, refresh_status (sync.rs),
-/// start_spotify_auth, start_spotify_reconnect, complete_spotify_auth_manual,
-/// refresh_spotify (spotify_auth.rs), start_teams_auth_device_code,
-/// refresh_teams (teams_auth.rs), complete_onboarding (onboarding.rs),
-/// relaunch_app, reset_local_token_storage (misc.rs),
-/// stage_deferred_update (updater_bg.rs).
+/// `start_syncing`, `stop_syncing`, `app_exit`, `refresh_status` (sync.rs),
+/// `start_spotify_auth`, `start_spotify_reconnect`, `reconnect_spotify_session`
+/// (issue #771: the Settings Spotify reconnect card calls it, and Settings
+/// is a detached-hosting view, so caller location cannot justify it --
+/// `complete_spotify_auth_manual`, `refresh_spotify` (spotify_auth.rs),
+/// `start_teams_auth_device_code`, `refresh_teams` (teams_auth.rs),
+/// `complete_onboarding` (onboarding.rs), `relaunch_app`,
+/// `reset_local_token_storage` (misc.rs), `set_volume`, `seek` (playback.rs,
+/// issue #871: the Dashboard slider/progress bar and the tray Volume/Seek
+/// submenus all run in the main window, and the tray path must not be
+/// reachable from a popped-out pane), `set_manual_status`,
+/// `clear_manual_status_command` (status.rs, issue #870: the Dashboard
+/// composer and the tray "Set/Clear manual status" submenu handlers run in
+/// the main window only), `stage_deferred_update` (updater_bg.rs).
 ///
-/// show_window (+page main route), update_tray_menu_state (Dashboard),
-/// get_diagnostics_snapshot (Diagnostics-as-main-route), preview_status
-/// (Settings preview but read-only pure computation), get_sync_status
-/// (Dashboard/Settings status read), get_spotify/teams_granted_scopes
-/// (Settings scope readers, no side effect), clear_failed_update_install
-/// (Diagnostics dismiss; deletes only the marker file),
-/// is_onboarding_complete (issue #770: the boot gate in
-/// `src/routes/+page.svelte`, a main-window route). reset_local_token_storage
-/// is NOT in this list: it deletes the keychain key plus tokens.json and its
-/// sidecars, so it takes `window` and is guarded (issue #766).
+/// MAIN-ONLY BY CALLER LOCATION (no `window` param, so the guard cannot
+/// run; every `invoke()` call site lives in a main-window-only view):
+/// `show_window` (+page main route), `update_tray_menu_state` (Dashboard),
+/// `get_diagnostics_snapshot` (Diagnostics-as-main-route),
+/// `save_diagnostics_snapshot` (issue #771: Diagnostics `saveToFile()` in
+/// `src/lib/components/Diagnostics.svelte`, a main-route-only view --
+/// read-only `get_diagnostics_snapshot` shares the same route),
+/// `preview_status` (Settings preview but read-only pure computation),
+/// `get_sync_status` (Dashboard/Settings status read),
+/// `get_spotify_granted_scopes`/`get_teams_granted_scopes` (Settings scope
+/// readers, no side effect), `clear_failed_update_install` (Diagnostics
+/// dismiss; deletes only the marker file), `is_onboarding_complete`
+/// (issue #770: the boot gate in `src/routes/+page.svelte`, a main-window
+/// route; Onboarding.svelte's remount probe runs in the same main-window
+/// view), `check_for_update` + `cancel_deferred_update` (issue #771:
+/// UpdatePrompt is mounted only under `{#if isMainWindow}` in
+/// `src/routes/+layout.svelte`, the sole `invoke()` call sites for both;
+/// neither takes a `window` param, so the guard cannot run -- a detached
+/// pane has no UpdatePrompt instance and therefore never invokes them;
+/// adding a `window` param + guard is the defence-in-depth follow-up
+/// if a second call site ever appears), `get_presence_history` (Dashboard
+/// "Activity" card, `src/lib/components/Dashboard.svelte`),
+/// `load_manual_status_command` (Dashboard composer re-fetch,
+/// `src/lib/components/Dashboard.svelte`), `explain_rules` (Dashboard +
+/// Settings dry-run testers, `src/lib/components/Dashboard.svelte` +
+/// `src/lib/components/Settings.svelte` -- Settings is a detached-hosting
+/// view, but this command is a pure projection over a synthetic track with
+/// no keychain/token/config/process side effect, so caller reachability
+/// from a popped-out Settings pane is safe), `import_working_hours`
+/// (Settings quiet-hours import preview,
+/// `src/lib/components/Settings.svelte` -- same pure-preview rationale as
+/// `explain_rules`: it GETs Graph working hours and returns a preview, and
+/// only `update_config` persists), `detach_pane` (issue #771:
+/// the `popOut()` helper in `src/lib/stores/detach.ts`, called from the
+/// main window's Settings/LogViewer "Pop out" buttons; creating a
+/// same-label window twice is a Tauri-level no-op focus, so a detached
+/// caller gains nothing). `reset_local_token_storage` is NOT in this list:
+/// it deletes the keychain key plus tokens.json and its sidecars, so it
+/// takes `window` and is guarded (issue #766).
 ///
 /// INTENTIONALLY UNGUARDED -- detached-legit (invoked from popped-out
-/// Settings/LogViewer by design): reconnect_teams,
-/// poll_teams_auth, set_autostart_enabled, open_logs_folder,
-/// open_external_url (Teams verification-URL open during detached
-/// device-code flow), save_config (whole-document config write) and
-/// update_config (field-level config write, issue #535) — both are reached
-/// from Settings, which is one of the two detached-hosting views, as are
-/// export_config (reads the config, writes a user-chosen file) and
-/// import_config (replaces the config from a user-chosen file) — issue #673;
-/// get_recent_logs (LogViewer history backfill, issue #595) — the Logs pane
-/// is hosted in either window, and the file it tails is the same local file
-/// `open_logs_folder` already exposes to both, unredacted there and here
-/// alike (only the paste-able snapshot is redacted, #434).
+/// Settings/LogViewer by design): `reconnect_teams` (the Settings Spotify
+/// reconnect card's Teams counterpart, `src/lib/components/Settings.svelte`
+/// -- same detached-hosting view as the guarded `reconnect_spotify_session`,
+/// but it carries no `window` param, so the guard cannot run; it only
+/// clears the Teams token state and re-opens the device-code flow),
+/// `poll_teams_auth` (device-code poll from `src/lib/stores/authFlow.svelte.ts`,
+/// used by the main-window Onboarding/DeviceCodeBox/Reconnect views AND the
+/// detached Settings device-code flow -- same dual-window rationale as
+/// `open_external_url` below), `cancel_teams_auth_poll` (issue #771: the
+/// abort arm of the same device-code flow -- `resetTeamsAuthFlow()` in
+/// `src/lib/stores/authFlow.svelte.ts` invokes it unconditionally, and the
+/// detached-hosting Settings view calls that reset (`Settings.svelte:1461`),
+/// so a popped-out Settings pane aborts through the same path),
+/// `set_autostart_enabled` (Settings autostart
+/// toggle, `src/lib/components/Settings.svelte` -- a detached-hosting view),
+/// `open_logs_folder` (Settings + LogViewer, `Settings.svelte` +
+/// `LogViewer.svelte` -- the Logs pane is hosted in either window),
+/// `open_external_url` (Teams verification-URL open during detached
+/// device-code flow, `Onboarding.svelte` + `Reconnect.svelte` +
+/// `src/routes/+layout.svelte`), `load_config` (issue #771: `loadConfig()`
+/// in `src/lib/stores/config.ts`, called from Settings, Dashboard,
+/// Onboarding and the boot probe -- Settings is a detached-hosting view,
+/// so a popped-out Settings pane re-reads through the same path),
+/// `save_config` (whole-document config write) and `update_config`
+/// (field-level config write, issue #535) — both are reached from
+/// Settings, which is one of the two detached-hosting views, as are
+/// `export_config` (reads the config, writes a user-chosen file) and
+/// `import_config` (replaces the config from a user-chosen file) —
+/// issue #673; `get_recent_logs` (LogViewer history backfill, issue #595)
+/// — the Logs pane is hosted in either window, and the file it tails is
+/// the same local file `open_logs_folder` already exposes to both,
+/// unredacted there and here alike (only the paste-able snapshot is
+/// redacted, #434); `set_locale` (issue #771: the language picker lives in
+/// Settings via `src/lib/i18n/store.svelte.ts`, one of the two
+/// detached-hosting views, so a popped-out Settings pane must be able to
+/// switch language); `register_shortcuts`, `unregister_shortcuts`,
+/// `validate_shortcut` (issue #676: the Settings hotkey card lives in a
+/// detached-hosting view, and the pane that captures a combo must also be
+/// able to (re)register it -- the commands act on the persisted config and
+/// this process's own OS grabs only).
 ///
-/// set_locale (issue #770) — the language picker lives in Settings, one of
-/// the two detached-hosting views (`src/lib/i18n/store.svelte.ts`).
-///
-/// shortcuts: register_shortcuts, unregister_shortcuts, validate_shortcut
-/// (issue #676) — the Settings pane is one of the two detached-hosting views
-/// and hosts the hotkey card, so the pane that captures a combo must also be
-/// able to (re)register it; the commands act on the persisted config and this
-/// process's own OS grabs only.
-///
-/// REGISTERED BUT CALLERLESS (issue #770 review): `is_spotify_client_secret_set`
-/// (spotify_auth.rs) and `reconnect_spotify` (onboarding.rs) have no `invoke()`
-/// in `src/` or `tests/`, so they belong in neither list above — a command
-/// nothing can reach is not "main-only by caller location" and not
-/// "detached-legit". Reconnect.svelte reads the keychain state through
-/// `loadConfig` (#560) and the Spotify reconnect card in Settings.svelte calls
-/// `reconnect_spotify_session` (#554), which `tests/settings.test.ts` pins.
-/// Both are pending deletion (the same treatment the seven playback wrappers
-/// got here); `reconnect_spotify` is already deleted on the onboarding slice's
-/// branch, so whoever merges that one should not re-add it.
+/// REGISTERED BUT CALLERLESS (issue #771: REGISTERED in `generate_handler!`
+/// today, so the test above requires a matrix entry -- but with zero
+/// `invoke()` call sites in `src/` or `tests/` (only comments plus tests
+/// asserting their absence and one browser-spec mock), so neither is
+/// "main-only by caller location" nor "detached-legit". Both are pending
+/// deletion, the same treatment the seven playback wrappers got in #770):
+/// `is_spotify_client_secret_set` (read-only keychain-presence bool with no
+/// error channel -- a locked keyring reads as `false`, which is why #560
+/// replaced it with the config-carried tri-state; Reconnect.svelte and the
+/// boot gate document the bypass) and `reconnect_spotify`
+/// (`src-tauri/src/commands/onboarding.rs` -- superseded by the guarded
+/// `reconnect_spotify_session` (#554); the Settings Spotify card calls the
+/// successor, pinned by `tests/settings.test.ts`, which asserts the legacy
+/// name is never invoked. Note it clears tokens + deletes the keychain
+/// secret, so it must NOT be blessed as intended detached surface -- when
+/// its deletion lands, drop both entries here).
 #[cfg(test)]
 mod tests {
     /// Regression guard for issue #76: the `commands` module must declare
@@ -442,6 +521,164 @@ mod tests {
             "the staged-update discard must run before app.restart(), or the \
              restart's install_pending_on_exit reinstalls the staged payload \
              over the version just installed (issue #806)"
+        );
+    }
+
+    /// Issue #771: the caller-location matrix above must match the
+    /// registered command surface. The handler list in `lib.rs`'s
+    /// `generate_handler![...]` is the registered set; the backticked names
+    /// inside the matrix comment block (the `GUARDED` / `MAIN-ONLY` /
+    /// `INTENTIONALLY UNGUARDED` doc lines above this module) are the
+    /// documented set. A command registered without a matrix entry, or
+    /// listed in the matrix without being registered, fails this test.
+    ///
+    /// Both scans anchor from a marker (`generate_handler![` for the handler
+    /// list, the matrix block between its `GUARDED` marker and the
+    /// `#[cfg(test)]` line that closes the matrix comment for the matrix),
+    /// in the style of the `commands_in` source guards above -- never
+    /// boundary anchors. The matrix block lists every command backticked,
+    /// so the scan keeps every backticked token there verbatim --
+    /// including `seek`, which has no underscore and would be lost to any
+    /// underscore filter (the only prose exclusion is the lone `window`).
+    #[test]
+    fn test_guard_matrix_covers_every_registered_command() {
+        // Registered set: brace-count the `generate_handler![...]` list
+        // out of lib.rs, then take the command name after the last `::`
+        // (`commands::config::load_config` -> `load_config`; `detach_pane`
+        // has no module prefix and is kept whole).
+        fn registered_commands(lib: &str) -> Vec<String> {
+            let anchor = "generate_handler![";
+            let start = lib
+                .find(anchor)
+                .unwrap_or_else(|| panic!("lib.rs must contain `{anchor}` (issue #771)"));
+            let after = &lib[start + anchor.len()..];
+            let mut depth = 1usize;
+            let mut end = None;
+            for (i, ch) in after.char_indices() {
+                match ch {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let list = &after[..end.unwrap_or_else(|| {
+                panic!("generate_handler![...] must be bracket-balanced (issue #771)")
+            })];
+            list.split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(|entry| {
+                    entry
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or_else(|| panic!("handler entry `{entry}` must name a command"))
+                        .trim()
+                        .to_string()
+                })
+                .collect()
+        }
+
+        // Documented set: backticked tokens inside the matrix comment block
+        // only. The block starts at the `GUARDED` marker and ends at the
+        // `#[cfg(test)]` line that closes the matrix comment; that span holds
+        // all four command lists (guarded, main-only, detached-legit,
+        // callerless) and nothing else backticked except prose quotes
+        // (`invoke()`, file paths, `{#if isMainWindow}`, `generate_handler!`),
+        // which the token filter below already drops (spaces, slashes, dots,
+        // parens, braces, bangs), plus the lone prose `window` (the
+        // `tauri::Window` param), which is
+        // excluded by name -- every command name but `seek` carries an
+        // underscore. A non-command backtick added to the block in command
+        // shape would fail loudly on the stale side instead of passing
+        // silently.
+        fn matrix_commands(source: &str) -> Vec<String> {
+            let start_marker = "GUARDED (take `window`";
+            let end_marker = "#[cfg(test)]";
+            let start = source.find(start_marker).unwrap_or_else(|| {
+                panic!("commands/mod.rs must contain the guard-matrix GUARDED marker (issue #771)")
+            });
+            let after = &source[start..];
+            let end_rel = after.find(end_marker).unwrap_or_else(|| {
+                panic!("commands/mod.rs must contain the guard-matrix end marker (issue #771)")
+            });
+            let block = &after[..end_rel];
+            let mut found = Vec::new();
+            let mut rest = block;
+            while let Some(open) = rest.find('`') {
+                let after_open = &rest[open + 1..];
+                let Some(close) = after_open.find('`') else {
+                    break;
+                };
+                let token = after_open[..close].trim().to_string();
+                // `window` is prose (the `tauri::Window` param), not a
+                // command; every command name is multi-word except `seek`,
+                // so single-word tokens other than `seek` are prose.
+                if (token == "seek" || token.contains('_'))
+                    && !token.contains(' ')
+                    && !token.contains('/')
+                    && !token.contains('.')
+                    && !token.contains('(')
+                    && !token.contains('!')
+                    && !token.contains('{')
+                    && token != "window"
+                {
+                    found.push(token);
+                }
+                rest = &after_open[close + 1..];
+            }
+            found.sort();
+            found.dedup();
+            found
+        }
+
+        let registered = registered_commands(include_str!("../lib.rs"));
+        let matrix = matrix_commands(include_str!("mod.rs"));
+
+        // Scanner sanity: the parse must really walk the handler list
+        // rather than finding nothing, and the exact registered count is
+        // pinned so a quiet add/remove cannot slip past review.
+        assert_eq!(
+            registered.len(),
+            54,
+            "generate_handler! must register exactly 54 commands -- if this \
+             changed, update the matrix, the submodule map, and this count \
+             together (issue #771)"
+        );
+        for probe in ["load_config", "detach_pane", "explain_rules", "seek"] {
+            assert!(
+                registered.contains(&probe.to_string()),
+                "the handler scan must see `{probe}` (issue #771)"
+            );
+        }
+
+        let mut missing: Vec<&String> = registered
+            .iter()
+            .filter(|name| !matrix.contains(name))
+            .collect();
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "commands registered in lib.rs but missing from the guard matrix \
+             in commands/mod.rs: {missing:?} -- add each with its \
+             guarded/main-only/detached-legit justification (issue #771)"
+        );
+
+        let mut stale: Vec<&String> = matrix
+            .iter()
+            .filter(|name| !registered.contains(name))
+            .collect();
+        stale.sort();
+        assert!(
+            stale.is_empty(),
+            "commands listed in the guard matrix but not registered in \
+             lib.rs generate_handler!: {stale:?} -- drop the stale entry \
+             (issue #771)"
         );
     }
 }
