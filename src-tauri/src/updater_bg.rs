@@ -335,8 +335,12 @@ impl Default for PendingUpdate {
 pub struct StageProgress {
     /// Bytes downloaded so far. The plugin's callback reports the running
     /// total, not the size of the chunk just read.
+    // Issue #765: serde_json delivers these as JS `number`, not `bigint`.
+    // Byte counts stay well under 2^53 for any downloadable payload.
+    #[ts(type = "number")]
     pub downloaded: u64,
     /// Total payload size, when the server sent a `Content-Length`.
+    #[ts(type = "number | null")]
     pub total: Option<u64>,
 }
 

@@ -54,10 +54,10 @@ function storedConfig(): AppConfig {
       presence_gate: false
     },
     polling: {
-      default_interval_seconds: BigInt(45),
-      minimum_interval_seconds: BigInt(20),
-      max_interval_seconds: BigInt(120),
-      expiry_buffer_seconds: BigInt(5)
+      default_interval_seconds: 45,
+      minimum_interval_seconds: 20,
+      max_interval_seconds: 120,
+      expiry_buffer_seconds: 5
     },
     logging: { enabled: false, log_level: 'Debug' },
     autostart: false,
@@ -87,7 +87,7 @@ function storedConfig(): AppConfig {
 const wizardFields = {
   spotify_client_id: 'new-client-id',
   status_format: 'New {artist}',
-  default_interval_seconds: BigInt(15),
+  default_interval_seconds: 15,
   autostart: true
 };
 
@@ -98,7 +98,7 @@ describe('mergeWizardConfig (#531, #542)', () => {
     expect(merged.spotify.client_id).toBe('new-client-id');
     expect(merged.spotify.client_secret_set).toBe(true);
     expect(merged.teams.status_format).toBe('New {artist}');
-    expect(merged.polling.default_interval_seconds).toBe(BigInt(15));
+    expect(merged.polling.default_interval_seconds).toBe(15);
     expect(merged.autostart).toBe(true);
   });
 
@@ -125,9 +125,9 @@ describe('mergeWizardConfig (#531, #542)', () => {
     expect(merged.teams.presence_gate).toBe(false);
 
     // Polling bounds the wizard used to pin to 10/60, and the logging level.
-    expect(merged.polling.minimum_interval_seconds).toBe(BigInt(20));
-    expect(merged.polling.max_interval_seconds).toBe(BigInt(120));
-    expect(merged.polling.expiry_buffer_seconds).toBe(BigInt(5));
+    expect(merged.polling.minimum_interval_seconds).toBe(20);
+    expect(merged.polling.max_interval_seconds).toBe(120);
+    expect(merged.polling.expiry_buffer_seconds).toBe(5);
     expect(merged.logging).toEqual({ enabled: false, log_level: 'Debug' });
 
     // The backend owns the schema version; the wizard must not reset it.
@@ -136,12 +136,12 @@ describe('mergeWizardConfig (#531, #542)', () => {
 
   it('does not mutate the stored config it was given', () => {
     const stored = storedConfig();
-    const before = JSON.stringify(stored, (_k, v) => (typeof v === 'bigint' ? String(v) : v));
+    const before = JSON.stringify(stored);
 
     mergeWizardConfig(stored, wizardFields);
 
     expect(
-      JSON.stringify(stored, (_k, v) => (typeof v === 'bigint' ? String(v) : v))
+      JSON.stringify(stored)
     ).toBe(before);
     expect(stored.spotify.client_id).toBe('stored-client-id');
     expect(stored.teams.status_format).toBe('Stored {artist}');
@@ -499,7 +499,7 @@ describe('wizard poll-interval clamp (#983)', () => {
     // Stored value 120 is above the slider's max="60" — pre-fix this left
     // the label reading "120s" with the thumb pinned at 60.
     const cfg = structuredClone(defaultConfig) as AppConfig;
-    cfg.polling.default_interval_seconds = BigInt(120);
+    cfg.polling.default_interval_seconds = 120;
 
     mockBackend(false, cfg);
     // Both auth phases must report 'done' so the Continue buttons render
@@ -537,7 +537,7 @@ describe('wizard poll-interval clamp (#983)', () => {
 
   it('#983 does not show the clamp hint for an in-band stored value', async () => {
     const cfg = structuredClone(defaultConfig) as AppConfig;
-    cfg.polling.default_interval_seconds = BigInt(30);
+    cfg.polling.default_interval_seconds = 30;
 
     mockBackend(false, cfg);
     setSpotifyPhase('done');

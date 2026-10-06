@@ -30,8 +30,9 @@ import type { DiagnosticsSnapshot } from '$lib/types';
 
 /**
  * A snapshot shaped like the command's reply. Wire numbers arrive as JS
- * numbers (ts-rs types them `bigint`), so the fixture uses numbers — the
- * page renders them and "Copy diagnostics" stringifies them.
+ * numbers (issue #765 — the generated types read `number`, not ts-rs's
+ * `bigint` default), so the fixture uses numbers — the page renders them
+ * and "Copy diagnostics" stringifies them.
  */
 function snapshotWith(quarantined: boolean, backup: string | null): DiagnosticsSnapshot {
   return {

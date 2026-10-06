@@ -87,7 +87,7 @@ beforeEach(() => {
 });
 
 describe('config store runtime (#420, #425)', () => {
-  it('saveConfig stores bigints, not raw numbers', async () => {
+  it('saveConfig round-trips plain numbers, no bigint conversion (#765)', async () => {
     const { get } = await import('svelte/store');
     const cfg = await import('$lib/stores/config');
     invoke.mockResolvedValueOnce({
@@ -107,9 +107,11 @@ describe('config store runtime (#420, #425)', () => {
       'max_interval_seconds',
       'expiry_buffer_seconds'
     ] as const) {
-      expect(typeof out.polling[k]).toBe('bigint');
-      expect(typeof get(cfg.configStore).polling[k]).toBe('bigint');
+      expect(typeof out.polling[k]).toBe('number');
+      expect(typeof get(cfg.configStore).polling[k]).toBe('number');
     }
+    expect(out.polling.default_interval_seconds).toBe(30);
+    expect(() => JSON.stringify(out)).not.toThrow();
   });
 
   it('configStore never aliases defaultConfig', async () => {
@@ -135,14 +137,14 @@ describe('config store runtime (#420, #425)', () => {
       polling: { default_interval_seconds: 42 }
     });
     const out = await cfg.loadConfig();
-    expect(out.polling.default_interval_seconds).toBe(BigInt(42));
+    expect(out.polling.default_interval_seconds).toBe(42);
     for (const k of [
       'default_interval_seconds',
       'minimum_interval_seconds',
       'max_interval_seconds',
       'expiry_buffer_seconds'
     ] as const) {
-      expect(typeof out.polling[k]).toBe('bigint');
+      expect(typeof out.polling[k]).toBe('number');
     }
     expect(out.polling.minimum_interval_seconds).toBe(
       cfg.defaultConfig.polling.minimum_interval_seconds
@@ -173,10 +175,10 @@ describe('config store runtime (#420, #425)', () => {
   });
 
   /**
-   * `logging.max_file_size_mb` joined the ts-rs `u64` fields in 4.7.0 (#673),
-   * so it needs the same two-way treatment polling gets: a bigint in the store
-   * (what the backend types are) and a plain number in the payload (a bigint
-   * cannot be encoded, a NaN serializes as null and Rust's `u64` rejects it).
+   * `logging.max_file_size_mb` joined the `u64` number fields in 4.7.0 (#673,
+   * #765), so it needs the same two-way treatment polling gets: a plain
+   * number in the store (what the backend delivers) and a plain number in
+   * the payload (a NaN serializes as null and Rust's `u64` rejects it).
    * A pre-4.7 or hand-edited file omits the key entirely — it must land on the
    * default, not `undefined`.
    */
@@ -189,8 +191,8 @@ describe('config store runtime (#420, #425)', () => {
 
     const loaded = await cfg.loadConfig();
 
-    expect(loaded.logging.max_file_size_mb).toBe(BigInt(10));
-    expect(typeof loaded.logging.max_file_size_mb).toBe('bigint');
+    expect(loaded.logging.max_file_size_mb).toBe(10);
+    expect(typeof loaded.logging.max_file_size_mb).toBe('number');
     expect(loaded.logging.keep_files).toBe(7);
 
     const payload = cfg.toSavePayload(loaded);

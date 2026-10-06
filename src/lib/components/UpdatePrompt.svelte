@@ -257,9 +257,9 @@
         requestId !== activeStageRequestId &&
         requestId !== stagedStageRequestId
       ) return;
-      // ts-rs types a Rust `u64` as `bigint`; these drive a byte counter and a
-      // percentage, so narrow at the boundary rather than widening the whole
-      // component to bigint arithmetic (issue #765).
+      // Issue #765: the payload's byte counts are plain JS numbers (the Rust
+      // side overrides ts-rs's `bigint` default with `number`); narrow
+      // defensively at the boundary anyway.
       stageDownloaded = Number(event.payload.downloaded);
       stageTotal = event.payload.total === null ? null : Number(event.payload.total);
     }).then((fn) => {
