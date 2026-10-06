@@ -129,7 +129,7 @@ fn conclude_raced_stop(state: &AppState) -> bool {
     log::warn!(
         "{CMD} start_syncing: stop channel already closed when the poller started - a stop won the race; clearing is_syncing instead of publishing a dead session"
     );
-    state.polling.set_syncing(false, Ordering::Release);
+    state.polling.set_syncing(false);
     *state.polling.thread_id_mut() = None;
     true
 }
@@ -227,8 +227,7 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
     // concurrent poller. Checking `handle` is the source of truth for
     // liveness (see state.rs ThreadId ownership check for the companion
     // fix).
-    let needs_drain =
-        { state.polling.handle().is_some() || state.polling.is_syncing(Ordering::Acquire) };
+    let needs_drain = { state.polling.handle().is_some() || state.polling.is_syncing() };
     if needs_drain {
         log::info!("{CMD} start_syncing: previous thread still considered live (handle present or is_syncing true); draining");
         let state_clone = Arc::clone(&state);
@@ -271,7 +270,7 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
             "{CMD} start_syncing: spawn_blocking panicked - {:?}; rolling back is_syncing",
             e
         );
-        state.polling.set_syncing(false, Ordering::Release);
+        state.polling.set_syncing(false);
         *state.polling.thread_id_mut() = None;
         format!("start_syncing spawn_blocking panicked: {:?}", e)
     })?
@@ -281,7 +280,7 @@ pub async fn start_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result
             "{CMD} start_syncing: polling start failed - {}; rolling back is_syncing",
             e
         );
-        state.polling.set_syncing(false, Ordering::Release);
+        state.polling.set_syncing(false);
         *state.polling.thread_id_mut() = None;
         e
     })?;
@@ -357,7 +356,7 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
                     }
                     // Join completed — clear the sync flag and thread_id
                     // that were kept set during the grace period.
-                    state_for_flag.polling.set_syncing(false, Ordering::Release);
+                    state_for_flag.polling.set_syncing(false);
                     *state_for_flag.polling.thread_id_mut() = None;
                     return;
                 }
@@ -382,14 +381,14 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
                     );
                 }
             }
-            state_for_flag.polling.set_syncing(false, Ordering::Release);
+            state_for_flag.polling.set_syncing(false);
             *state_for_flag.polling.thread_id_mut() = None;
         })
         .await;
         if let Err(e) = res {
             log::error!("{CMD} {}: spawn_blocking panicked: {:?}", context, e);
             // Ensure flag is cleared even if the blocking task panicked
-            state.polling.set_syncing(false, Ordering::Release);
+            state.polling.set_syncing(false);
             *state.polling.thread_id_mut() = None;
         }
     } else {
@@ -406,14 +405,14 @@ async fn stop_polling_and_join(state: Arc<AppState>, context: &'static str) {
         // the sentinel `start_syncing_with` publishes. Clearing the flag
         // there would stop the poller the user just asked for, so the flag
         // is only ever cleared when no owner at all is stored.
-        if state.polling.is_syncing(Ordering::Acquire) {
+        if state.polling.is_syncing() {
             let owner = *state.polling.thread_id();
             match owner {
                 None => {
                     log::warn!(
                         "{CMD} {context}: no polling handle and no owner thread while is_syncing is set; clearing wedged flag"
                     );
-                    state.polling.set_syncing(false, Ordering::Release);
+                    state.polling.set_syncing(false);
                     *state.polling.thread_id_mut() = None;
                 }
                 Some(tid) => {
@@ -455,7 +454,7 @@ async fn stop_polling_and_join_for_exit(state: Arc<AppState>, context: &'static 
                         Ok(()) => log::info!("{CMD} {}: polling thread ended", ctx),
                         Err(e) => log::error!("{CMD} {}: polling thread panicked: {:?}", ctx, e),
                     }
-                    state_for_flag.polling.set_syncing(false, Ordering::Release);
+                    state_for_flag.polling.set_syncing(false);
                     *state_for_flag.polling.thread_id_mut() = None;
                     return None;
                 }
@@ -489,7 +488,7 @@ async fn stop_polling_and_join_for_exit(state: Arc<AppState>, context: &'static 
                         e
                     ),
                 }
-                state_detached.polling.set_syncing(false, Ordering::Release);
+                state_detached.polling.set_syncing(false);
                 *state_detached.polling.thread_id_mut() = None;
             });
         }
@@ -540,7 +539,7 @@ pub async fn app_exit(
     super::require_main_window(&window)?;
     log::debug!("{CMD} app_exit: ENTRY");
 
-    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing();
 
     if is_syncing {
         log::info!("{CMD} app_exit: stopping polling first");
@@ -632,7 +631,7 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     let spotify_guard = state.tokens.spotify();
     let config_guard = state.config.get();
     let teams_guard = state.tokens.teams();
-    let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+    let is_syncing = state.polling.is_syncing();
 
     let current_track = track_guard.clone();
     // A pause is a state change, not a stop: the poller keeps the observed
@@ -741,7 +740,7 @@ pub async fn refresh_status(
     super::require_main_window(&window)?;
     log::debug!("{CMD} refresh_status: ENTRY");
 
-    if !state.polling.is_syncing(Ordering::Acquire) {
+    if !state.polling.is_syncing() {
         return Err("Sync is not running".to_string());
     }
 
@@ -749,7 +748,7 @@ pub async fn refresh_status(
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         crate::polling::run_oneshot(&state_inner, &app_clone);
-        let is_syncing = state_inner.polling.is_syncing(Ordering::Acquire);
+        let is_syncing = state_inner.polling.is_syncing();
         let current_track = state_inner.polling.current_track().clone();
         if let Err(e) = crate::tray::update_tray_menu(&app_clone, is_syncing, current_track) {
             log::warn!("{CMD} refresh_status: failed to update tray menu: {}", e);
@@ -870,7 +869,6 @@ mod tests {
     #[test]
     fn test_start_syncing_refuses_without_both_sessions() {
         use super::{missing_session_code, AppState};
-        use std::sync::atomic::Ordering;
 
         let state = AppState::new();
         assert_eq!(
@@ -879,7 +877,7 @@ mod tests {
             "with no session at all the guard must name Spotify first (issue #809)"
         );
         assert!(
-            !state.polling.is_syncing(Ordering::Acquire),
+            !state.polling.is_syncing(),
             "a refused start must leave the polling flag false (issue #809)"
         );
 
@@ -975,7 +973,6 @@ mod tests {
     #[test]
     fn test_stop_in_the_claim_window_leaves_the_flag_for_the_start() {
         use super::{publish_start_sentinel, stop_polling_and_join, AppState};
-        use std::sync::atomic::Ordering;
         use std::sync::Arc;
 
         let state = Arc::new(AppState::new());
@@ -1000,7 +997,7 @@ mod tests {
         ));
 
         assert!(
-            state.polling.is_syncing(Ordering::Acquire),
+            state.polling.is_syncing(),
             "a stop in the claim window must leave is_syncing true for the \
              start that owns it (issue #941)"
         );
@@ -1016,11 +1013,10 @@ mod tests {
     #[test]
     fn test_wedged_flag_without_any_owner_is_still_recovered() {
         use super::{stop_polling_and_join, AppState};
-        use std::sync::atomic::Ordering;
         use std::sync::Arc;
 
         let state = Arc::new(AppState::new());
-        state.polling.set_syncing(true, Ordering::Release);
+        state.polling.set_syncing(true);
         assert!(state.polling.thread_id().is_none());
 
         tauri::async_runtime::block_on(stop_polling_and_join(
@@ -1029,7 +1025,7 @@ mod tests {
         ));
 
         assert!(
-            !state.polling.is_syncing(Ordering::Acquire),
+            !state.polling.is_syncing(),
             "an ownerless flag must still be cleared so a future start is not \
              permanently wedged (issue #395/#941)"
         );
@@ -1215,7 +1211,6 @@ mod tests {
     #[test]
     fn test_start_concludes_a_stop_that_won_the_race() {
         use super::{conclude_raced_stop, publish_start_sentinel, AppState};
-        use std::sync::atomic::Ordering;
 
         let state = AppState::new();
 
@@ -1231,7 +1226,7 @@ mod tests {
              the session (issue #941)"
         );
         assert!(
-            state.polling.is_syncing(Ordering::Acquire),
+            state.polling.is_syncing(),
             "a start that won the race keeps is_syncing true (issue #941)"
         );
 
@@ -1245,7 +1240,7 @@ mod tests {
              won (issue #941, F2)"
         );
         assert!(
-            !state.polling.is_syncing(Ordering::Acquire),
+            !state.polling.is_syncing(),
             "concluding the raced stop must clear is_syncing, or the UI reports \
              Syncing while nothing polls (issue #941, F2)"
         );

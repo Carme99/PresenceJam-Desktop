@@ -18,7 +18,6 @@
 //! per issue #72. The driver owns state lifetime; `poll_once` mutates
 //! state as a side effect.
 
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -171,7 +170,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                 // Continue if no stop signal
             }
         }
-        if !state.polling.is_syncing(Ordering::Acquire) {
+        if !state.polling.is_syncing() {
             log::info!("[POLLING] polling_loop: is_syncing=false, breaking loop");
             break;
         }
@@ -224,7 +223,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                 // itself, so this costs no Spotify request. Skipped when the
                 // cache is cold — the Devices/Up Next submenus then show what
                 // they last showed, exactly like any other rebuild.
-                let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+                let is_syncing = state.polling.is_syncing();
                 let current_track = state.polling.current_track().clone();
                 if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
                     log::warn!(
@@ -373,7 +372,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         }
 
         // Post-iteration tray sync — independent of the API result.
-        let is_syncing = state.polling.is_syncing(Ordering::Acquire);
+        let is_syncing = state.polling.is_syncing();
         let current_track = state.polling.current_track().clone();
         if let Err(e) = tray::update_tray_menu(&app, is_syncing, current_track) {
             log::warn!("[POLLING] polling_loop: failed to update tray menu: {}", e);
@@ -450,7 +449,7 @@ mod tests {
         // driver; `stop_polling` only has to drop the stored sender.
         let (tx, rx) = mpsc::channel::<()>();
         *state.polling.stop_tx_mut() = Some(tx);
-        state.polling.set_syncing(true, Ordering::Release);
+        state.polling.set_syncing(true);
 
         assert!(
             matches!(
@@ -478,7 +477,7 @@ mod tests {
              Sync may not block for up to one poll interval (issue #10)"
         );
         assert!(
-            state.polling.is_syncing(Ordering::Acquire),
+            state.polling.is_syncing(),
             "stop_polling must leave is_syncing set for the join side: a \
              concurrent Stop->Start must not be able to claim the flag while \
              the old thread is still in blocking HTTP (#69)"

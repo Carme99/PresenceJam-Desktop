@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Every change merged after 5.0.0 lands here until the release cut, which renames this
 section to the released version and opens a fresh empty one (see `docs/RELEASING.md` §2).
 
+### Changed
+- **Polling sync flag hardcodes its Acquire/Release ordering (#759).** `Polling::is_syncing()` and `Polling::set_syncing(value)` no longer take an `Ordering` parameter — the Acquire load / Release store pair lives inside the type, so no call site can silently drop the poller-exit → tray/UI happens-before chain with a weaker ordering. `try_claim()` keeps its AcqRel CAS. No behaviour change.
+
 ## [5.0.0] - 2026-10-06
 
 ### Added
