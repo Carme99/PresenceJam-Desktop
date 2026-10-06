@@ -44,6 +44,13 @@ objc2-core-services = { version = "~0.3", default-features = false, features = [
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_System_Console", "Win32_Storage_FileSystem", "Media_Control", "Storage_Streams"] }
 windows-collections = "0.3"
 
+# No tauri test-feature dev-dep here: the EMPTY upstream test feature flips
+# cfg(any(test, feature=test)) in tauris lib, compiling tauri::test (whose own
+# mock_context skews against unified tauri-utils) into the rlib; that breaks the
+# Windows loader (0xc0000139) and the macOS cargo check leg (E0063). The
+# wrapper-binding test in poll_once.rs drives the shared core with a
+# CapturingEmitter plus a production-binding pin instead.
+
 [dependencies]
 tauri = { version = "~2.11", features = ["tray-icon"] }
 tauri-plugin-deep-link = "~2.4"
