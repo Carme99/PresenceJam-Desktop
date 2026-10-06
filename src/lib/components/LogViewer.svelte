@@ -646,26 +646,14 @@
     font-size: var(--fs-xs);
     color: var(--fg-subtle);
   }
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: var(--sp-1);
-    height: 100%;
-    min-height: 240px;
-    color: var(--fg-subtle);
-    font-family: var(--font-sans);
-  }
-  .empty-state p {
-    color: var(--fg-muted);
-    font-size: var(--fs-base);
-  }
-  .empty-state .hint { font-size: var(--fs-sm); }
+  /* #961: `.empty-state` and its `p` / `.hint` modifiers are the shared
+     app.css primitive now. Only the placement stays local: the block fills
+     its scroll area, so it takes the full height too. */
+  .log-list .empty-state { height: 100%; }
 
   .log-entry {
     display: grid;
-    grid-template-columns: 88px max-content 1fr;
+    grid-template-columns: var(--log-col-ts) max-content 1fr;
     align-items: flex-start;
     gap: var(--sp-3);
     padding: var(--sp-2) var(--sp-3);
@@ -688,11 +676,13 @@
     font-size: var(--fs-xs);
     margin-right: var(--sp-2);
   }
+  /* #960: the badge size is its own token, so compact density shrinks the
+     glyph without touching the density type scale. */
   .level-badge {
     justify-self: start;
     padding: 2px 8px;
     border-radius: var(--r-sm);
-    font-size: var(--fs-xs);
+    font-size: var(--badge-fs);
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.04em;

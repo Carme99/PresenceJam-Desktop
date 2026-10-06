@@ -194,3 +194,181 @@ describe('no component re-declares a button box (#903)', () => {
     expect(offenders).toEqual([]);
   });
 });
+/**
+ * #960 — fixed control, artwork and log-column sizes are design tokens.
+ *
+ * Compact density (`[data-density='compact']` in `src/app.css`) overrode only
+ * the `--sp-*` / `--fs-*` / `--lh-*` scales, so every component consuming
+ * those tokens tightened with the toggle — but layout-bearing sizes written
+ * as literals (36px icon buttons, 88px album art, the 88px log timestamp
+ * column, the 28px banner dismiss button) stayed at comfortable sizes and
+ * the toggle read as inconsistent rather than as a density change.
+ *
+ * Fails before the fix: `.album-art` (Dashboard), `.log-entry` (LogViewer),
+ * `.dismiss-btn` (UpdatePrompt) and `.info-icon` (Reconnect) carry literal
+ * `px` sizes, Dashboard re-states the 36px icon box locally, and no
+ * `--ctl-h` / `--art-lg` / `--badge-fs` / `--log-col-ts` / `--spinner-size`
+ * tokens exist at all.
+ */
+
+/** The `[data-density='compact']` override block of `src/app.css`. */
+function compactDensityBlock(): string {
+  const start = appCss.indexOf("[data-density='compact'] {");
+  return appCss.slice(start, appCss.indexOf('}', start));
+}
+
+/** The `Npx` value `--token` carries inside `block` (`null` when absent). */
+function tokenPx(name: string, block: string): number | null {
+  const match = new RegExp(`${name}:\\s*(\\d+(?:\\.\\d+)?)px;`).exec(block);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * `css` with its `@media` blocks removed. Responsive floors (Dashboard's
+ * 640px 32px icon rule) stay literal on purpose — they are viewport answers,
+ * not density sizes — so the literal scan below must not see them.
+ */
+function outsideMedia(css: string): string {
+  let out = '';
+  let i = 0;
+  while (i < css.length) {
+    const at = css.indexOf('@media', i);
+    if (at < 0) { out += css.slice(i); break; }
+    out += css.slice(i, at);
+    const open = css.indexOf('{', at);
+    let depth = 0;
+    let j = open;
+    for (; j < css.length; j++) {
+      if (css[j] === '{') depth++;
+      else if (css[j] === '}') { depth--; if (depth === 0) { j++; break; } }
+    }
+    i = j;
+  }
+  return out;
+}
+
+/** Bodies of rules in `css` whose selector is exactly `selector`. */
+function exactRules(css: string, selector: string): string[] {
+  const bodies: string[] = [];
+  for (const rule of outsideMedia(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (rule[1].trim() === selector) bodies.push(rule[2]);
+  }
+  return bodies;
+}
+
+/** The value a `prop` declaration carries inside a rule `body` (`''` when absent). */
+function declaredProp(body: string, prop: string): string {
+  return new RegExp(`${prop}:\\s*([^;]+);`).exec(body)?.[1]?.trim() ?? '';
+}
+
+describe('fixed control and artwork sizes are tokens (#960)', () => {
+  it('declares the size tokens, with control heights at 32px or more', () => {
+    expect(tokenPx('--ctl-h', appCss)).toBe(36);
+    expect(tokenPx('--ctl-h-sm', appCss)).toBe(32);
+    expect(tokenPx('--art-lg', appCss)).toBe(88);
+    expect(tokenPx('--badge-fs', appCss)).toBe(11);
+    expect(tokenPx('--spinner-size', appCss)).toBe(24);
+    expect(tokenPx('--log-col-ts', appCss)).toBe(88);
+    // Every `--ctl-h*` value anywhere in the stylesheet — comfortable and
+    // every override — stays a usable hit target (issue step 4).
+    for (const m of appCss.matchAll(/(--ctl-h[\w-]*):\s*(\d+(?:\.\d+)?)px;/g)) {
+      expect(Number(m[2]), `${m[1]} must stay a >=32px hit target`).toBeGreaterThanOrEqual(32);
+    }
+  });
+
+  it('shrinks only artwork, badge and spinner in compact density', () => {
+    const compact = compactDensityBlock();
+    expect(tokenPx('--art-lg', compact)).toBe(72);
+    expect(tokenPx('--badge-fs', compact)).toBe(10);
+    expect(tokenPx('--spinner-size', compact)).toBe(20);
+    // Interactive sizes and layout columns never shrink: no override at all.
+    expect(compact).not.toMatch(/--ctl-h\s*:/);
+    expect(compact).not.toMatch(/--ctl-h-sm\s*:/);
+    expect(compact).not.toMatch(/--log-col-ts\s*:/);
+  });
+
+  it('routes the listed selectors through those tokens instead of literals', () => {
+    /** [file, exact selector, size properties #960 tokenises]. */
+    const TOKENISED: Array<[string, string, string[]]> = [
+      ['src/app.css', '.icon-btn', ['width', 'height']],
+      ['src/lib/components/Dashboard.svelte', '.album-art', ['width', 'height']],
+      ['src/lib/components/Dashboard.svelte', '.track-card', ['grid-template-columns']],
+      ['src/lib/components/Dashboard.svelte', '.not-playing-icon', ['width', 'height']],
+      ['src/lib/components/LogViewer.svelte', '.log-entry', ['grid-template-columns']],
+      ['src/lib/components/LogViewer.svelte', '.level-badge', ['font-size']],
+      ['src/lib/components/Settings.svelte', '.swatch', ['height']],
+      ['src/lib/components/UpdatePrompt.svelte', '.dismiss-btn', ['width', 'height']],
+      ['src/lib/components/Reconnect.svelte', '.info-icon', ['width', 'height']],
+    ];
+    const PX = /\d+(?:\.\d+)?px/;
+    const offenders: string[] = [];
+    for (const [file, selector, props] of TOKENISED) {
+      for (const body of exactRules(applicableCss(file), selector)) {
+        for (const prop of props) {
+          const value = declaredProp(body, prop);
+          if (value && PX.test(value)) offenders.push(`${file}: ${selector} { ${prop}: ${value}; }`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('leaves Dashboard icon buttons on the shared token rule', () => {
+    // The local `.icon-btn` base re-stated the global 36px box, so the pane
+    // keeps only its detached-dot and primary variants and inherits the size
+    // from the tokenised `app.css` rule (the 640px media floor stays literal).
+    expect(exactRules(applicableCss('src/lib/components/Dashboard.svelte'), '.icon-btn')).toEqual([]);
+  });
+});
+
+/**
+ * #961 — one shared empty-state primitive, one shared spinner.
+ *
+ * `LogViewer.svelte` reserved 240px for its `.empty-state` while
+ * `Diagnostics.svelte` carried its own 120px copy plus a 60px `.small`
+ * variant, so the same "nothing yet" moment rendered at three different
+ * block sizes — and Diagnostics' loading branch showed the collecting label
+ * with no progress affordance at all, reading as stuck rather than pending.
+ *
+ * Fails before the fix: two `.empty-state` definitions exist under `src/`
+ * (and none in `src/app.css`), and the loading branch renders no spinner.
+ */
+describe('shared empty-state and spinner primitives (#961)', () => {
+  /** Files holding an exact-selector rule for `selector` (media stripped: the
+   * reduced-motion `.spinner` override lives in `app.css` by design). */
+  function definingFiles(selector: string): string[] {
+    const files: string[] = [];
+    for (const file of styleFiles()) {
+      if (exactRules(applicableCss(file), selector).length > 0) files.push(file);
+    }
+    return files;
+  }
+
+  it('defines .spinner and .empty-state exactly once, in src/app.css', () => {
+    expect(definingFiles('.spinner')).toEqual(['src/app.css']);
+    expect(definingFiles('.empty-state')).toEqual(['src/app.css']);
+  });
+
+  it('keeps the shared size modifiers in src/app.css', () => {
+    for (const modifier of ['.empty-state.small', '.empty-state p', '.empty-state .hint']) {
+      expect(definingFiles(modifier), `${modifier} must be shared`).toContain('src/app.css');
+    }
+  });
+
+  it('leaves panes only their documented placement overrides', () => {
+    // The full `.empty-state` copies are gone; what stays local is the shape
+    // the shared rule cannot carry — LogViewer's full-height fill of its
+    // scroll area, Diagnostics' left-pinned load-error hint.
+    const local: string[] = [];
+    for (const file of styleFiles()) {
+      if (file === TOKEN_FILE) continue;
+      for (const rule of outsideMedia(applicableCss(file)).matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        if (rule[1].includes('.empty-state')) local.push(`${file}: ${rule[1].trim()}`);
+      }
+    }
+    expect(local.sort()).toEqual([
+      'src/lib/components/Diagnostics.svelte: .empty-state .hint',
+      'src/lib/components/LogViewer.svelte: .log-list .empty-state',
+    ]);
+  });
+});

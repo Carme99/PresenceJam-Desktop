@@ -1475,10 +1475,9 @@
     text-align: left;
   }
 
-  .icon-btn {
-    width: 36px;
-    height: 36px;
-  }
+  /* #960: the size comes from the shared `app.css` `.icon-btn` rule, which
+     paints `var(--ctl-h)`. This pane keeps only its detached-dot and
+     primary variants. */
   /* C7: dot badge marks a nav button whose pane is popped out. */
   .icon-btn.detached {
     position: relative;
@@ -1653,13 +1652,13 @@
 
   .track-card {
     display: grid;
-    grid-template-columns: 88px 1fr;
+    grid-template-columns: var(--art-lg) 1fr;
     gap: var(--sp-4);
     align-items: flex-start;
   }
   .album-art {
-    width: 88px;
-    height: 88px;
+    width: var(--art-lg);
+    height: var(--art-lg);
     border-radius: var(--r-md);
     object-fit: cover;
     background: var(--bg-elevated);
@@ -1893,7 +1892,7 @@
     gap: var(--sp-2);
   }
   .not-playing-icon {
-    width: 88px; height: 88px;
+    width: var(--art-lg); height: var(--art-lg);
     background: var(--bg-elevated);
     border-radius: var(--r-lg);
     display: inline-flex;

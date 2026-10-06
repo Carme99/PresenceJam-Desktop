@@ -69,6 +69,15 @@
   --preview-light-2: #FFFFFF;
   /* Height of a preview swatch. Density-scaled below like the other sizes. */
   --swatch-h: 64px;
+  /* Fixed control and artwork sizes (#960). The interactive heights stay put
+     in compact density — only artwork, badge and spinner shrink there, so
+     every hit target keeps at least 32px in both densities. */
+  --ctl-h: 36px;
+  --ctl-h-sm: 32px;
+  --art-lg: 88px;
+  --badge-fs: 11px;
+  --spinner-size: 24px;
+  --log-col-ts: 88px;
 }
 
 /* ---------- Density: compact (#680) ----------
@@ -100,6 +109,12 @@
   --lh-normal: 1.4;
   /* #904: the appearance picker's swatch shrinks with the rest of the card. */
   --swatch-h: 48px;
+  /* #960: only the non-interactive sizes shrink — artwork, badge and
+     spinner. Control heights and layout columns keep their comfortable
+     values, so every hit target stays at least 32px. */
+  --art-lg: 72px;
+  --badge-fs: 10px;
+  --spinner-size: 20px;
 }
 
 /* ---------- Theme: dark (default) ---------- */
@@ -375,13 +390,14 @@ button:disabled {
   padding: var(--sp-1);
 }
 
-/* Icon-only square button (header actions) */
+/* Icon-only square button (header actions). The size is the #960 `--ctl-h`
+ * token, so the button keeps a 36px hit target in both densities. */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: var(--ctl-h);
+  height: var(--ctl-h);
   padding: 0;
   background: transparent;
   color: var(--fg-muted);
@@ -491,11 +507,12 @@ input[type='radio'] {
   white-space: nowrap;
   border: 0;
 }
-/* Busy indicator. `--spinner-size` lets a pane scale it without declaring a
- * second `.spinner` rule (issue #751). */
+/* Busy indicator. `--spinner-size` is the #960 sizing token: a pane scales
+ * the spinner by overriding the token, never by declaring a second
+ * `.spinner` rule (issue #751). */
 .spinner {
-  width: var(--spinner-size, 24px);
-  height: var(--spinner-size, 24px);
+  width: var(--spinner-size);
+  height: var(--spinner-size);
   border: 3px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
@@ -503,6 +520,24 @@ input[type='radio'] {
   margin: 0 auto;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* Empty-state primitive (issue #961). Promoted out of LogViewer (which
+ * reserved 240px) and Diagnostics (which carried its own 120px copy plus a
+ * 60px `.small` variant), so the same "nothing yet" moment renders one
+ * block: a centred column at the LogViewer height. Panes keep a placement
+ * override only — LogViewer's full-height fill of its scroll area,
+ * Diagnostics' left-pinned load-error hint. */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  min-height: 240px;
+  color: var(--fg-subtle);
+}
+.empty-state.small { min-height: 60px; }
+.empty-state p { color: var(--fg-muted); }
+.empty-state .hint { font-size: var(--fs-sm); }
 
 /* A pane's sections stack with the card primitive. */
 .pane-card {

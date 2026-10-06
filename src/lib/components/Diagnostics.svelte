@@ -198,6 +198,7 @@
   <div class="content">
     {#if loading}
       <div class="empty-state">
+        <div class="spinner" aria-hidden="true"></div>
         <p>{t('diagnostics.collecting')}</p>
       </div>
     {:else if loadError}
@@ -489,16 +490,7 @@
     word-break: break-all;
     line-height: 1.5;
   }
-
-  .empty-state {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: var(--sp-1);
-    min-height: 120px;
-    color: var(--fg-subtle);
-  }
-  .empty-state.small { min-height: 60px; }
-  .empty-state p { color: var(--fg-muted); }
+  /* #961: `.empty-state` (and `.small` / `p` / `.hint`) is the shared app.css
+     primitive now. The load-error hint keeps its own placement — centred
+     column, left-pinned text — everything else comes from the primitive. */
 </style>
