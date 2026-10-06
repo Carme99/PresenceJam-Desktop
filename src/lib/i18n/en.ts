@@ -97,6 +97,9 @@ export const en = {
   'logs.level.error': 'Error',
   'logs.count_one': '{count} entry',
   'logs.count_other': '{count} entries',
+  // #1154: `{key}_few` — English has no CLDR `few`, so this mirrors
+  // `_other` for Dict parity (only Polish selects `few` of the eight).
+  'logs.count_few': '{count} entries',
   'logs.showingOf': 'Showing {shown} of {total}',
   'logs.jumpToLatest': 'Jump to latest',
   'logs.popOut': 'Pop out',
@@ -740,6 +743,8 @@ export const en = {
   // "Minute" and French "minute" in the singular.
   'dashboard.snoozeStatusStart_one': 'Sync paused for {minutes} minute',
   'dashboard.snoozeStatusStart_other': 'Sync paused for {minutes} minutes',
+  // #1154: as above — no CLDR `few`; mirrors `_other` for Dict parity.
+  'dashboard.snoozeStatusStart_few': 'Sync paused for {minutes} minutes',
 
   // --- #739: the wizard's view name, announced on navigation (there is no
   // heading bar above the step, so the step title cannot stand in for it).

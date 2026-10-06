@@ -79,9 +79,11 @@ export const WEEKDAY_KEYS: Readonly<Record<number, TKey>> = {
 type StripPluralSuffix<K> = K extends `${infer Base}_one` ? Base : never;
 
 /**
- * Base keys that carry a `_one`/`_other` pair — the argument type of
- * `tCount`. Derived from the dictionary, so a key cannot be plural-formatted
- * without its plural entries existing.
+ * Base keys that carry a `_one`/`_other` pair plus a `_few` entry (#1154) —
+ * the argument type of `tCount`. Derived from the dictionary, so a key
+ * cannot be plural-formatted without its plural entries existing. Only
+ * Polish selects CLDR `few` of the eight locales; every other dictionary's
+ * `_few` mirrors its `_other` for `Dict` parity.
  */
 export type PluralKey = StripPluralSuffix<Extract<TKey, `${string}_one`>>;
 
@@ -110,16 +112,16 @@ export function t(
 
 /**
  * Plural-aware `t()` (#616). `key` is the base key; the dictionary holds
- * `{key}_one` / `{key}_other`, and any other category the locale reports for
- * `count` falls back to `_other`. `count` is interpolated as `{count}` —
- * an explicit `count` in `params` wins.
+ * `{key}_one` / `{key}_other` / `{key}_few` (#1154), and any other category
+ * the locale reports for `count` falls back to `_other`. `count` is
+ * interpolated as `{count}` — an explicit `count` in `params` wins.
  *
- * Known limitation (#984, follow-up #1154): locales with more than two CLDR
- * categories (Polish `few`/`many`, e.g. "2 wpisy" vs "5 wpisów") still
- * resolve those counts through `_other`. The fallback is always grammatical
- * enough to ship ("5 wpisów" is correct; "2 wpisów" is understandable but
- * not idiomatic) — full `_few`/`_many` support wants `{key}_few` entries in
- * all eight dictionaries plus a `PluralKey` widening, and is tracked there.
+ * #1154: Polish `few` (2–4, 22–24…, e.g. "2 wpisy", "2 minuty") resolves to
+ * the real form. No distinct `_many` key: for the covered nouns CLDR `many`
+ * (0, 5–21…, e.g. "5 wpisów", "5 minut") IS the genitive plural `_other`
+ * already carries, so `many` keeps falling through to `_other`. Locales
+ * whose rules can report `many` for huge magnitudes (fr/es/it/pt at 10⁶+)
+ * never reach it either — the covered counts are small UI numbers.
  */
 export function tCount(
   key: PluralKey,

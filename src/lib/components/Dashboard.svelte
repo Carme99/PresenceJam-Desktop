@@ -1146,7 +1146,8 @@
       <div class="snooze-chip">
         <!-- #1120: `tCount` so a one-minute snooze announces the singular
              ("Sync paused for 1 minute") instead of "for 1 minutes". The
-             dictionary carries the `_one` / `_other` pair in all three locales. -->
+             dictionary carries the `_one` / `_other` / `_few` trio (#1154)
+             in all eight locales — only Polish selects `few`. -->
         <span class="snooze-status" role="status">
           {tCount('dashboard.snoozeStatusStart', entryAnnouncementMinutes, {
             minutes: entryAnnouncementMinutes
