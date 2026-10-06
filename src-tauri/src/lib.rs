@@ -979,6 +979,39 @@ async fn handle_spotify_callback<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Issue #1122: a `presencejam://` callback that arrives before
+/// `app.manage(state.clone())` has run would be dropped by the
+/// unmanaged-state guard in `handle_deep_link`. The guard buffers the URL
+/// here (at most one; a second early callback overwrites) and the setup
+/// closure drains it right after `manage()` via `take_pending_deep_link()`
+/// and re-dispatches through `handle_deep_link_from_app`, so the replay is
+/// the first delivery the dedup gate sees (the early arm returns before the
+/// `deep_link_seen` claim, never claiming the key).
+///
+/// `parking_lot::Mutex` has no poisoning, so `lock()` is infallible — no
+/// `unwrap()` on a fallible path (AGENTS.md §4). The buffered URL carries
+/// the OAuth code, so it is never logged; only its presence is.
+static PENDING_DEEP_LINK: std::sync::LazyLock<Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// The `LazyLock` slot behind the pending deep-link buffer.
+fn pending_deep_link_slot() -> &'static Mutex<Option<String>> {
+    &PENDING_DEEP_LINK
+}
+
+/// Buffer one pre-manage deep-link URL, overwriting any earlier one (issue
+/// #1122). Logs nothing here — the caller logs presence only, never the URL,
+/// code, verifier, or state contents (AGENTS.md §7).
+fn buffer_pending_deep_link(url: &str) {
+    *pending_deep_link_slot().lock() = Some(url.to_string());
+}
+
+/// Drain the buffered pre-manage deep-link URL, if any (issue #1122). Single
+/// replay: the slot is empty after the take, so a second call is a no-op.
+fn take_pending_deep_link() -> Option<String> {
+    pending_deep_link_slot().lock().take()
+}
+
 /// Production entry point for [`handle_deep_link`]: binds the managed-state
 /// lookup and the token-exchange spawn to a live `AppHandle`.
 ///
@@ -1031,8 +1064,9 @@ fn handle_deep_link_from_app<R: tauri::Runtime>(url: &str, app: AppHandle<R>) {
 /// `manage()`.
 ///
 /// A lookup returning `None` is therefore the arm the test drives: it is
-/// what a pre-`manage()` caller would see, and the callback is logged and
-/// dropped instead of panicking the thread meant to redeem it.
+/// what a pre-`manage()` caller would see, and the callback is buffered for
+/// replay after `manage()` (issue #1122) instead of panicking the thread
+/// meant to redeem it.
 /// [`handle_deep_link_from_app`] supplies `try_state` and the spawn; its
 /// binder is deliberately UNPINNED by tests (no hermetic `AppHandle` exists
 /// outside Tauri's `test` feature, which #937's rework removed because it
@@ -1092,9 +1126,15 @@ where
                 // before `manage()` (both call sites are in the setup
                 // closure, after it), so this is defence-in-depth.
                 let Some(app_state) = managed_state() else {
+                    // Issue #1122: buffer the URL for replay after `manage()`.
+                    // This arm sits before the `deep_link_seen` claim, so the
+                    // key is never claimed here and the replay is the first
+                    // delivery the dedup gate sees. Presence-only logging — the
+                    // URL carries the OAuth code (AGENTS.md §7).
+                    buffer_pending_deep_link(url);
                     log::warn!(
                         "[DEEP_LINK] handle_deep_link: AppState not registered yet — \
-                         ignoring forwarded callback (issue #937)"
+                         buffering forwarded callback for replay (issues #937/#1122)"
                     );
                     return;
                 };
@@ -2539,6 +2579,15 @@ pub fn run() {
 
             let state = Arc::new(AppState::new());
             app.manage(state.clone());
+            // Issue #1122: replay a deep link buffered by the unmanaged-state
+            // guard in `handle_deep_link`. Past `manage()`, so the guard
+            // passes and the normal path (dedup → validation → dispatch)
+            // runs. Presence-only log — never the URL contents (AGENTS.md §7).
+            // No-op when nothing arrived early. Single replay: `take()` drains.
+            if let Some(pending_url) = take_pending_deep_link() {
+                log::info!("[DEEP_LINK] replaying buffered callback");
+                handle_deep_link_from_app(&pending_url, app.handle().clone());
+            }
 
             // C3(c) "install on quit": register the deferred-update staging
             // state (updater plugin is desktop-only, so this follows suit).
@@ -3101,6 +3150,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Serialises the tests that touch the process-wide `PENDING_DEEP_LINK`
+    /// slot (issue #1122): the #937 unmanaged-state test arms it as a side
+    /// effect while the #1122 tests assert exact buffer contents, so two of
+    /// them landing on parallel test threads could flake. Poison-tolerant
+    /// acquire, mirroring the `SERIAL` pattern in `platform/focus.rs`.
+    static PENDING_DEEP_LINK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_onboarding_cache_lock_and_invalidate() {
@@ -4522,11 +4578,24 @@ mod tests {
     /// regression cover.
     ///
     /// The lookup is injected, so a lookup returning `None` — what a
-    /// pre-`manage()` caller would see — is the arm driven here: the
-    /// callback must be dropped with a log line and nothing dispatched.
+    /// pre-`manage()` caller would see — is the arm driven here: the callback
+    /// must be buffered for replay after `manage()` (issue #1122), never
+    /// dispatched for a half-initialised state, and must never take the
+    /// callback thread down with it.
+    ///
+    /// Companion assertion: the arm must not claim the #799 `deep_link_seen`
+    /// key (that claim sits below the guard), so the post-setup replay is the
+    /// first delivery the dedup gate sees.
     #[test]
     fn handle_deep_link_tolerates_missing_state_issue_937() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
+        // Hold the slot serial lock: the early arm buffers as a side effect,
+        // and the #1122 tests assert exact buffer contents. Drain on entry
+        // and exit so no placeholder leaks into a sibling test.
+        let _serial = PENDING_DEEP_LINK_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = take_pending_deep_link();
 
         let dispatched = std::cell::RefCell::new(Vec::<(String, Option<String>)>::new());
         // A syntactically-valid callback URL. The unmanaged-state guard fires
@@ -4553,11 +4622,21 @@ mod tests {
         );
         assert!(
             dispatched.borrow().is_empty(),
-            "an unmanaged AppState must drop the callback, never spawn a token \
-             exchange for a half-initialised state (issue #937) — got {} \
+            "an unmanaged AppState must not dispatch the callback, never spawn a token \
+             exchange for a half-initialised state (issues #937/#1122) — got {} \
              dispatch(es)",
             dispatched.borrow().len()
         );
+        // Issue #1122 changed the "dropped" half of this contract: the early
+        // arm buffers the URL for the post-`manage()` replay instead of
+        // discarding it. Assert the buffering here so a revert to drop fails.
+        assert!(
+            take_pending_deep_link().is_some_and(|u| u.contains("code=test-code")),
+            "an unmanaged AppState must buffer the callback for replay after \
+             manage(), not discard it (issue #1122)"
+        );
+        // Leave the slot drained: the companion #1122 tests start clean.
+        assert_eq!(take_pending_deep_link(), None);
     }
 
     /// The other arm of issue #937: with a managed `AppState`, a callback
@@ -4607,6 +4686,135 @@ mod tests {
             dispatched.borrow()[0],
             ("the-code".to_string(), Some(state_param)),
             "the dispatched pair must be the one the URL carried (issue #937)"
+        );
+    }
+
+    /// Issue #1122: a callback arriving before `manage()` must be buffered
+    /// and replayed, not dropped. Drives `handle_deep_link` pre-manage (the
+    /// #937 seam: lookup returns `None`), asserts nothing dispatched and the
+    /// URL is buffered; then drains via `take_pending_deep_link()` and
+    /// re-drives through the same `handle_deep_link` path with a managed
+    /// state, asserting the callback completes exactly once. Fails pre-fix
+    /// (pre-fix the early arm drops the URL, so the drain finds nothing).
+    #[test]
+    fn handle_deep_link_buffers_pre_manage_callback_and_replays_issue_1122() {
+        // The slot is process-wide; hold the serial lock for the whole test
+        // so a parallel #937/#1122 sibling cannot interleave a buffer write.
+        let _serial = PENDING_DEEP_LINK_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Start clean and leave clean: drain entry and exit.
+        let _ = take_pending_deep_link();
+
+        // Build a callback that clears every gate once managed: bind a
+        // launch secret + verifier and stage the pending auth, mirroring the
+        // #937 managed-state test.
+        let state = Arc::new(AppState::new());
+        let verifier = crate::pkce::generate_verifier();
+        let secret = {
+            let binding = state
+                .launch_binding
+                .get()
+                .expect("AppState::new() initialises the launch binding");
+            binding.bind_verifier(&verifier);
+            binding.launch_secret.clone()
+        };
+        let state_param = format!("csrf.{secret}");
+        *state.pending.spotify_mut() = Some(PendingSpotifyAuth {
+            verifier,
+            state: state_param.clone(),
+            client_id: "cid".to_string(),
+            redirect_uri: "presencejam://callback".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(600),
+        });
+        let url = format!("presencejam://callback?code=replay-code&state={state_param}");
+
+        // 1. Pre-manage delivery: no dispatch, URL buffered.
+        let dispatched = std::cell::RefCell::new(Vec::<(String, Option<String>)>::new());
+        handle_deep_link(
+            &url,
+            || None,
+            |code, state| {
+                dispatched.borrow_mut().push((code, state));
+            },
+        );
+        assert!(
+            dispatched.borrow().is_empty(),
+            "a pre-manage callback must not dispatch before setup completes \
+             (issue #1122)"
+        );
+        assert!(
+            take_pending_deep_link().is_some(),
+            "a pre-manage callback must be buffered for replay after manage() \
+             (issue #1122) — pre-fix this was dropped"
+        );
+
+        // 2. Post-manage replay through the same path completes auth.
+        // Re-buffer the same URL: the assertion drain above consumed it,
+        // mirroring the setup-closure `take()` that feeds the production
+        // replay; driving `handle_deep_link` with a managed state is the
+        // same path that replay takes.
+        buffer_pending_deep_link(&url);
+        let replayed = take_pending_deep_link();
+        assert!(
+            replayed.is_some(),
+            "the replay must drain the buffered URL (issue #1122)"
+        );
+        let replayed_dispatch = std::cell::RefCell::new(Vec::<(String, Option<String>)>::new());
+        handle_deep_link(
+            &url,
+            || Some(state.clone()),
+            |code, state| {
+                replayed_dispatch.borrow_mut().push((code, state));
+            },
+        );
+        assert_eq!(
+            replayed_dispatch.borrow().len(),
+            1,
+            "the replayed callback must complete auth exactly once (issue #1122)"
+        );
+        assert_eq!(
+            replayed_dispatch.borrow()[0],
+            ("replay-code".to_string(), Some(state_param)),
+            "the replayed pair must be the one the URL carried (issue #1122)"
+        );
+
+        // 3. Single replay: the slot is drained, a second take is a no-op.
+        assert_eq!(
+            take_pending_deep_link(),
+            None,
+            "the buffer must drain exactly once — no retry loop (issue #1122)"
+        );
+    }
+
+    /// Issue #1122: only one URL is retained — a second early callback
+    /// overwrites rather than queues.
+    #[test]
+    fn handle_deep_link_second_early_callback_overwrites_issue_1122() {
+        let _serial = PENDING_DEEP_LINK_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _ = take_pending_deep_link();
+
+        handle_deep_link(
+            "presencejam://callback?code=first-code&state=csrf.first-secret",
+            || None,
+            |_, _| {},
+        );
+        handle_deep_link(
+            "presencejam://callback?code=second-code&state=csrf.second-secret",
+            || None,
+            |_, _| {},
+        );
+        let buffered = take_pending_deep_link();
+        assert!(
+            buffered.is_some_and(|u| u.contains("code=second-code")),
+            "a second early callback must overwrite, not queue (issue #1122)"
+        );
+        assert_eq!(
+            take_pending_deep_link(),
+            None,
+            "the overwrite must still drain exactly once (issue #1122)"
         );
     }
 }
