@@ -11,7 +11,13 @@
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
   import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, DEFAULT_PROFANITY_PLACEHOLDER, type ShortcutSlot } from '$lib/stores/config';
-  import type { AppConfig, ShortcutReason, SyncStatus } from '$lib/types';
+  import type {
+    AppConfig,
+    ShortcutReason,
+    ShortcutsStatus,
+    SlotRegistration,
+    SyncStatus
+  } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -774,9 +780,13 @@
   // unsaved-changes banner cover them too. Registration is a separate step:
   // only the OS can say whether a grab was accepted.
 
-  /** What the backend reported for one slot's last registration pass. */
-  type SlotRegistration = { accelerator: string | null; registered: boolean; error: ShortcutReason | null };
-  type ShortcutStatus = Record<ShortcutSlot, SlotRegistration>;
+  /* Re-exported from the ts-rs generated bindings (issue #784) rather than
+     hand-copied here: `SlotRegistration` is `src/lib/types-generated/
+     SlotRegistration.ts` and `ShortcutsStatus` covers both slots in
+     `./ShortcutsStatus.ts`. `ShortcutSlot` stays frontend-owned (it is the
+     wire-name union in `config.ts`, not a ts-rs export), and the local name
+     `ShortcutsStatus` (singular) is dropped — the backend calls both slots'
+     outcome `ShortcutsStatus`, so one spelling now covers both sides. */
 
   const SHORTCUT_LABEL_KEYS: Record<ShortcutSlot, TKey> = {
     toggle_playback: 'settings.shortcutTogglePlayback',
@@ -784,7 +794,7 @@
   };
 
   const NO_REGISTRATION: SlotRegistration = { accelerator: null, registered: false, error: null };
-  let shortcutStatus = $state<ShortcutStatus>({
+  let shortcutStatus = $state<ShortcutsStatus>({
     toggle_playback: { ...NO_REGISTRATION },
     toggle_sync: { ...NO_REGISTRATION }
   });
@@ -1035,7 +1045,7 @@
   }
 
   /** Both slots' status from one IPC payload. */
-  function statusFrom(raw: unknown): ShortcutStatus {
+  function statusFrom(raw: unknown): ShortcutsStatus {
     return {
       toggle_playback: registrationFrom(raw, 'toggle_playback'),
       toggle_sync: registrationFrom(raw, 'toggle_sync')
