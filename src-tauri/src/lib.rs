@@ -791,6 +791,7 @@ pub mod calendar;
 pub mod commands;
 pub mod config;
 pub mod diagnostics;
+pub mod events;
 pub mod history;
 pub mod http;
 pub mod i18n;

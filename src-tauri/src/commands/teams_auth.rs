@@ -87,7 +87,10 @@ fn emit_teams_auth_event(app: &AppHandle, event: TeamsAuthEvent) {
             // frontend can drive a single banner that handles both providers.
             let _ = app.emit(
                 "teams-auth-persist-warning",
-                serde_json::json!({ "provider": "teams", "message": message }),
+                crate::events::AuthPersistWarning {
+                    provider: "teams".to_string(),
+                    message,
+                },
             );
         }
         TeamsAuthEvent::Complete => {

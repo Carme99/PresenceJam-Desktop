@@ -72,7 +72,10 @@ pub(crate) fn emit_spotify_auth_event<R: tauri::Runtime>(
         SpotifyAuthEvent::PersistWarning { message } => {
             let _ = app.emit(
                 "spotify-auth-persist-warning",
-                serde_json::json!({ "provider": "spotify", "message": message }),
+                crate::events::AuthPersistWarning {
+                    provider: "spotify".to_string(),
+                    message,
+                },
             );
         }
         SpotifyAuthEvent::Complete => {

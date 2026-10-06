@@ -54,67 +54,14 @@ pub use state::{start_polling, stop_polling};
 // integration tests (when they land) will exercise it directly.
 pub use daemon::run as run_daemon;
 
-use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-/// Severity tier for `error` events emitted to the frontend.
-///
-/// Used by `Dashboard.svelte` and other listeners to decide between a
-/// transient toast (warning) and a persistent banner (error). See
-/// issue #79. A transient error that the polling loop will retry
-/// (e.g. a 401 that triggers token refresh, a 429 that triggers
-/// back-off) is `warning`; an error that ended the current attempt
-/// with no automatic recovery is `error`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum ErrorSeverity {
-    Warning,
-    Error,
-}
-
-/// Recovery action advertised by an error event, when the producer has one.
-///
-/// This is optional because the polling loop's ordinary retry warnings do
-/// not carry a provider-specific action. Teams uses it to distinguish a
-/// scheduled automatic retry from failures that require user action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ErrorRecovery {
-    RetryScheduled,
-    ReconnectRequired,
-    UserActionRequired,
-}
-
-/// Canonical payload for the frontend `error` event.
-///
-/// Recovery-aware producers call [`emit_error_with_recovery`] directly;
-/// ordinary producers use [`emit_error`], which delegates to the same
-/// canonical emitter. The wire shape and optional recovery discriminator
-/// therefore cannot drift between providers.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct ErrorEventPayload {
-    pub(crate) source: String,
-    pub(crate) message: String,
-    pub(crate) severity: ErrorSeverity,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) recovery: Option<ErrorRecovery>,
-}
-
-impl ErrorEventPayload {
-    fn new(
-        source: &str,
-        message: String,
-        severity: ErrorSeverity,
-        recovery: Option<ErrorRecovery>,
-    ) -> Self {
-        Self {
-            source: source.to_string(),
-            message,
-            severity,
-            recovery,
-        }
-    }
-}
+/// Typed `error`-event surface (issue #762). The canonical payload and its
+/// enums live in [`crate::events`] so ts-rs can export them; the names are
+/// re-exported here so every existing `polling::ErrorX` path keeps working.
+/// `ErrorEventPayload` stays as the alias the emitters and tests already use.
+pub(crate) use crate::events::ErrorEvent as ErrorEventPayload;
+pub(crate) use crate::events::{ErrorRecovery, ErrorSeverity};
 
 /// Event sink used by the canonical error emitters. Production delegates to
 /// Tauri's emitter; tests capture the same production payload without a GUI

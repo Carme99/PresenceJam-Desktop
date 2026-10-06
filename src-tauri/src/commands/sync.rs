@@ -521,7 +521,9 @@ pub async fn stop_syncing_with(state: Arc<AppState>, app: &AppHandle) -> Result<
     // (polling/state.rs) and must not report the user's own click back to them.
     let _ = app.emit(
         "sync-stopped",
-        serde_json::json!({ "self_terminated": false }),
+        crate::events::SyncStopped {
+            self_terminated: false,
+        },
     );
 
     log::info!("{CMD} stop_syncing: SUCCESS");

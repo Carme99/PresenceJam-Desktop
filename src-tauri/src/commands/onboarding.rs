@@ -641,7 +641,9 @@ fn reconnect_teams_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<(), St
     // opens the device-code flow here either way.
     if let Err(e) = app.emit(
         "teams-reconnect-required",
-        serde_json::json!({ "user_initiated": true }),
+        crate::events::TeamsReconnectRequired {
+            user_initiated: true,
+        },
     ) {
         log::error!("{CMD} reconnect_teams: failed to emit event - {}", e);
     } else {
@@ -693,7 +695,7 @@ mod tests {
         let mark = |src: &str| src.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             mark(include_str!("onboarding.rs")).contains(
-                "app.emit( \"teams-reconnect-required\", serde_json::json!({ \"user_initiated\": true }), )"
+                "app.emit( \"teams-reconnect-required\", crate::events::TeamsReconnectRequired { user_initiated: true, }, )"
             ),
             "the user-initiated reconnect must mark its emit, or #675 would report the \
              reconnect the user just clicked back to them as an expired session"

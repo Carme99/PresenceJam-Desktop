@@ -3196,10 +3196,10 @@ fn emit_spotify_secret_conflict_once(app: &tauri::AppHandle) -> bool {
     );
     let _ = app.emit(
         SPOTIFY_SECRET_CONFLICT_EVENT,
-        serde_json::json!({
-            "action": "reconnect-spotify",
-            "message": "The Spotify client secret in config.json differs from the one in the OS keychain. Open Settings → Reconnect Spotify to resolve. The legacy plaintext is left untouched until then.",
-        }),
+        crate::events::SpotifySecretConflict {
+            action: "reconnect-spotify".to_string(),
+            message: "The Spotify client secret in config.json differs from the one in the OS keychain. Open Settings → Reconnect Spotify to resolve. The legacy plaintext is left untouched until then.".to_string(),
+        },
     );
     true
 }
@@ -3532,7 +3532,10 @@ pub fn emit_config_changed(app: &tauri::AppHandle, persisted: &AppConfig) -> u64
         Ok(document) => {
             let _ = app.emit(
                 CONFIG_CHANGED_EVENT,
-                serde_json::json!({ "revision": persisted.revision, "config": document }),
+                crate::events::ConfigChanged {
+                    revision: persisted.revision,
+                    config: document,
+                },
             );
         }
         Err(e) => log::warn!(
