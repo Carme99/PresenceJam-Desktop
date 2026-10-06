@@ -1149,7 +1149,7 @@
           })}
         </span>
         <span class="snooze-countdown">{snoozeLabel}</span>
-        <button class="snooze-resume" onclick={resumeSnooze} disabled={isResuming}>
+        <button class="snooze-resume btn-quiet btn-sm" onclick={resumeSnooze} disabled={isResuming}>
           {isResuming ? t('dashboard.snoozeResuming') : t('dashboard.snoozeResume')}
         </button>
       </div>
@@ -1250,7 +1250,7 @@
             <span class="volume-slider-value">{sliderVolume ?? currentTrack?.volume_percent ?? 0}%</span>
           </label>
           <button
-            class="btn-refresh"
+            class="btn-refresh btn-secondary btn-sm"
             onclick={refreshStatus}
             disabled={!$presence.syncing || isRefreshing}
             aria-label={t('dashboard.refreshAria')}
@@ -1584,18 +1584,8 @@
   .snooze-countdown {
     font-variant-numeric: tabular-nums;
   }
-  .snooze-resume {
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    color: var(--fg);
-    cursor: pointer;
-    font-size: var(--fs-sm);
-    padding: var(--sp-1) var(--sp-2);
-  }
-  .snooze-resume:hover:not(:disabled) {
-    background: var(--bg-surface);
-  }
+  /* #903: the chip's own layout hook; the button's box is `.btn-quiet .btn-sm`
+     from `app.css`. */
   .snooze-resume:disabled {
     cursor: default;
     opacity: 0.6;
@@ -1774,27 +1764,23 @@
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }
+  /* #903: layout only. The look is the shared `btn-secondary` variant plus the
+     `.btn-sm` size modifier (both from `app.css`), so this control matches
+     every other compact secondary action on height and radius. */
   .btn-refresh {
     margin-top: var(--sp-3);
     display: inline-flex;
     align-items: center;
     gap: var(--sp-2);
-    padding: var(--sp-1) var(--sp-3);
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--accent-text);
-    background: var(--accent-soft);
-    border: 1px solid var(--accent);
-    border-radius: var(--r-md);
-    cursor: pointer;
   }
-  .btn-refresh:hover:not(:disabled) {
-    filter: brightness(1.08);
-  }
-  .btn-refresh:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+  /* The hover is `.btn-secondary`'s token-driven one. It used to be a
+     `filter: brightness(1.08)` here, which brightened the label and the icon
+     along with the box and bypassed the theme tokens entirely — a palette
+     revision could not reach it. */
+  /* The reduced-motion override must stay: `.btn-refresh` declares no
+     `transition` of its own, so it takes the one on the global `button` rule
+     (`app.css`), and this is the only thing suppressing the press animation
+     for users who asked for less motion. */
   @media (prefers-reduced-motion: reduce) {
     .btn-refresh {
       transition: none;
