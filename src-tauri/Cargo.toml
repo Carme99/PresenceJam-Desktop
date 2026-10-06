@@ -44,6 +44,19 @@ objc2-core-services = { version = "~0.3", default-features = false, features = [
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_SystemInformation", "Win32_System_Console", "Win32_Storage_FileSystem", "Media_Control", "Storage_Streams"] }
 windows-collections = "0.3"
 
+# No `tauri = { features = ["test"] }` dev-dependency may be added here,
+# gated or not. The `test` feature is EMPTY upstream but flips
+# `#[cfg(any(test, feature = "test"))]` in tauri's lib, compiling the
+# `tauri::test` module into the rlib — and tauri-2.11.6's own
+# `mock_context` initializes `AppConfig` WITHOUT the
+# `app_directories_override` field tauri-utils-2.10.1 added, so the macOS
+# `cargo check --all-targets` leg dies with E0063. The same feature
+# previously broke the Windows test binary's load with
+# `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`. The wrapper-binding test in
+# `polling/poll_once.rs` drives `teams_write_with_refresh_seams` with a
+# `CapturingEmitter` instead — a future contributor MUST NOT "simplify"
+# this back to a `tauri::test::mock_app()` test.
+))
 [dependencies]
 tauri = { version = "~2.11", features = ["tray-icon"] }
 tauri-plugin-deep-link = "~2.4"

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 Every change merged after 5.0.0 lands here until the release cut, which renames this
 section to the released version and opens a fresh empty one (see `docs/RELEASING.md` §2).
 
+- **The Teams-write wrapper-binding test no longer needs Tauri's `test` feature (#929 rework).** `src-tauri/Cargo.toml` drops the target-gated `[target.'cfg(not(windows))'.dev-dependencies] tauri = { features = ["test"] }` line entirely: enabling the feature also compiles upstream's `tauri::test` module, and tauri-2.11.6's own `mock_context` initializes `AppConfig` without the `app_directories_override` field tauri-utils-2.10.1 added, so the macOS `cargo check --all-targets` leg died with E0063 (the same feature previously broke the Windows test binary's load with `0xc0000139`). The `test_wrapper_emits_teams_reconnect_required_on_dead_credential` test now drives the dead-credential path through the shared core with a `CapturingEmitter` (no mock app, no `cfg` gate) plus a structural pin asserting the `teams_write_with_refresh_seams` entry point still forwards its real `app` as the emitter. Also fixes a real flake in `test_playing_write_iteration_outcome_ends_only_a_superseded_write`, which asserted exact `max(prior, Retry-After)` equality for jittered `RateLimited(None)` fallbacks.
 ## [5.0.0] - 2026-10-06
 
 ### Added
