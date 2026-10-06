@@ -811,7 +811,8 @@
      `.quit-btn` each re-declared padding here, so the same "secondary action"
      rendered at a different height and radius from the Dashboard's refresh and
      snooze-resume buttons — and `.quit-btn`'s hover was a third mechanism
-     beside `btn-secondary`'s and the refresh button's `filter: brightness()`. */
+     beside `btn-secondary`'s and the refresh button's (since removed)
+     `filter: brightness()`. */
   .update-staged {
     font-size: var(--fs-xs);
     color: var(--success);
