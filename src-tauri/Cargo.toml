@@ -56,7 +56,6 @@ windows-collections = "0.3"
 # `polling/poll_once.rs` drives `teams_write_with_refresh_seams` with a
 # `CapturingEmitter` instead — a future contributor MUST NOT "simplify"
 # this back to a `tauri::test::mock_app()` test.
-))
 [dependencies]
 tauri = { version = "~2.11", features = ["tray-icon"] }
 tauri-plugin-deep-link = "~2.4"
