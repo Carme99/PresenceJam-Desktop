@@ -1398,11 +1398,14 @@ fn send_player_command(
     body: Option<serde_json::Value>,
     context: &'static str,
 ) -> Result<(), SpotifyApiError> {
-    // Issue #945: see `get_currently_playing`.
-    check_rate_limit()?;
+    // Validation before rate-limit: an invalid device id must report
+    // `Other`, never `RateLimited`, even when a racing test holds the
+    // shared RATE_LIMIT window open (matches `player_transfer` order).
     if let Some(id) = device_id {
         validate_device_id(id, context)?;
     }
+    // Issue #945: see `get_currently_playing`.
+    check_rate_limit()?;
     let client = build_spotify_client().map_err(SpotifyApiError::Other)?;
     let url = player_url(path, device_id)?;
     let mut request = client

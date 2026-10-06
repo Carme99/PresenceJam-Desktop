@@ -637,7 +637,7 @@ mod tests {
             found
         }
 
-        let registered = registered_commands(include_str!("../lib.rs"));
+        let registered = registered_commands(include_str!("../app.rs"));
         let matrix = matrix_commands(include_str!("mod.rs"));
 
         // Scanner sanity: the parse must really walk the handler list

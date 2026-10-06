@@ -300,7 +300,7 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("playback.rs has no #[cfg(test)] mod tests block");
-        let registered = include_str!("../lib.rs");
+        let registered = include_str!("../app.rs");
 
         for name in [
             "playback_play",

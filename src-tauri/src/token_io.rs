@@ -1168,7 +1168,7 @@ mod tests {
             &unavailable,
             Err(TokensLoadError::KeychainUnavailable(_))
         ));
-        crate::apply_token_load_result(&state, unavailable);
+        crate::state::apply_token_load_result(&state, unavailable);
         assert_eq!(
             state.tokens_load.state(),
             crate::TokensLoadState::KeychainUnavailable
@@ -1270,7 +1270,7 @@ mod tests {
     #[test]
     fn corrupt_retry_unblocks_and_persists_fresh_oauth_slots() {
         let state = Arc::new(crate::AppState::new());
-        crate::apply_token_load_result(
+        crate::state::apply_token_load_result(
             &state,
             Err(TokensLoadError::KeychainUnavailable(
                 "credential store locked".to_string(),
@@ -1446,7 +1446,7 @@ mod tests {
         let result =
             read_tokens_at_path_with_key_fetcher(&path, TokenReadMode::ReadOnly, || Ok(test_key()));
         assert!(matches!(&result, Err(TokensLoadError::Corrupt(_))));
-        crate::apply_token_load_result(&state, result);
+        crate::state::apply_token_load_result(&state, result);
         assert_eq!(state.tokens_load.state(), crate::TokensLoadState::Ready);
 
         let mut writer_called = false;
