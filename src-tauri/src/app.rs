@@ -8,7 +8,8 @@ use super::cli::{
 use super::deep_link::{handle_deep_link_from_app, take_pending_deep_link};
 use super::state::{apply_token_load_result, AppState};
 use crate::{
-    commands, config, diagnostics, history, menu, polling, serve, token_io, tray, updater_bg,
+    commands, config, diagnostics, history, macos_deeplink, menu, polling, serve, token_io, tray,
+    updater_bg,
 };
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -524,7 +525,7 @@ fn setup_keychain_cache() {
 }
 
 /// Load config into `AppState`, honour start-minimized.
-fn setup_config(app: &tauri::App, state: &Arc<AppState>, cli_mode: bool) {
+fn setup_config(app: &mut tauri::App, state: &Arc<AppState>, cli_mode: bool) {
     // Load config into AppState
     match config::load_config() {
         Ok(cfg) => {
