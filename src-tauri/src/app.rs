@@ -7,9 +7,10 @@ use super::cli::{
 };
 use super::deep_link::{handle_deep_link_from_app, take_pending_deep_link};
 use super::state::{apply_token_load_result, AppState};
+#[cfg(target_os = "macos")]
+use crate::macos_deeplink;
 use crate::{
-    commands, config, diagnostics, history, macos_deeplink, menu, polling, serve, token_io, tray,
-    updater_bg,
+    commands, config, diagnostics, history, menu, polling, serve, token_io, tray, updater_bg,
 };
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
