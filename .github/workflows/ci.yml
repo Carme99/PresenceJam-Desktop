@@ -65,13 +65,22 @@ jobs:
         run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
 
       # Runs the Rust unit-test suite on the macOS leg (issue #836).
-      # Windows-only: the lib test binary aborts at startup on the
-      # windows-latest runner (STATUS_ENTRYPOINT_NOT_FOUND from a system-DLL
-      # import, before any test executes — same binary passes check +
-      # clippy), so executing tests there is not possible on this image.
+      # Windows-only, and NOT because the runner image is broken: the
+      # `windows-cli-smoke` job builds and RUNS a lib test binary on the same
+      # `windows-latest` image and passes on every green main run.
+      # What fails to load is a binary that has linked `tauri::test` into the
+      # rlib — i.e. a dev-dependency like
+      # `tauri = { features = ["test"] }`, which compiles
+      # `tauri/src/test/mock_runtime.rs` and its `#[cfg(windows)]` arms into the
+      # test binary, changing its import table and producing
+      # STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before any test runs. PR #1116
+      # records a paired binary-hash experiment isolating exactly that
+      # dependency as the cause (with: ...-352d250090363d71.exe -> FAIL;
+      # without: ...-d797c262adba749f.exe -> PASS).
       # Windows keeps the `cargo check` compile gate above (which is what
-      # catches cfg(windows) breakage); macOS executes the suite. Re-expand
-      # to both legs once the runner image links the binary cleanly.
+      # catches cfg(windows) breakage) plus the real release build in
+      # `windows-cli-smoke`; macOS executes the suite. Re-expand to both legs
+      # once the dev-dependency hazard is removed, not when an image changes.
       - name: Cargo test (macOS, issue #836)
         if: matrix.os == 'macos-latest'
         env:
