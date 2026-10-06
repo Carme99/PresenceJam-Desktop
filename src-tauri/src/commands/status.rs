@@ -131,7 +131,10 @@ fn clamp_expiry_minutes(minutes: u32) -> u32 {
 /// Apply the manual-status filter from one config snapshot. Passing both the
 /// locale and custom lexicon explicitly keeps this GUI path aligned with the
 /// headless CLI and independent of the process-global native-language slot.
-fn filter_manual_status(text: &str, config: Option<&crate::config::AppConfig>) -> String {
+fn filter_manual_status(
+    text: &str,
+    config: Option<&std::sync::Arc<crate::config::AppConfig>>,
+) -> String {
     let placeholder = config
         .map(|cfg| cfg.teams.profanity_placeholder.as_str())
         .unwrap_or_default();
@@ -516,8 +519,9 @@ mod tests {
             };
             for configured in ["", profanity::safe_placeholder_default()] {
                 config.teams.profanity_placeholder = configured.to_string();
+                let snapshot = std::sync::Arc::new(config.clone());
                 assert_eq!(
-                    filter_manual_status("fuck", Some(&config)),
+                    filter_manual_status("fuck", Some(&snapshot)),
                     fallback,
                     "empty and shipped-English placeholders use the config locale"
                 );
@@ -525,9 +529,10 @@ mod tests {
 
             config.teams.profanity_placeholder = custom.to_string();
             config.teams.profanity_extra_words = vec!["verboten".to_string()];
-            assert_eq!(filter_manual_status("verboten", Some(&config)), custom);
+            let snapshot = std::sync::Arc::new(config);
+            assert_eq!(filter_manual_status("verboten", Some(&snapshot)), custom);
             assert_eq!(
-                filter_manual_status("Français ✨ intact", Some(&config)),
+                filter_manual_status("Français ✨ intact", Some(&snapshot)),
                 "Français ✨ intact",
                 "clean user copy remains byte-identical"
             );

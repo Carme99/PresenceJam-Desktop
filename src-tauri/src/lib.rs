@@ -200,7 +200,7 @@ impl Default for PendingAuths {
 /// private so every read-modify-write path can hold one guard across its full
 /// critical section.
 pub struct Config {
-    config: RwLock<Option<crate::config::AppConfig>>,
+    config: RwLock<Option<Arc<crate::config::AppConfig>>>,
 }
 
 impl Config {
@@ -211,14 +211,29 @@ impl Config {
     }
 
     /// Read guard for the config slot. Use this instead of touching
-    /// the `config` field directly.
-    pub fn get(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::config::AppConfig>> {
+    /// the `config` field directly. Prefer [`Config::snapshot`] unless
+    /// the guard must be held across a critical section.
+    pub fn get(&self) -> parking_lot::RwLockReadGuard<'_, Option<Arc<crate::config::AppConfig>>> {
         self.config.read()
+    }
+
+    /// Snapshot the config slot behind a shared pointer (issue #893).
+    ///
+    /// Clones the `Arc`, not the document: the polling loop calls this
+    /// once per iteration and never holds the read guard across the
+    /// iteration body, so a config save never waits on an in-flight
+    /// poll. The snapshot is immutable — writers publish a new `Arc`
+    /// under the write guard, so an iteration never observes a
+    /// partially updated config.
+    pub fn snapshot(&self) -> Option<Arc<crate::config::AppConfig>> {
+        self.config.read().clone()
     }
 
     /// Write guard for the config slot. Use this instead of touching
     /// the `config` field directly.
-    pub fn get_mut(&self) -> parking_lot::RwLockWriteGuard<'_, Option<crate::config::AppConfig>> {
+    pub fn get_mut(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, Option<Arc<crate::config::AppConfig>>> {
         self.config.write()
     }
 
@@ -228,7 +243,7 @@ impl Config {
     /// blocking import still owns the guard after replacement and before reload.
     pub fn try_get_mut(
         &self,
-    ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<crate::config::AppConfig>>> {
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<Arc<crate::config::AppConfig>>>> {
         self.config.try_write()
     }
 }
@@ -1846,7 +1861,7 @@ fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
     let state = Arc::new(AppState::new());
     let mut failures = Vec::new();
     match config::load_config() {
-        Ok(cfg) => *state.config.get_mut() = Some(cfg),
+        Ok(cfg) => *state.config.get_mut() = Some(Arc::new(cfg)),
         Err(e) => failures.push(format!(
             "no config loaded ({e}); reporting the built-in defaults"
         )),
@@ -1863,7 +1878,10 @@ fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
 /// headless CLI. The locale is passed explicitly rather than installed into
 /// the process-global native-language slot, so concurrent CLI surfaces cannot
 /// race one another while a different config is being published.
-fn filter_cli_manual_status(text: &str, config: Option<&crate::config::AppConfig>) -> String {
+fn filter_cli_manual_status(
+    text: &str,
+    config: Option<&std::sync::Arc<crate::config::AppConfig>>,
+) -> String {
     let placeholder = config
         .map(|cfg| cfg.teams.profanity_placeholder.as_str())
         .unwrap_or_default();
@@ -1977,8 +1995,8 @@ fn cli_set_active_profile_from_disk(name: Option<String>) -> Result<Option<Strin
     }
     let mut cfg = state
         .config
-        .get()
-        .clone()
+        .snapshot()
+        .map(|c| (*c).clone())
         .ok_or_else(|| "no config loaded".to_string())?;
     let target: Option<String> = match name {
         None => None,
@@ -2651,7 +2669,7 @@ pub fn run() {
                     // from the same code instead of waiting for a relaunch.
                     config::apply_log_level(&cfg.logging);
                     let mut config_guard = state.config.get_mut();
-                    *config_guard = Some(cfg.clone());
+                    *config_guard = Some(Arc::new(cfg.clone()));
                     log::info!("[APP] setup: config loaded into AppState");
 
                     // Handle start_minimized setting. On macOS, also switch
@@ -4186,22 +4204,24 @@ mod tests {
 
             for placeholder in ["", crate::profanity::safe_placeholder_default()] {
                 config.teams.profanity_placeholder = placeholder.to_string();
+                let snapshot = Arc::new(config.clone());
                 assert_eq!(
-                    filter_cli_manual_status("what the fuck", Some(&config)),
+                    filter_cli_manual_status("what the fuck", Some(&snapshot)),
                     localized,
                     "a blank or shipped-English placeholder must use the loaded locale"
                 );
             }
 
             config.teams.profanity_placeholder = "Eigener Status".to_string();
+            let snapshot = Arc::new(config);
             assert_eq!(
-                filter_cli_manual_status("what the fuck", Some(&config)),
+                filter_cli_manual_status("what the fuck", Some(&snapshot)),
                 "Eigener Status",
                 "a custom safe placeholder must remain byte-identical"
             );
             let custom_text = "Eigener Status ✨ — café";
             assert_eq!(
-                filter_cli_manual_status(custom_text, Some(&config)),
+                filter_cli_manual_status(custom_text, Some(&snapshot)),
                 custom_text,
                 "a clean custom status must remain byte-identical"
             );

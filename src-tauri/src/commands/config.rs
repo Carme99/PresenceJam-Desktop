@@ -101,7 +101,7 @@ pub async fn save_config(
                 // that reached disk (the #297 invariant).
                 let mut persisted = config_clone.clone();
                 config::stamp_schema_version(&mut persisted);
-                *config_guard = Some(persisted.clone());
+                *config_guard = Some(Arc::new(persisted.clone()));
                 Ok::<AppConfig, String>(persisted)
             }
             Err(e) => {
@@ -145,7 +145,7 @@ pub async fn update_config(
     let persisted = tauri::async_runtime::spawn_blocking(move || {
         let mut config_guard = state_clone.config.get_mut();
         let base = match config_guard.as_ref() {
-            Some(current) => current.clone(),
+            Some(current) => (**current).clone(),
             None => config::load_config()?,
         };
 
@@ -156,7 +156,7 @@ pub async fn update_config(
         config::stamp_schema_version(&mut persisted);
         match config::save_config(&persisted) {
             Ok(()) => {
-                *config_guard = Some(persisted.clone());
+                *config_guard = Some(Arc::new(persisted.clone()));
                 Ok::<AppConfig, String>(persisted)
             }
             Err(e) => {
@@ -601,7 +601,7 @@ pub async fn export_config(
     let current = {
         let guard = state.config.get();
         match guard.as_ref() {
-            Some(cfg) => cfg.clone(),
+            Some(cfg) => (**cfg).clone(),
             None => config::load_config()?,
         }
     };
@@ -889,7 +889,7 @@ fn replace_and_adopt_config(
     let mut config_guard = state.config.get_mut();
     replace_config_file(destination, document, after_replace)?;
     let persisted = reload()?;
-    *config_guard = Some(persisted.clone());
+    *config_guard = Some(Arc::new(persisted.clone()));
     Ok(persisted)
 }
 
@@ -1055,7 +1055,7 @@ pub async fn set_locale(
         // across the fsync (issue #215 pattern).
         let mut config_guard = state_clone.config.get_mut();
         let mut merged = match config_guard.as_ref() {
-            Some(current) => current.clone(),
+            Some(current) => (**current).clone(),
             None => config::load_config()?,
         };
         merged.locale = Some(tag.to_string());
@@ -1064,7 +1064,7 @@ pub async fn set_locale(
         config::stamp_schema_version(&mut persisted);
         match config::save_config(&persisted) {
             Ok(()) => {
-                *config_guard = Some(persisted.clone());
+                *config_guard = Some(Arc::new(persisted.clone()));
                 Ok::<AppConfig, String>(persisted)
             }
             Err(e) => {
@@ -1440,7 +1440,7 @@ mod tests {
         let state = AppState::new();
         let mut previous_state = AppConfig::default();
         previous_state.spotify.client_id = "KEEP".to_string();
-        *state.config.get_mut() = Some(previous_state);
+        *state.config.get_mut() = Some(Arc::new(previous_state));
         // An obstruction at the staged sidecar name fails the stage step —
         // which is the point: it happens before the live file is touched.
         let staged = staged_config_path(&live);
@@ -1653,7 +1653,7 @@ mod tests {
                 let document =
                     serde_json::to_string_pretty(&competing).expect("serialize competitor");
                 std::fs::write(&writer_live, document).expect("competing write");
-                *guard = Some(competing);
+                *guard = Some(Arc::new(competing));
             });
 
             let imported = import

@@ -526,7 +526,7 @@ fn run_inner(
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
     }
 
-    let config = state.config.get().clone();
+    let config = state.config.snapshot();
     log::debug!("[POLLING] poll_once: config loaded");
 
     // Issue #866: the iteration-head expiry tick for the preferred-presence
@@ -1310,7 +1310,7 @@ fn transient_outcome(count: u8) -> Option<PollIteration> {
 /// incremented in response to a no-track result.
 fn record_no_track_outcome(
     consecutive_pauses: &mut u8,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> PollIteration {
     let no_track_sleep = pause_backoff(
         *consecutive_pauses,
@@ -1349,7 +1349,7 @@ fn not_modified_iteration(
     consecutive_pauses: &mut u8,
     transient_failure_count: &mut u8,
     consecutive_network_failures: &mut u8,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> PollIteration {
     log::info!("[POLLING] poll_once: 304 Not Modified, skipping parse/format/tray work");
     record_success(transient_failure_count, consecutive_network_failures);
@@ -1530,7 +1530,9 @@ where
     }
 }
 
-fn get_spotify_credentials(config: &Option<crate::config::AppConfig>) -> (String, String) {
+fn get_spotify_credentials(
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
+) -> (String, String) {
     let client_id = config
         .as_ref()
         .map(|c| c.spotify.client_id.clone())
@@ -1766,7 +1768,10 @@ fn presence_gate_decision(
 /// rule that carries its own presence action is an explicit instruction for
 /// this track/window, so it wins over the OOO default (finding #634). Busy /
 /// Do-Not-Disturb / in-a-call always gate regardless.
-fn ooo_gate_enabled(config: &Option<AppConfig>, rule_has_presence_action: bool) -> bool {
+fn ooo_gate_enabled(
+    config: &Option<std::sync::Arc<AppConfig>>,
+    rule_has_presence_action: bool,
+) -> bool {
     !rule_has_presence_action
         && config
             .as_ref()
@@ -1888,7 +1893,7 @@ fn local_minutes_and_weekday() -> (u16, u8) {
 /// current local clock — the read-side twin of the hoisted `quiet_active`
 /// binding in `process_track`, for the path (`handle_no_track`) that has no
 /// track to match a rule against and no hoisted decision to consult.
-fn quiet_hours_active_now(config: &Option<crate::config::AppConfig>) -> bool {
+fn quiet_hours_active_now(config: &Option<std::sync::Arc<crate::config::AppConfig>>) -> bool {
     let (now_minutes, weekday) = local_minutes_and_weekday();
     // Issue #869: the active profile's `track_rules` overlay does NOT
     // touch `quiet_hours`, so quiet-hours resolution still reads the
@@ -1896,7 +1901,7 @@ fn quiet_hours_active_now(config: &Option<crate::config::AppConfig>) -> bool {
     // future profile overlay that does touch quiet hours lands on the
     // same code path without a second migration step.
     config.as_ref().is_some_and(|c| {
-        let effective = crate::config::effective_config(c);
+        let effective = crate::config::effective_snapshot(c);
         quiet_hours_active(&effective.status_rules, now_minutes, weekday)
     })
 }
@@ -1920,7 +1925,7 @@ static QUIET_PAUSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// parked: a parked thread could not notice the window ending, so the window is
 /// re-evaluated every iteration and the pause/resume transitions are logged
 /// once each.
-pub(crate) fn quiet_pause_iteration(config: &Option<AppConfig>) -> Option<u64> {
+pub(crate) fn quiet_pause_iteration(config: &Option<std::sync::Arc<AppConfig>>) -> Option<u64> {
     let (now_minutes, weekday) = local_minutes_and_weekday();
     let decision = quiet_pause_at(config, now_minutes, weekday);
     let was_paused = QUIET_PAUSE_ACTIVE.swap(decision.is_some(), Ordering::Relaxed);
@@ -1946,11 +1951,14 @@ pub(crate) fn quiet_pause_iteration(config: &Option<AppConfig>) -> Option<u64> {
 /// The sleep is the configured ceiling (`polling.max_interval_seconds`, clamped
 /// to 5..=300 by `config::clamp_polling`), floored at 1 s so a hand-edited 0
 /// cannot spin the thread.
-fn quiet_pause_at(config: &Option<AppConfig>, now_minutes: u16, weekday: u8) -> Option<(u64, u16)> {
-    // Issue #869: route through `effective_config` so a profile
-    // overlay that touches quiet hours (or the polling interval)
-    // lands on the same code path without a second migration step.
-    let cfg = config.as_ref().map(crate::config::effective_config)?;
+fn quiet_pause_at(
+    config: &Option<std::sync::Arc<AppConfig>>,
+    now_minutes: u16,
+    weekday: u8,
+) -> Option<(u64, u16)> {
+    // Issue #893: share the base pointer when no profile is active — a
+    // `quiet_pause_at` call must not deep-copy the lexicon/rules per iteration.
+    let cfg = config.as_ref().map(crate::config::effective_snapshot)?;
     let until = cfg
         .status_rules
         .quiet_hours
@@ -2037,7 +2045,7 @@ static SNOOZE_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// bound is deliberate: a shorter sleep would mean waking (and re-reading the
 /// clock) more often than a normal poll, for a deadline the user set in
 /// minutes.
-pub(crate) fn snooze_gate(config: &Option<AppConfig>) -> SnoozeGate {
+pub(crate) fn snooze_gate(config: &Option<std::sync::Arc<AppConfig>>) -> SnoozeGate {
     let now = Utc::now();
     if let Some((seconds, deadline)) = snooze_pause_at(config, now) {
         if !SNOOZE_ACTIVE.swap(true, Ordering::Relaxed) {
@@ -2069,7 +2077,10 @@ pub(crate) fn snooze_gate(config: &Option<AppConfig>) -> SnoozeGate {
 ///
 /// The sleep is `polling.max_interval_seconds`, floored at 1 s so a hand-edited
 /// 0 cannot spin the thread — the same floor [`quiet_pause_at`] applies.
-fn snooze_pause_at(config: &Option<AppConfig>, now: DateTime<Utc>) -> Option<(u64, DateTime<Utc>)> {
+fn snooze_pause_at(
+    config: &Option<std::sync::Arc<AppConfig>>,
+    now: DateTime<Utc>,
+) -> Option<(u64, DateTime<Utc>)> {
     let cfg = config.as_ref()?;
     let status = crate::config::snooze_status(cfg, now)?;
     Some((cfg.polling.max_interval_seconds.max(1), status.deadline))
@@ -2082,7 +2093,7 @@ fn snooze_pause_at(config: &Option<AppConfig>, now: DateTime<Utc>) -> Option<(u6
 /// a clear. Delegates to `config::snooze_expired_deadline` so the tray, the
 /// chip, the load-time report and this gate cannot disagree about what "no
 /// longer live" means.
-fn snooze_expired(config: &Option<AppConfig>, now: DateTime<Utc>) -> bool {
+fn snooze_expired(config: &Option<std::sync::Arc<AppConfig>>, now: DateTime<Utc>) -> bool {
     config
         .as_ref()
         .is_some_and(|c| crate::config::snooze_expired_deadline(c, now))
@@ -2117,7 +2128,7 @@ fn snooze_pause_log_line(local_hhmm: &str, minutes_left: i64) -> String {
 /// iteration retries rather than believing a deadline is gone.
 pub(crate) fn clear_snooze_if_expired(state: &AppState) {
     let mut guard = state.config.get_mut();
-    let Some(current) = guard.as_ref().cloned() else {
+    let Some(current) = guard.as_ref().map(|c| (**c).clone()) else {
         return;
     };
     let mut next = current;
@@ -2128,7 +2139,7 @@ pub(crate) fn clear_snooze_if_expired(state: &AppState) {
     match crate::config::save_config(&next) {
         Ok(()) => {
             log::info!("[POLLING] snooze: cleared the expired deadline");
-            *guard = Some(next);
+            *guard = Some(Arc::new(next));
         }
         Err(e) => log::warn!(
             "[POLLING] snooze: could not clear the expired deadline ({}); retrying next iteration",
@@ -2184,7 +2195,11 @@ impl RuleDecision {
 /// The rule decision for an artist/title pair on the CURRENT local clock. The
 /// no-track clear path passes empty strings, so only quiet hours and match-all
 /// rules (both substrings empty) can suppress a clear.
-fn rule_gate(config: &Option<AppConfig>, artist: &str, title: &str) -> RuleDecision {
+fn rule_gate(
+    config: &Option<std::sync::Arc<AppConfig>>,
+    artist: &str,
+    title: &str,
+) -> RuleDecision {
     let (now_minutes, weekday) = local_minutes_and_weekday();
     rule_gate_at(config, now_minutes, weekday, artist, title)
 }
@@ -2196,7 +2211,7 @@ fn rule_gate(config: &Option<AppConfig>, artist: &str, title: &str) -> RuleDecis
 /// Precedence is quiet hours first, then track rules — the same order the
 /// suppression decision has always used.
 fn rule_gate_at(
-    config: &Option<AppConfig>,
+    config: &Option<std::sync::Arc<AppConfig>>,
     now_minutes: u16,
     weekday: u8,
     artist: &str,
@@ -2215,7 +2230,7 @@ fn rule_gate_at(
 /// this so a track / episode's album / show / device / playlist-uri /
 /// duration feed into the rule walker.
 fn rule_gate_at_with_ctx(
-    config: &Option<AppConfig>,
+    config: &Option<std::sync::Arc<AppConfig>>,
     now_minutes: u16,
     weekday: u8,
     ctx: &TrackRuleContext<'_>,
@@ -2229,7 +2244,7 @@ fn rule_gate_at_with_ctx(
     // preferred-presence gate the base config does. A profile switch
     // is a config-shaped change with the same contract as editing the
     // base values mid-track.
-    let effective = crate::config::effective_config(cfg);
+    let effective = crate::config::effective_snapshot(cfg);
     // Issue #866: the preferred-presence pair rides the rule decision so the
     // matching tail can route it to `setUserPreferredPresence`. Disabled when
     // the user opted out, the user is in a manual-status window, or the
@@ -2728,7 +2743,7 @@ fn clear_expired_preferred_presence(
 fn rule_presence_backoff(
     app: &AppHandle,
     access_token: &str,
-    config: &Option<AppConfig>,
+    config: &Option<std::sync::Arc<AppConfig>>,
     decision: &RuleDecision,
     remaining_ms: Option<u64>,
     armed: &mut Option<PresencePair>,
@@ -2776,7 +2791,7 @@ fn rule_presence_backoff(
 
 /// `teams.availability_sync`, defaulted the same way `process_track` defaults
 /// it (off).
-fn availability_sync_enabled(config: &Option<AppConfig>) -> bool {
+fn availability_sync_enabled(config: &Option<std::sync::Arc<AppConfig>>) -> bool {
     config
         .as_ref()
         .map(|c| c.teams.availability_sync)
@@ -2813,7 +2828,7 @@ fn sync_availability(
     track_is_playing: bool,
     remaining_ms: Option<u64>,
     rule: &RuleDecision,
-    config: &Option<AppConfig>,
+    config: &Option<std::sync::Arc<AppConfig>>,
     presence_blocked: bool,
     armed_presence: &mut Option<PresencePair>,
     last_availability_arm: &mut Option<Instant>,
@@ -2920,7 +2935,7 @@ fn rearm_availability_after_304(
     state: &Arc<AppState>,
     last_track_key: &Option<String>,
     last_poll_instant: Instant,
-    config: &Option<AppConfig>,
+    config: &Option<std::sync::Arc<AppConfig>>,
     gate_blocked: bool,
     armed_presence: &mut Option<PresencePair>,
     last_availability_arm: &mut Option<Instant>,
@@ -3196,7 +3211,7 @@ pub(crate) fn matching_track_rule_at_with_ctx<'a>(
 pub(crate) const MUSIC_EMOJI: &str = "\u{1F3B5}";
 const DEFAULT_STOPPED_STATUS_FORMAT: &str = crate::i18n::EN.status_stopped_default;
 
-fn config_locale(config: &Option<AppConfig>) -> Option<&str> {
+fn config_locale(config: &Option<std::sync::Arc<AppConfig>>) -> Option<&str> {
     config.as_ref().and_then(|cfg| cfg.locale.as_deref())
 }
 
@@ -3215,13 +3230,13 @@ fn localized_status_fallback<'a>(
 
 /// The configured paused text, localized at post time when the stored value
 /// is empty or still the shipped English default.
-fn paused_status_text(config: &Option<AppConfig>) -> &str {
+fn paused_status_text(config: &Option<std::sync::Arc<AppConfig>>) -> &str {
     crate::commands::sync::paused_status_text(config)
 }
 
 /// [`paused_status_text`]'s no-track sibling, with the same untouched-default
 /// and user-authored-value contract.
-fn stopped_status_text(config: &Option<AppConfig>) -> &str {
+fn stopped_status_text(config: &Option<std::sync::Arc<AppConfig>>) -> &str {
     let strings = crate::i18n::strings_for(crate::i18n::resolve_tag(config_locale(config)));
     localized_status_fallback(
         config
@@ -3235,7 +3250,7 @@ fn stopped_status_text(config: &Option<AppConfig>) -> &str {
 /// S4 (issue #672): the paused-clear placeholder. The emoji is ours; the text is
 /// `teams.paused_status_format` (default "Paused"), so the default renders
 /// byte-identically to the pre-4.7 literal `"🎵 Paused"`.
-pub(crate) fn paused_status_placeholder(config: &Option<AppConfig>) -> String {
+pub(crate) fn paused_status_placeholder(config: &Option<std::sync::Arc<AppConfig>>) -> String {
     crate::commands::sync::paused_status_placeholder(config)
 }
 
@@ -3243,7 +3258,7 @@ pub(crate) fn paused_status_placeholder(config: &Option<AppConfig>) -> String {
 /// as [`paused_status_placeholder`], with `teams.stopped_status_format`
 /// (default `"Nothing playing on Spotify"`). A matching rule's replacement text
 /// still takes precedence over it.
-fn stopped_status_placeholder(config: &Option<AppConfig>) -> String {
+fn stopped_status_placeholder(config: &Option<std::sync::Arc<AppConfig>>) -> String {
     format!("{MUSIC_EMOJI} {}", stopped_status_text(config))
 }
 
@@ -3253,13 +3268,13 @@ fn stopped_status_placeholder(config: &Option<AppConfig>) -> String {
 /// the stale status posted until the next track change.
 ///
 /// The `None`-config fallbacks mirror `process_track`'s exactly — a
-fn status_config_fingerprint(config: &Option<crate::config::AppConfig>) -> String {
+fn status_config_fingerprint(config: &Option<std::sync::Arc<crate::config::AppConfig>>) -> String {
     // Issue #869: the live fingerprint reads the EFFECTIVE config
     // (active profile overlay applied). A profile change must force a
     // status rewrite on the next poll, exactly like any other config
     // flip — the contract is "any config-shaped change mid-track gets
     // one fresh write".
-    let effective = config.as_ref().map(crate::config::effective_config);
+    let effective = config.as_ref().map(crate::config::effective_snapshot);
     let filter = effective
         .as_ref()
         .map(|c| c.teams.profanity_filter)
@@ -3379,7 +3394,7 @@ static LAST_NOW_PLAYING: std::sync::LazyLock<
 /// redundant forced writes.
 fn status_track_key(
     now: &crate::spotify::NowPlaying,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> String {
     let kind = match &now.episode {
         Some(episode) => format!("episode:{}:{}", episode.show_name, episode.publisher),
@@ -3406,7 +3421,7 @@ fn status_track_key(
 /// live path would have (issue #581): the whole item, not just its media.
 fn config_flip_rewrite_track(
     last_track_key: &Option<String>,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> Option<crate::spotify::NowPlaying> {
     let now = LAST_NOW_PLAYING.lock().clone()?;
     let expected = status_track_key(&now, config);
@@ -4177,7 +4192,7 @@ fn track_event_payload(track: &crate::spotify::TrackInfo) -> crate::spotify::Tra
 pub(crate) fn process_track(
     app: &AppHandle,
     state: &Arc<AppState>,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
     // The whole observed item — media plus episode metadata and playback
     // context (issues #580/#581). `now.media` is the frozen `TrackInfo`
     // every consumer below already speaks.
@@ -5291,7 +5306,7 @@ pub(crate) fn handle_no_track(
     app: &AppHandle,
     state: &Arc<AppState>,
     last_track_key: &mut Option<String>,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
     last_posted_placeholder: &mut Option<String>,
     suppressed_placeholder: &mut Option<String>,
     gated_track_key: &mut Option<String>,
@@ -5636,7 +5651,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     };
     // Clone out of the read guard before any blocking call: the guard must not
     // be held across a Graph round-trip on the exit path.
-    let config = state.config.get().clone();
+    let config = state.config.snapshot();
     let snapshot = super::state::load_exit_snapshot();
     let plan = exit_cleanup_plan(
         &snapshot,
@@ -5749,14 +5764,14 @@ fn exit_cleanup_plan(
     }
 }
 
-fn config_default_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+fn config_default_interval(config: &Option<std::sync::Arc<crate::config::AppConfig>>) -> u64 {
     config
         .as_ref()
         .map(|c| c.polling.default_interval_seconds)
         .unwrap_or(30)
 }
 
-fn config_minimum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+fn config_minimum_interval(config: &Option<std::sync::Arc<crate::config::AppConfig>>) -> u64 {
     config
         .as_ref()
         .map(|c| c.polling.minimum_interval_seconds)
@@ -5765,14 +5780,14 @@ fn config_minimum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
 
 /// `polling.pause_backoff_max_seconds` (issue #538), defaulted to the
 /// documented 300 s so an untouched config keeps 4.5 behaviour.
-fn config_pause_backoff_max(config: &Option<crate::config::AppConfig>) -> u64 {
+fn config_pause_backoff_max(config: &Option<std::sync::Arc<crate::config::AppConfig>>) -> u64 {
     config
         .as_ref()
         .map(|c| c.polling.pause_backoff_max_seconds)
         .unwrap_or(300)
 }
 
-fn config_maximum_interval(config: &Option<crate::config::AppConfig>) -> u64 {
+fn config_maximum_interval(config: &Option<std::sync::Arc<crate::config::AppConfig>>) -> u64 {
     config
         .as_ref()
         .map(|c| c.polling.max_interval_seconds)
@@ -5878,7 +5893,7 @@ fn placeholder_expiry_str() -> String {
 /// live/unknown-position streams (issue #165).
 fn status_expiry_str(
     remaining_ms: Option<u64>,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> Option<String> {
     remaining_ms.map(|remaining| {
         let buffer_ms = config
@@ -5898,7 +5913,7 @@ fn status_expiry_str(
 /// one.
 fn playing_track_sleep(
     remaining_ms: Option<u64>,
-    config: &Option<crate::config::AppConfig>,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> u64 {
     match remaining_ms {
         Some(remaining) => {
@@ -5917,7 +5932,10 @@ fn playing_track_sleep(
 /// dominate idle runtime — slept raw values the config permits to exceed it.
 /// Non-panicking clamp order (`max` then `min`) because a hand-edited config
 /// could invert the bounds, which `u64::clamp` would panic on.
-fn clamp_poll_interval(secs: u64, config: &Option<crate::config::AppConfig>) -> u64 {
+fn clamp_poll_interval(
+    secs: u64,
+    config: &Option<std::sync::Arc<crate::config::AppConfig>>,
+) -> u64 {
     let minimum = config_minimum_interval(config);
     let maximum = config_maximum_interval(config).max(minimum);
     secs.max(minimum).min(maximum)
@@ -6099,12 +6117,17 @@ mod tests {
         // The accessor reads the config, defaulting to the documented 300.
         assert_eq!(config_pause_backoff_max(&None), 300);
         assert_eq!(
-            config_pause_backoff_max(&Some(crate::config::AppConfig::default())),
+            config_pause_backoff_max(&Some(std::sync::Arc::new(
+                crate::config::AppConfig::default()
+            ))),
             300
         );
         let mut raised = crate::config::AppConfig::default();
         raised.polling.pause_backoff_max_seconds = 900;
-        assert_eq!(config_pause_backoff_max(&Some(raised)), 900);
+        assert_eq!(
+            config_pause_backoff_max(&Some(std::sync::Arc::new(raised))),
+            900
+        );
     }
 
     #[test]
@@ -6796,7 +6819,7 @@ mod tests {
     /// invalidate the expectation.
     #[test]
     fn test_status_expiry_known_and_unknown_position() {
-        let config = Some(crate::config::AppConfig::default());
+        let config = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         let buffer_secs = config
             .as_ref()
             .expect("config is Some")
@@ -6840,7 +6863,7 @@ mod tests {
     /// before track end, clamped to the config bounds.
     #[test]
     fn test_playing_track_sleep_known_position_and_live_stream() {
-        let config = Some(crate::config::AppConfig::default());
+        let config = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         // Default config: min 10s, max 60s.
         assert_eq!(playing_track_sleep(Some(30_000), &config), 25);
         assert_eq!(
@@ -7124,7 +7147,7 @@ mod tests {
     /// so the next poll stays conditional.
     #[test]
     fn test_not_modified_keeps_state_and_sleeps_default_interval() {
-        let config = Some(crate::config::AppConfig::default());
+        let config = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         let mut consecutive_pauses: u8 = 3;
         let mut transient_failure_count: u8 = 2;
         let mut consecutive_network_failures: u8 = 3;
@@ -7162,7 +7185,7 @@ mod tests {
     /// oscillation, no stalled backoff).
     #[test]
     fn test_not_modified_without_tracked_track_advances_pause_backoff() {
-        let config = Some(crate::config::AppConfig::default());
+        let config = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         let mut consecutive_pauses: u8 = 1;
         let mut transient_failure_count: u8 = 1;
         let mut consecutive_network_failures: u8 = 1;
@@ -7270,7 +7293,7 @@ mod tests {
             context: crate::spotify::PlaybackContext::default(),
         };
 
-        let cfg = Some(crate::config::AppConfig::default());
+        let cfg = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
 
         // Change-detection path — the key the poll loop compares
         // `last_track_key` against before posting another status.
@@ -7445,14 +7468,14 @@ mod tests {
     /// status stays posted.
     #[test]
     fn test_status_config_fingerprint_tracks_filter_placeholder_format() {
-        let base = Some(crate::config::AppConfig::default());
+        let base = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         let fp = status_config_fingerprint(&base);
 
         let mut off = crate::config::AppConfig::default();
         off.teams.profanity_filter = false;
         assert_ne!(
             fp,
-            status_config_fingerprint(&Some(off)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(off))),
             "toggling the filter must change the fingerprint"
         );
 
@@ -7460,7 +7483,7 @@ mod tests {
         ph.teams.profanity_placeholder = "something else".to_string();
         assert_ne!(
             fp,
-            status_config_fingerprint(&Some(ph)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(ph))),
             "editing the placeholder must change the fingerprint"
         );
 
@@ -7468,7 +7491,7 @@ mod tests {
         fmt.teams.status_format = "{track}".to_string();
         assert_ne!(
             fp,
-            status_config_fingerprint(&Some(fmt)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(fmt))),
             "editing the format must change the fingerprint"
         );
 
@@ -7494,7 +7517,7 @@ mod tests {
             });
         assert_ne!(
             fp,
-            status_config_fingerprint(&Some(ruled)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(ruled))),
             "adding a quiet-hours entry must change the fingerprint"
         );
 
@@ -7515,7 +7538,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let scheduled_fp = status_config_fingerprint(&Some(scheduled.clone()));
+        let scheduled_fp = status_config_fingerprint(&Some(std::sync::Arc::new(scheduled.clone())));
         assert_ne!(
             fp, scheduled_fp,
             "adding a scheduled rule must change the fingerprint"
@@ -7527,14 +7550,14 @@ mod tests {
         moved.status_rules.track_rules[0].end_minutes = 1021;
         assert_ne!(
             scheduled_fp,
-            status_config_fingerprint(&Some(moved)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(moved))),
             "editing a rule's window must change the fingerprint"
         );
         let mut other_days = scheduled.clone();
         other_days.status_rules.track_rules[0].days = vec![2];
         assert_ne!(
             scheduled_fp,
-            status_config_fingerprint(&Some(other_days)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(other_days))),
             "editing a rule's weekday set must change the fingerprint"
         );
 
@@ -7549,14 +7572,14 @@ mod tests {
                 pause_polling: true,
                 ..Default::default()
             });
-        let pauses_fp = status_config_fingerprint(&Some(pauses));
+        let pauses_fp = status_config_fingerprint(&Some(std::sync::Arc::new(pauses)));
         assert_ne!(fp, pauses_fp, "`pause_polling` must change the fingerprint");
 
         let mut paused_text = crate::config::AppConfig::default();
         paused_text.teams.paused_status_format = "BRB".to_string();
         assert_ne!(
             fp,
-            status_config_fingerprint(&Some(paused_text)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(paused_text))),
             "editing the paused status text must change the fingerprint"
         );
 
@@ -7564,7 +7587,7 @@ mod tests {
         stopped_text.teams.stopped_status_format = "Idle".to_string();
         assert_ne!(
             fp,
-            status_config_fingerprint(&Some(stopped_text)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(stopped_text))),
             "editing the stopped status text must change the fingerprint"
         );
         // An EMPTY text renders the default, so it must fingerprint like the
@@ -7575,7 +7598,7 @@ mod tests {
         cleared_texts.teams.stopped_status_format = String::new();
         assert_eq!(
             fp,
-            status_config_fingerprint(&Some(cleared_texts)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(cleared_texts))),
             "an empty status text must fingerprint like the default it renders"
         );
 
@@ -7586,7 +7609,10 @@ mod tests {
             locale: Some("de".to_string()),
             ..Default::default()
         };
-        assert_ne!(fp, status_config_fingerprint(&Some(german)));
+        assert_ne!(
+            fp,
+            status_config_fingerprint(&Some(std::sync::Arc::new(german)))
+        );
 
         let custom = crate::config::AppConfig {
             locale: Some("de".to_string()),
@@ -7599,13 +7625,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            status_config_fingerprint(&Some(custom)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(custom))),
             {
                 let mut english = crate::config::AppConfig::default();
                 english.teams.profanity_placeholder = "Eigener Status".to_string();
                 english.teams.paused_status_format = "Kurze Pause".to_string();
                 english.teams.stopped_status_format = "Gerade nicht".to_string();
-                status_config_fingerprint(&Some(english))
+                status_config_fingerprint(&Some(std::sync::Arc::new(english)))
             },
             "a locale cannot change user-authored status text, so it cannot change its fingerprint"
         );
@@ -7621,11 +7647,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            status_config_fingerprint(&Some(empty_german)),
-            status_config_fingerprint(&Some(crate::config::AppConfig {
+            status_config_fingerprint(&Some(std::sync::Arc::new(empty_german))),
+            status_config_fingerprint(&Some(std::sync::Arc::new(crate::config::AppConfig {
                 locale: Some("de".to_string()),
                 ..Default::default()
-            })),
+            }))),
             "empty values fingerprint like the localized text they post"
         );
 
@@ -7636,8 +7662,8 @@ mod tests {
         let mut profane_german = profane_english.clone();
         profane_german.locale = Some("de".to_string());
         assert_ne!(
-            status_config_fingerprint(&Some(profane_english)),
-            status_config_fingerprint(&Some(profane_german)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(profane_english))),
+            status_config_fingerprint(&Some(std::sync::Arc::new(profane_german))),
             "a rejected custom placeholder must fingerprint the locale fallback that is actually posted"
         );
 
@@ -7647,8 +7673,8 @@ mod tests {
         let mut without_lexicon = custom_lexicon.clone();
         without_lexicon.teams.profanity_extra_words.clear();
         assert_ne!(
-            status_config_fingerprint(&Some(without_lexicon)),
-            status_config_fingerprint(&Some(custom_lexicon)),
+            status_config_fingerprint(&Some(std::sync::Arc::new(without_lexicon))),
+            status_config_fingerprint(&Some(std::sync::Arc::new(custom_lexicon))),
             "a lexicon that rejects the placeholder must change the fingerprint"
         );
     }
@@ -7663,7 +7689,7 @@ mod tests {
     /// instead of being flattened to its media.
     #[test]
     fn test_config_flip_rewrite_track_fires_only_on_mismatch() {
-        let config = Some(crate::config::AppConfig::default());
+        let config = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         let now = crate::spotify::NowPlaying {
             media: crate::spotify::TrackInfo {
                 title: "T".to_string(),
@@ -7706,7 +7732,7 @@ mod tests {
         // Same item, flipped filter → one rewrite carrying the full item.
         let mut flipped = crate::config::AppConfig::default();
         flipped.teams.profanity_filter = false;
-        let rewrite = config_flip_rewrite_track(&Some(key), &Some(flipped));
+        let rewrite = config_flip_rewrite_track(&Some(key), &Some(std::sync::Arc::new(flipped)));
         let rewrite = rewrite.expect("a config flip must force one rewrite");
         assert_eq!(rewrite.media.title, "T");
         assert_eq!(rewrite.media.artist, "A");
@@ -7724,7 +7750,7 @@ mod tests {
     /// track writes a status at each step instead of deduping them into one.
     #[test]
     fn status_track_key_separates_episodes_from_tracks() {
-        let config = Some(crate::config::AppConfig::default());
+        let config = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         let media = crate::spotify::TrackInfo {
             title: "Episode 12".to_string(),
             artist: "The Deep Work Show".to_string(),
@@ -8186,14 +8212,14 @@ mod tests {
             ..TrackRuleEntry::default()
         };
         let with_rules = |rules: Vec<TrackRuleEntry>| {
-            Some(AppConfig {
+            Some(std::sync::Arc::new(AppConfig {
                 status_rules: StatusRulesConfig {
                     quiet_hours: Vec::new(),
                     track_rules: rules,
                     ..StatusRulesConfig::default()
                 },
                 ..AppConfig::default()
-            })
+            }))
         };
 
         let overlapping = with_rules(vec![
@@ -8247,19 +8273,21 @@ mod tests {
     #[test]
     fn test_quiet_pause_gate_follows_the_window_and_the_pause_flag() {
         use crate::config::{AppConfig, QuietHoursEntry, StatusRulesConfig};
-        let config = |pause_polling: bool, enabled: bool, start: u16, end: u16| AppConfig {
-            status_rules: StatusRulesConfig {
-                quiet_hours: vec![QuietHoursEntry {
-                    enabled,
-                    start_minutes: start,
-                    end_minutes: end,
-                    pause_polling,
-                    ..QuietHoursEntry::default()
-                }],
-                track_rules: Vec::new(),
-                ..StatusRulesConfig::default()
-            },
-            ..AppConfig::default()
+        let config = |pause_polling: bool, enabled: bool, start: u16, end: u16| {
+            std::sync::Arc::new(AppConfig {
+                status_rules: StatusRulesConfig {
+                    quiet_hours: vec![QuietHoursEntry {
+                        enabled,
+                        start_minutes: start,
+                        end_minutes: end,
+                        pause_polling,
+                        ..QuietHoursEntry::default()
+                    }],
+                    track_rules: Vec::new(),
+                    ..StatusRulesConfig::default()
+                },
+                ..AppConfig::default()
+            })
         };
 
         // Inside the window with the flag on: the iteration is skipped, and it
@@ -8290,7 +8318,7 @@ mod tests {
         // Quiet hours are NOT an ordered list for this decision: a window that
         // starts later can assert the pause even though the first match owns the
         // replacement text.
-        let mut second_window_pauses = config(false, true, 0, 1439);
+        let mut second_window_pauses = (*config(false, true, 0, 1439)).clone();
         second_window_pauses
             .status_rules
             .quiet_hours
@@ -8302,7 +8330,7 @@ mod tests {
                 ..QuietHoursEntry::default()
             });
         assert_eq!(
-            quiet_pause_at(&Some(second_window_pauses), 1300, 3),
+            quiet_pause_at(&Some(std::sync::Arc::new(second_window_pauses)), 1300, 3),
             Some((60, 1380)),
             "an overlapping second window that asks for the pause must stop polling"
         );
@@ -8322,7 +8350,7 @@ mod tests {
         // 20:00→23:00 overlap on [22:00, 23:00), so 22:30 is inside both. Their
         // ends are 07:00 (420) and 23:00 (1380) — an implementation taking the
         // FIRST/minimum would report 420 here, so this assertion is not vacuous.
-        let mut two_pausing = config(true, true, 1320, 420);
+        let mut two_pausing = (*config(true, true, 1320, 420)).clone();
         two_pausing.status_rules.quiet_hours.push(QuietHoursEntry {
             enabled: true,
             start_minutes: 1200,
@@ -8341,15 +8369,18 @@ mod tests {
             3
         ));
         assert_eq!(
-            quiet_pause_at(&Some(two_pausing), 1350, 3),
+            quiet_pause_at(&Some(std::sync::Arc::new(two_pausing.clone())), 1350, 3),
             Some((60, 1380)),
             "with two live pausing windows the log reports the latest end"
         );
 
         // The sleep follows the user's ceiling.
-        let mut slow = paused.clone();
+        let mut slow = (*paused).clone();
         slow.polling.max_interval_seconds = 300;
-        assert_eq!(quiet_pause_at(&Some(slow), 1380, 3), Some((300, 420)));
+        assert_eq!(
+            quiet_pause_at(&Some(std::sync::Arc::new(slow)), 1380, 3),
+            Some((300, 420))
+        );
         // No config loaded: nothing can pause the poll.
         assert_eq!(quiet_pause_at(&None, 1380, 3), None);
     }
@@ -8391,11 +8422,11 @@ mod tests {
                 ..Default::default()
             };
             assert_eq!(
-                paused_status_placeholder(&Some(defaults.clone())),
+                paused_status_placeholder(&Some(std::sync::Arc::new(defaults.clone()))),
                 format!("🎵 {paused}")
             );
             assert_eq!(
-                stopped_status_placeholder(&Some(defaults.clone())),
+                stopped_status_placeholder(&Some(std::sync::Arc::new(defaults.clone()))),
                 format!("🎵 {stopped}")
             );
 
@@ -8403,11 +8434,11 @@ mod tests {
             empty.teams.paused_status_format.clear();
             empty.teams.stopped_status_format.clear();
             assert_eq!(
-                paused_status_placeholder(&Some(empty.clone())),
+                paused_status_placeholder(&Some(std::sync::Arc::new(empty.clone()))),
                 format!("🎵 {paused}")
             );
             assert_eq!(
-                stopped_status_placeholder(&Some(empty)),
+                stopped_status_placeholder(&Some(std::sync::Arc::new(empty))),
                 format!("🎵 {stopped}")
             );
 
@@ -8415,13 +8446,16 @@ mod tests {
             custom.teams.paused_status_format = "Kurze Pause".to_string();
             custom.teams.stopped_status_format = "Gerade nicht".to_string();
             assert_eq!(
-                paused_status_placeholder(&Some(custom.clone())),
+                paused_status_placeholder(&Some(std::sync::Arc::new(custom.clone()))),
                 "🎵 Kurze Pause"
             );
-            assert_eq!(stopped_status_placeholder(&Some(custom)), "🎵 Gerade nicht");
+            assert_eq!(
+                stopped_status_placeholder(&Some(std::sync::Arc::new(custom))),
+                "🎵 Gerade nicht"
+            );
         }
 
-        let english = Some(AppConfig::default());
+        let english = Some(std::sync::Arc::new(AppConfig::default()));
         assert_eq!(paused_status_placeholder(&english), "🎵 Paused");
         assert_eq!(
             stopped_status_placeholder(&english),
@@ -9495,7 +9529,7 @@ mod tests {
         config.polling.default_interval_seconds = 120;
         config.polling.minimum_interval_seconds = 10;
         config.polling.max_interval_seconds = 60;
-        let config = Some(config);
+        let config = Some(std::sync::Arc::new(config));
         let mut auth = 0u8;
         let mut network = 0u8;
 
@@ -9541,7 +9575,7 @@ mod tests {
         narrow.polling.default_interval_seconds = 30;
         narrow.polling.minimum_interval_seconds = 10;
         narrow.polling.max_interval_seconds = 60;
-        let narrow = Some(narrow);
+        let narrow = Some(std::sync::Arc::new(narrow));
         assert_eq!(clamp_poll_interval(120, &narrow), 60);
         assert_eq!(clamp_poll_interval(5, &narrow), 10);
         assert_eq!(clamp_poll_interval(45, &narrow), 45);
@@ -9554,7 +9588,7 @@ mod tests {
         let mut inverted = crate::config::AppConfig::default();
         inverted.polling.minimum_interval_seconds = 120;
         inverted.polling.max_interval_seconds = 5;
-        let inverted = Some(inverted);
+        let inverted = Some(std::sync::Arc::new(inverted));
         assert_eq!(
             clamp_poll_interval(30, &inverted),
             120,
@@ -9574,7 +9608,7 @@ mod tests {
         narrow.polling.default_interval_seconds = 30;
         narrow.polling.minimum_interval_seconds = 10;
         narrow.polling.max_interval_seconds = 60;
-        let narrow = Some(narrow);
+        let narrow = Some(std::sync::Arc::new(narrow));
         assert_eq!(
             pause_backoff(
                 3,
@@ -9679,14 +9713,14 @@ mod tests {
             ..TrackRuleEntry::default()
         };
         let config_with = |rules: Vec<TrackRuleEntry>| {
-            Some(AppConfig {
+            Some(std::sync::Arc::new(AppConfig {
                 status_rules: StatusRulesConfig {
                     quiet_hours: Vec::new(),
                     track_rules: rules,
                     ..StatusRulesConfig::default()
                 },
                 ..AppConfig::default()
-            })
+            }))
         };
 
         assert_eq!(
@@ -9860,7 +9894,7 @@ mod tests {
             let mut c = AppConfig::default();
             c.status_rules.quiet_hours = quiet;
             c.status_rules.track_rules = rules;
-            Some(c)
+            Some(std::sync::Arc::new(c))
         };
         let wy = |avail: &str, act: &str| (avail.to_string(), act.to_string());
 
@@ -9993,7 +10027,7 @@ mod tests {
             let mut c = AppConfig::default();
             c.status_rules.quiet_hours = quiet;
             c.teams.availability_sync = true;
-            Some(c)
+            Some(std::sync::Arc::new(c))
         };
         let entry = |start: u16, end: u16, avail: &str, act: &str| QuietHoursEntry {
             enabled: true,
@@ -10037,7 +10071,7 @@ mod tests {
             ..TrackRuleEntry::default()
         }];
         c.teams.availability_sync = true;
-        let decision = rule_gate_at(&Some(c), 600, 3, "", "");
+        let decision = rule_gate_at(&Some(std::sync::Arc::new(c)), 600, 3, "", "");
         assert!(
             decision.presence.is_none(),
             "a scoped track rule must not match the empty no-track call, so the stale pair still clears (issue #795)"
@@ -10293,12 +10327,15 @@ mod tests {
 
         // Finding #637: a rule with its own presence action overrides the OOO
         // default; a user who is busy is still gated regardless.
-        let cfg = Some(crate::config::AppConfig::default());
+        let cfg = Some(std::sync::Arc::new(crate::config::AppConfig::default()));
         assert!(!ooo_gate_enabled(&cfg, true));
         let mut on = crate::config::AppConfig::default();
         on.teams.gate_when_out_of_office = true;
-        assert!(ooo_gate_enabled(&Some(on.clone()), false));
-        assert!(!ooo_gate_enabled(&Some(on), true));
+        assert!(ooo_gate_enabled(
+            &Some(std::sync::Arc::new(on.clone())),
+            false
+        ));
+        assert!(!ooo_gate_enabled(&Some(std::sync::Arc::new(on)), true));
 
         // Issue #872: busy STILL outranks the OS-level presentation
         // signal — the Graph sample is the more specific real-world state.
@@ -11498,13 +11535,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A config with a stored `snooze_until`, in the spelling the tray writes.
-    fn snooze_config(stored: Option<&str>, max_interval: u64) -> Option<AppConfig> {
+    fn snooze_config(stored: Option<&str>, max_interval: u64) -> Option<std::sync::Arc<AppConfig>> {
         let mut cfg = AppConfig {
             snooze_until: stored.map(str::to_string),
             ..AppConfig::default()
         };
         cfg.polling.max_interval_seconds = max_interval;
-        Some(cfg)
+        Some(std::sync::Arc::new(cfg))
     }
 
     fn stored_in(seconds: i64) -> String {
@@ -11665,7 +11702,7 @@ mod tests {
             "state.config.get_mut()",
             "crate::config::clamp_snooze(",
             "crate::config::save_config(&next)",
-            "*guard = Some(next)",
+            "*guard = Some(Arc::new(next))",
         ] {
             assert!(
                 body.contains(marker),
@@ -11674,7 +11711,8 @@ mod tests {
             );
         }
         assert!(
-            body.find("save_config(&next)").unwrap() < body.find("*guard = Some(next)").unwrap(),
+            body.find("save_config(&next)").unwrap()
+                < body.find("*guard = Some(Arc::new(next))").unwrap(),
             "the in-memory config must only be updated after a successful write"
         );
         // A failed write keeps the field, so the next iteration retries instead
@@ -11807,6 +11845,109 @@ mod tests {
         assert!(
             cli_source.contains("polling::run_oneshot("),
             "--sync-once must route its one-shot through run_oneshot so the pause applies (#793)"
+        );
+    }
+
+    /// Issue #893: one poll iteration performs no deep copy of `AppConfig` —
+    /// it reads an immutable `Arc` snapshot — and a config save issued while
+    /// an iteration is in flight completes without blocking on the poller,
+    /// while the in-flight iteration never observes a partially updated
+    /// config.
+    #[test]
+    fn iteration_snapshot_is_shared_and_survives_a_concurrent_save() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Shared-pointer identity: the iteration snapshot IS the stored
+        // snapshot — no deep copy. A per-iteration `get().clone()` of the
+        // document would produce a distinct allocation and fail this.
+        let state = Arc::new(crate::AppState::new());
+        let mut v1 = crate::config::AppConfig::default();
+        v1.teams.status_format = "v1-format".to_string();
+        *state.config.get_mut() = Some(Arc::new(v1));
+        let stored = state.config.snapshot().expect("config was just stored");
+        let iteration = state.config.snapshot().expect("iteration snapshot");
+        assert!(
+            Arc::ptr_eq(&stored, &iteration),
+            "the iteration snapshot must share the stored pointer, not a deep copy (issue #893)"
+        );
+        // `stored` + `iteration` + the slot itself.
+        let strong_before = Arc::strong_count(&stored);
+        assert_eq!(
+            strong_before, 3,
+            "two snapshots of one stored config share one allocation (issue #893)"
+        );
+
+        // Hot-path twin: with no profile active the effective snapshot shares
+        // the base pointer too (the lexicon/rules must not be cloned per
+        // iteration); an active overlay allocates exactly once.
+        let effective = crate::config::effective_snapshot(&iteration);
+        assert!(
+            Arc::ptr_eq(&iteration, &effective),
+            "effective_snapshot must share the base pointer when no profile is active (issue #893)"
+        );
+        assert_eq!(
+            Arc::strong_count(&stored),
+            strong_before + 1,
+            "the effective snapshot must only bump the shared strong count, never allocate a document"
+        );
+        let mut v_overlay = (*iteration).clone();
+        v_overlay.active_profile = Some("missing".to_string());
+        let overlaid = crate::config::effective_snapshot(&Arc::new(v_overlay));
+        assert_eq!(
+            Arc::strong_count(&overlaid),
+            1,
+            "an active profile overlay allocates exactly one fresh snapshot"
+        );
+
+        // Contention: a save racing the in-flight iteration (which holds only
+        // its `Arc`, never the read guard) must acquire the write lock
+        // promptly. If the iteration held the read guard across its body this
+        // try-write would fail.
+        // Deterministic save-during-iteration protocol: the writer takes
+        // the write lock first and signals while HOLDING it; the main thread
+        // (the in-flight iteration, owning only its `Arc`) then proves a
+        // competing try-write observes contention — i.e. saves serialize on
+        // the write lock — and releases the writer to publish. Had the
+        // iteration held the read guard across its body, the writer could
+        // never have acquired the guard to signal in the first place.
+        let holding = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let holding_writer = Arc::clone(&holding);
+        let release_writer = Arc::clone(&release);
+        let state_writer = Arc::clone(&state);
+        let snapshot_writer = Arc::clone(&iteration);
+        let writer = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut guard = state_writer.config.get_mut();
+            holding_writer.wait();
+            release_writer.wait();
+            let mut v2 = (*snapshot_writer).clone();
+            v2.teams.status_format = "v2-format".to_string();
+            v2.teams.clear_on_pause = !snapshot_writer.teams.clear_on_pause;
+            *guard = Some(Arc::new(v2));
+            start.elapsed()
+        });
+        holding.wait();
+        assert!(
+            state.config.try_get_mut().is_none(),
+            "the racing save must hold the config write lock while the iteration runs on its snapshot (issue #893)"
+        );
+        release.wait();
+        let save_took = writer.join().expect("writer thread must not panic");
+        assert!(
+            save_took < Duration::from_secs(5),
+            "a config save during an in-flight iteration must complete without blocking (issue #893)"
+        );
+        // The in-flight snapshot is untouched by the concurrent save: no
+        // partial update is observable through the old pointer.
+        assert_eq!(iteration.teams.status_format, "v1-format");
+        // And the new value landed for the NEXT iteration under a new pointer.
+        let next = state.config.snapshot().expect("config still stored");
+        assert_eq!(next.teams.status_format, "v2-format");
+        assert!(
+            !Arc::ptr_eq(&iteration, &next),
+            "the save must publish a new snapshot"
         );
     }
 }

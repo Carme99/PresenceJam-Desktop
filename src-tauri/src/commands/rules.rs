@@ -103,7 +103,7 @@ pub fn explain_rules(
         synthetic_track.artist,
         synthetic_track.track,
     );
-    let config = crate::config::load_config().ok();
+    let config = crate::config::load_config().ok().map(std::sync::Arc::new);
     explain_rules_with_config(&config, now_minutes, weekday, &synthetic_track)
 }
 
@@ -111,7 +111,7 @@ pub fn explain_rules(
 /// wrapper; tests exercise this directly with a hand-built `AppConfig`
 /// so the verdict can be pinned without touching disk.
 pub fn explain_rules_with_config(
-    config: &Option<AppConfig>,
+    config: &Option<std::sync::Arc<AppConfig>>,
     now_minutes: u16,
     weekday: u8,
     track: &SyntheticTrack,
@@ -309,15 +309,15 @@ mod tests {
     use super::*;
     use crate::config::{StatusRulesConfig, TrackRuleAction, TrackRuleEntry, TrackRuleMatchKind};
 
-    fn cfg_with_rules(rules: Vec<TrackRuleEntry>) -> Option<AppConfig> {
-        Some(AppConfig {
+    fn cfg_with_rules(rules: Vec<TrackRuleEntry>) -> Option<std::sync::Arc<AppConfig>> {
+        Some(std::sync::Arc::new(AppConfig {
             status_rules: StatusRulesConfig {
                 quiet_hours: Vec::new(),
                 track_rules: rules,
                 ..StatusRulesConfig::default()
             },
             ..AppConfig::default()
-        })
+        }))
     }
 
     fn synthetic(artist: &str, track: &str) -> SyntheticTrack {

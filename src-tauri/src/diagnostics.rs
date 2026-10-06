@@ -744,7 +744,11 @@ fn config_summary(
     spotify_client_secret_present: bool,
     quarantine: &ConfigQuarantine,
 ) -> ConfigSummary {
-    let cfg = state.config.get().clone().unwrap_or_default();
+    let cfg = state
+        .config
+        .snapshot()
+        .map(|c| (*c).clone())
+        .unwrap_or_default();
     let snooze = crate::config::snooze_status(&cfg, chrono::Utc::now());
     ConfigSummary {
         spotify_client_id: cfg.spotify.client_id,
@@ -2481,7 +2485,7 @@ mod tests {
                 ),
                 ..Default::default()
             };
-            *state.config.get_mut() = Some(cfg);
+            *state.config.get_mut() = Some(std::sync::Arc::new(cfg));
         }
         let snapshot = build_snapshot(
             &state,
@@ -2727,7 +2731,7 @@ mod tests {
             cfg.logging.keep_files = 7;
             cfg.snooze_until =
                 Some((chrono::Utc::now() + chrono::Duration::minutes(30)).to_rfc3339());
-            *state.config.get_mut() = Some(cfg);
+            *state.config.get_mut() = Some(std::sync::Arc::new(cfg));
         }
 
         let snapshot = build_snapshot(

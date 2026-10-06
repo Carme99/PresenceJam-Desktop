@@ -125,7 +125,10 @@ fn redacted_lines_from_ring(ring: &VecDeque<PresenceHistoryEntry>) -> Vec<String
 ///
 /// Returns the same entry, so the caller can chain a `manual-status-updated`
 /// emit without re-reading the lock.
-pub fn append(entry: PresenceHistoryEntry, config: Option<&AppConfig>) -> PresenceHistoryEntry {
+pub fn append(
+    entry: PresenceHistoryEntry,
+    config: Option<&std::sync::Arc<AppConfig>>,
+) -> PresenceHistoryEntry {
     // Step 1: enforce the cap. The deque stays at most PRESENCE_HISTORY_CAPACITY
     // entries; the oldest entry is dropped on overflow so the ring is
     // always "the last 200 decisions".

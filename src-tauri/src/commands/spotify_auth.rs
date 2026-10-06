@@ -1090,7 +1090,7 @@ mod tests {
         let state = std::sync::Arc::new(AppState::new());
         let mut config = crate::config::AppConfig::default();
         config.spotify.client_id = "a".repeat(32);
-        *state.config.get_mut() = Some(config);
+        *state.config.get_mut() = Some(std::sync::Arc::new(config));
         state.tokens_load.commit_spotify(
             &state.tokens,
             SpotifyTokens {
@@ -1166,7 +1166,7 @@ mod tests {
         let state = std::sync::Arc::new(AppState::new());
         let mut config = crate::config::AppConfig::default();
         config.spotify.client_id = "a".repeat(32);
-        *state.config.get_mut() = Some(config);
+        *state.config.get_mut() = Some(std::sync::Arc::new(config));
         state.tokens_load.commit_spotify(
             &state.tokens,
             SpotifyTokens {
