@@ -100,8 +100,14 @@ pub fn build_app_menu<R: Runtime, M: Manager<R>>(
 ) -> Result<tauri::menu::Menu<R>, String> {
     let s = crate::i18n::current();
 
+    // The app's own Quit item, shared by both layouts (see the File menu below).
+    let quit_item = MenuItemBuilder::with_id(ID_QUIT, s.menu_quit)
+        .accelerator("CmdOrCtrl+Q")
+        .build(manager)
+        .map_err(|e| e.to_string())?;
+
     // File menu
-    let file_menu = SubmenuBuilder::new(manager, s.menu_file)
+    let file_builder = SubmenuBuilder::new(manager, s.menu_file)
         .item(
             &MenuItemBuilder::with_id(ID_SETTINGS, s.menu_settings)
                 .accelerator("CmdOrCtrl+,")
@@ -114,15 +120,16 @@ pub fn build_app_menu<R: Runtime, M: Manager<R>>(
                 .build(manager)
                 .map_err(|e| e.to_string())?,
         )
-        .separator()
-        .item(
-            &MenuItemBuilder::with_id(ID_QUIT, s.menu_quit)
-                .accelerator("CmdOrCtrl+Q")
-                .build(manager)
-                .map_err(|e| e.to_string())?,
-        )
-        .build()
-        .map_err(|e| e.to_string())?;
+        .separator();
+    // #788 item 2: on macOS Cmd+Q lives in the application submenu, where the OS
+    // expects it, so it is left out here — otherwise the bar carries two Quit
+    // items with the same accelerator. It is the SAME `ID_QUIT` item wherever it
+    // sits, so the click still reaches `request_graceful_shutdown`;
+    // `PredefinedMenuItem::quit` is deliberately not used, since it would quit
+    // through the OS and skip the graceful state flush.
+    #[cfg(not(target_os = "macos"))]
+    let file_builder = file_builder.item(&quit_item);
+    let file_menu = file_builder.build().map_err(|e| e.to_string())?;
 
     // Edit menu (standard macOS clipboard shortcuts for text fields)
     let edit_menu = SubmenuBuilder::new(manager, s.menu_edit)
@@ -164,53 +171,125 @@ pub fn build_app_menu<R: Runtime, M: Manager<R>>(
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Build the full menu bar
-    MenuBuilder::new(manager)
-        .item(&file_menu)
-        .item(&edit_menu)
-        .item(&view_menu)
-        .item(&help_menu)
-        .build()
-        .map_err(|e| e.to_string())
+    // Build the full menu bar.
+    //
+    // #788 item 2: on macOS the FIRST submenu is what the OS renders as the
+    // application menu — the title in the menu bar, plus the conventional
+    // About/Hide/Quit items and Cmd+Q. Installing this bar app-wide without it
+    // would title the app menu "File" and drop the standard items, trading one
+    // macOS defect for a subtler one. `Menu::default` supplies exactly that
+    // submenu, so prepend it there and nowhere else.
+    #[cfg(target_os = "macos")]
+    {
+        // Mirrors the app submenu `tauri::menu::Menu::default` builds, but as a
+        // `Submenu` — a macOS menubar `Menu` may only contain `Submenu`s, so
+        // `Menu::default`'s `Menu` cannot be nested here. Building it inline also
+        // avoids that helper's own File/Edit/View/Window/Help submenus, which
+        // would duplicate the ones below and add an English "Window".
+        //
+        // No `AboutMetadata` / `PredefinedMenuItem::about` here: this crate has
+        // its own `ID_ABOUT` in the Help submenu, routed to `emit_about()`. Adding
+        // the predefined About as well would give macOS two About items.
+        let app_handle = manager.app_handle();
+        let pkg_info = app_handle.package_info();
+        // `Submenu::with_items` takes `&[&dyn IsMenuItem<R>]`. Binding each entry
+        // to that trait object explicitly is required here: the array mixes
+        // `PredefinedMenuItem` (services/separator/hide/hide_others) with this
+        // crate's own `MenuItem` (`quit_item`), and inference otherwise latches
+        // onto the first element's type and rejects the rest. Inline
+        // `map_err(...)?` cannot coerce through the unsized trait object, hence
+        // the `let` bindings.
+        let services_item: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::services(app_handle, None).map_err(|e| e.to_string())?;
+        let sep_1: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::separator(app_handle).map_err(|e| e.to_string())?;
+        let hide_item: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::hide(app_handle, None).map_err(|e| e.to_string())?;
+        let hide_others_item: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::hide_others(app_handle, None).map_err(|e| e.to_string())?;
+        let sep_2: &dyn tauri::menu::IsMenuItem<R> =
+            &PredefinedMenuItem::separator(app_handle).map_err(|e| e.to_string())?;
+        let quit_ref: &dyn tauri::menu::IsMenuItem<R> = &quit_item;
+        let app_items: [&dyn tauri::menu::IsMenuItem<R>; 6] = [
+            services_item,
+            sep_1,
+            hide_item,
+            hide_others_item,
+            sep_2,
+            quit_ref,
+        ];
+        // Fully qualified rather than imported: `Submenu` is only used by this
+        // macOS arm, so a top-level `use` would be an unused import (and a
+        // clippy -D warnings failure) on every other platform.
+        let app_submenu =
+            tauri::menu::Submenu::with_items(app_handle, pkg_info.name.clone(), true, &app_items)
+                .map_err(|e| format!("Failed to build the macOS app submenu: {}", e))?;
+        MenuBuilder::new(manager)
+            .item(&app_submenu)
+            .item(&file_menu)
+            .item(&edit_menu)
+            .item(&view_menu)
+            .item(&help_menu)
+            .build()
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows and Linux keep exactly the bar they had before #788.
+        MenuBuilder::new(manager)
+            .item(&file_menu)
+            .item(&edit_menu)
+            .item(&view_menu)
+            .item(&help_menu)
+            .build()
+            .map_err(|e| e.to_string())
+    }
 }
 
-/// Sets a built menu as the window's menu bar.
+/// Installs a built menu as the application menu bar.
 ///
-/// Using `window.set_menu()` instead of `app.set_menu()` keeps click events
-/// routed through `on_menu_event`. [`Window::set_menu`] marshals the native
-/// call onto the main thread itself, so a caller on a command thread is safe.
+/// #788: this must be [`AppHandle::set_menu`], not [`WebviewWindow::set_menu`].
+/// The window form is not supported on macOS — its main-thread closure carries
+/// only `#[cfg(windows)]` and `#[cfg(any(target_os = "linux", target_os = "bsd"))]`
+/// arms, and Tauri's own documentation states the macOS menu is app-wide and
+/// directs callers here. Nothing in this crate calls `app.set_menu()` or
+/// `Builder::menu()` anywhere else, so the localized File/View/Help bar built by
+/// [`build_app_menu`] was never installed on macOS: Mac users saw only Tauri's
+/// default app/Edit/Window menu, and `rebuild_app_menu` logged "menu bar
+/// relabelled for the new locale" while changing nothing.
+///
+/// Click routing is unaffected — events arrive through `on_menu_event` either
+/// way; only the installation call changes.
 fn apply_app_menu<R: Runtime>(
-    window: &WebviewWindow<R>,
+    app: &AppHandle<R>,
     menu: tauri::menu::Menu<R>,
 ) -> Result<(), String> {
-    window
-        .set_menu(menu)
-        .map_err(|e| format!("Failed to set window menu: {}", e))?;
-    Ok(())
+    // `AppHandle::set_menu` hands back the menu it replaced (an `Option`), not
+    // `()`; discard it so this keeps the `Result<(), String>` the callers use.
+    app.set_menu(menu)
+        .map(|_replaced| ())
+        .map_err(|e| format!("Failed to set app menu: {}", e))
 }
 
 /// Builds and applies the application menu bar for the startup path.
-pub fn setup_app_menu(app: &tauri::App, window: &WebviewWindow) -> Result<(), String> {
+pub fn setup_app_menu(app: &tauri::App, _window: &WebviewWindow) -> Result<(), String> {
     // 4.7.0 (issue #674): install the locale stored in the config before the
     // labels are read. `setup_tray` does the same, so the menu stays correct
     // even when the tray failed to initialise.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
     crate::i18n::install_from_app_state(state.inner());
     let menu = build_app_menu(app)?;
-    apply_app_menu(window, menu)?;
-    log::info!("[MENU] setup_app_menu: window menu bar created successfully");
+    apply_app_menu(app.handle(), menu)?;
+    log::info!("[MENU] setup_app_menu: app menu bar created successfully");
     Ok(())
 }
 
 /// Rebuilds the application menu bar for the newly installed locale (issue
 /// #674), so switching language relabels the native menu without a restart.
 pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window not found".to_string())?;
     let menu = build_app_menu(app)?;
-    apply_app_menu(&window, menu)?;
-    log::info!("[MENU] rebuild_app_menu: menu bar relabelled for the new locale");
+    apply_app_menu(app, menu)?;
+    log::info!("[MENU] rebuild_app_menu: app menu bar relabelled for the new locale");
     Ok(())
 }
 
@@ -261,7 +340,12 @@ pub(crate) fn handle_app_menu_event(target: &impl AppMenuEventTarget, event_id: 
             target.emit_navigate("logs");
             target.show_and_focus();
         }
-        ID_ABOUT => target.emit_about(),
+        ID_ABOUT => {
+            target.emit_about();
+            // #788 item 3: the About view can land behind another window, so
+            // raise it the way the two navigation arms already do.
+            target.show_and_focus();
+        }
         _ => {
             target.log_unknown_event(&format!(
                 "[MENU] handle_app_menu_event: unknown event_id={}",
