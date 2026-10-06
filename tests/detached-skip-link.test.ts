@@ -13,8 +13,9 @@
  * `tests/browser/detached-skip-link.spec.ts`; jsdom does not move focus on a
  * fragment, so here the contract is asserted structurally — the pane body
  * owns the id the layout's link points at, it can hold focus, and it is the
- * only element in the document carrying that id (#742 owns the main
- * window's copy on `.app-container`, and this route never mounts it).
+ * only element in the document carrying that id (#742 keeps the main
+ * window's copy on each view's body, and this route never mounts those
+ * views bare — it always wraps them in its own pane container).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
@@ -102,8 +103,11 @@ describe('#743 detached panes carry the skip-link target', () => {
     // programmatically focusable; without this the jump scrolls and leaves
     // focus on the link.
     expect(target!.getAttribute('tabindex')).toBe('-1');
+    // #742's main-window body targets are gated on `!detached`: the pane
+    // wraps LogViewer in its own `#main-content`, so an ungated inner id
+    // would duplicate it in this document.
+    expect(container.querySelectorAll('[id="main-content"]')).toHaveLength(1);
   });
-
   it('gives the Settings pane body the same target', async () => {
     const { default: DetachedPane } = await import('../src/routes/detached/[pane]/+page.svelte');
     routePane.current = 'settings';
@@ -113,6 +117,8 @@ describe('#743 detached panes carry the skip-link target', () => {
     expect(target, 'the Settings pane has no #main-content for the skip link').not.toBeNull();
     expect(target!.querySelector('.settings')).not.toBeNull();
     expect(target!.getAttribute('tabindex')).toBe('-1');
+    // Same no-duplicate guard as the Logs pane above.
+    expect(container.querySelectorAll('[id="main-content"]')).toHaveLength(1);
   });
 
   it('targets the unknown-pane notice too, and never duplicates the id', async () => {
@@ -123,8 +129,9 @@ describe('#743 detached panes carry the skip-link target', () => {
     const target = skipTarget(container);
     expect(target).not.toBeNull();
     expect(target!.querySelector('.unknown')?.textContent).toContain('mystery');
-    // #742 keeps the main window's copy on `.app-container`; a detached
-    // document mounts this route alone, so the id must appear exactly once.
+    // #742 moved the main window's copy off `.app-container` onto each view's
+    // body; a detached document mounts this route alone, so the id must
+    // appear exactly once.
     expect(container.querySelectorAll('[id="main-content"]')).toHaveLength(1);
   });
 });

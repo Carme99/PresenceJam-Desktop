@@ -11,8 +11,12 @@
 </script>
 
 <div class="about">
-  <!-- #742 follow-up: this card is where the skip link's target moves to. -->
-  <div class="card about-card">
+  <!-- #742: the skip link's target — the card body (About has no header bar,
+       so the card itself is the first region below the app wrapper).
+       `tabindex="-1"` keeps it focusable programmatically without adding a
+       tab stop, and only one view mounts at a time so the id stays unique
+       per document. -->
+  <div class="card about-card" id="main-content" tabindex="-1">
     <div class="logo-wrap"><Logo size={72} title={null} /></div>
     <!-- #739: `+page.svelte` focuses this heading when a navigation lands on
          About; `tabindex="-1"` keeps it out of the tab order. -->

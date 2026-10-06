@@ -1,15 +1,17 @@
 import { expect, test, type Page } from '@playwright/test';
 
 /**
- * #739 — focus really does land on the view heading at load, and the skip
- * link's target is reachable by keyboard.
+ * #739 — focus really does land on the view heading at load — plus #742, which
+ * moved the skip link's target down off `.app-container` onto each view's body
+ * (the Dashboard's `<main>`, the other views' first region below their header
+ * bar). This spec pins the post-move contract: the link is the first
+ * focusable, activating it moves focus onto the view body rather than the
+ * wrapper, the next Tab reaches a body control rather than a header button,
+ * and the header bar itself never owns the target id.
  *
- * #742 (moving that target down onto each view's body) is split into a
- * follow-up that lands after the Settings / LogViewer / Diagnostics slices own
- * a `#main-content` each. This spec pins the two halves of the CURRENT contract
- * — the link is the first focusable, and activating it moves focus rather than
- * leaving it on the wrapper — so the follow-up has a baseline to move from, and
- * so a regression that made the link inert is caught here in the meantime.
+ * Fails pre-fix: the target still sits on `.app-container`, so the body
+ * assertions below see the wrapper instead — focus lands above the header
+ * and the next Tab reaches header chrome.
  */
 async function openDashboard(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -101,5 +103,20 @@ test('activating the skip link moves focus to its target and keeps it keyboard-r
   // Activating it is a fragment navigation, which is what moves focus.
   await page.keyboard.press('Enter');
   await expect.poll(async () => (await activeElement(page)).id).toBe('main-content');
-  expect(await activeElement(page)).toMatchObject({ inHeader: false, isBody: false });
+  // #742: the target is the Dashboard's `<main>` — below the header bar, not
+  // the `.app-container` wrapper that contains it. `closest('header')` is
+  // false (the target sits outside the header) and `closest('#main-content')`
+  // is true for the target itself, which pins "below the header" in the DOM
+  // rather than just "not in a header".
+  await expect.poll(async () => page.evaluate(() => document.activeElement?.tagName)).toBe('MAIN');
+  expect(await activeElement(page)).toMatchObject({ inHeader: false, inMainContent: true, isBody: false });
+  expect(await page.evaluate(() => document.querySelector('.app-container')?.getAttribute('id'))).not.toBe('main-content');
+
+  // One Tab from the body target reaches a body control — the track card's
+  // play/pause-adjacent controls or the manual-status composer — never a
+  // header button (theme, logs, diagnostics, settings, about, sync toggle).
+  await page.keyboard.press('Tab');
+  const afterTab = await activeElement(page);
+  expect(afterTab.inHeader, 'the first Tab after the skip link must leave the header behind').toBe(false);
+  expect(afterTab.inMainContent, 'the first Tab after the skip link must stay in the view body').toBe(true);
 });

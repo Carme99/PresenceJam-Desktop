@@ -508,7 +508,18 @@
     <p class="snapshot-feedback" role="status" aria-live="polite">{openFolderFeedback}</p>
   {/if}
 
-  <div class="log-wrap">
+  <!-- #742: the skip link's target (main window only). It used to sit on
+       `.app-container` in +page.svelte, which wraps this view *and* the
+       PageHeader and toolbar above it, so "Skip to main content" landed on
+       the very chrome the link promises to bypass. `.log-wrap` is the first
+       region below the header and toolbar, so one Tab from here reaches the
+       log list — itself a `tabindex="0"` region — rather than a filter
+       button. `tabindex="-1"` keeps the target focusable without putting it
+       in the tab order. The id is main-window-only: a detached pane mounts
+       this view inside the detached route's own `#main-content` (#743), so
+       carrying it here too would duplicate the id in that document. Only one
+       view is mounted at a time, so the id stays unique per document. -->
+  <div class="log-wrap" id={detached ? undefined : 'main-content'} tabindex="-1">
     <div class="log-list" bind:this={logContainer} onscroll={handleScroll}
       tabindex="0" role="region" aria-label={t('logs.title')}>
       {#if filteredLogs.length === 0}
