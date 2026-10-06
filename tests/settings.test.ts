@@ -2111,3 +2111,128 @@ describe('Settings CSS token contracts (#741, #904)', () => {
   });
 });
 
+
+/**
+ * #750 slice 1: the four extracted cards mount standalone — Rules (with its
+ * Reset path), Logging, Backup and Shortcuts — instead of only inside the
+ * whole page. Fails pre-fix: the components do not exist.
+ */
+describe('Settings extracted cards (#750)', () => {
+  it('mounts RulesCard alone and resets to defaults', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: RulesCard } = await import('$lib/components/settings/RulesCard.svelte');
+    const cfg = structuredClone(defaultConfig);
+    cfg.status_rules.quiet_hours = [
+      {
+        enabled: true,
+        start_minutes: 1320,
+        end_minutes: 420,
+        days: [1],
+        replacement_status: 'custom',
+        presence_availability: '',
+        presence_activity: '',
+        pause_polling: false
+      }
+    ];
+    let changed = 0;
+    let resetCalled = false;
+    const result = render(RulesCard, {
+      statusRules: cfg.status_rules,
+      pausedStatusFormat: 'custom-paused',
+      stoppedStatusFormat: 'custom-stopped',
+      isDirty: false,
+      onreset: () => {
+        resetCalled = true;
+      },
+      onchange: () => {
+        changed += 1;
+      }
+    });
+    await tick();
+    // The seeded row renders with its custom replacement status…
+    const statusInput = result.container.querySelector(
+      '[data-rule-list="quiet_hours"] input[type="text"]'
+    ) as HTMLInputElement;
+    expect(statusInput.value).toBe('custom');
+    // …removing it marks the draft dirty through the callback…
+    const remove = result.container.querySelector(
+      '[data-rule-list="quiet_hours"] button.btn-link'
+    ) as HTMLButtonElement;
+    await fireEvent.click(remove);
+    await tick();
+    expect(changed).toBeGreaterThan(0);
+    // …and Reset delegates to the parent callback.
+    const reset = [...result.container.querySelectorAll('button.btn-link')].find(
+      (b) => b.textContent?.trim() === t('common.resetToDefault')
+    ) as HTMLButtonElement;
+    await fireEvent.click(reset);
+    expect(resetCalled).toBe(true);
+  });
+
+  it('mounts LoggingCard alone and toggles logging', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: LoggingCard } = await import('$lib/components/settings/LoggingCard.svelte');
+    const logging = structuredClone(defaultConfig.logging);
+    const result = render(LoggingCard, { logging });
+    await tick();
+    expect(result.container.querySelector('#logging-enabled')).not.toBeNull();
+    expect(result.container.querySelector('#log-level')).not.toBeNull();
+    const toggle = result.container.querySelector('#logging-enabled') as HTMLInputElement;
+    await fireEvent.click(toggle);
+    await tick();
+    expect(logging.enabled).toBe(!defaultConfig.logging.enabled);
+  });
+
+  it('mounts BackupCard alone and exports through the command', async () => {
+    const { default: BackupCard } = await import('$lib/components/settings/BackupCard.svelte');
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === 'export_config') return '/tmp/pj-backup.json';
+      return null;
+    });
+    let imported = false;
+    const result = render(BackupCard, {
+      onimported: () => {
+        imported = true;
+      }
+    });
+    await tick();
+    const exportBtn = [...result.container.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === t('settings.backupExport')
+    ) as HTMLButtonElement;
+    await fireEvent.click(exportBtn);
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        'export_config',
+        expect.objectContaining({ title: expect.any(String) })
+      );
+    });
+    expect(imported).toBe(false);
+  });
+
+  it('mounts ShortcutsCard alone and records a combination', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: ShortcutsCard } =
+      await import('$lib/components/settings/ShortcutsCard.svelte');
+    const shortcuts = { ...defaultConfig.shortcuts };
+    let changed = 0;
+    const result = render(ShortcutsCard, {
+      shortcuts,
+      onchange: () => {
+        changed += 1;
+      }
+    });
+    await tick();
+    const field = result.container.querySelector('#shortcut-toggle_playback') as HTMLInputElement;
+    expect(field).not.toBeNull();
+    // Clearing the row writes through the bindable prop and marks dirty.
+    const clear = [...result.container.querySelectorAll('button.btn-link')].find(
+      (b) => b.textContent?.trim() === t('settings.shortcutClear')
+    ) as HTMLButtonElement;
+    await fireEvent.click(clear);
+    await tick();
+    expect(changed).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect((field as HTMLInputElement).value).toBe('');
+    });
+  });
+});
