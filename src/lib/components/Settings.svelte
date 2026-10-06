@@ -35,6 +35,10 @@
   import { devLog } from '$lib/utils/dev';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
+  // #984: the follow-system checkbox mirrors the i18n store's own flag
+  // (a resolution policy, not a language). A plain getter read would not
+  // re-render on change, so a local copy is synced after each toggle.
+  let followSystemChecked = $state(i18n.followSystem);
   let isConnected = $state(false);
   let teamsStatusConnected = $state(false);
   let isSaving = $state(false);
@@ -2968,6 +2972,7 @@
           id="language"
           data-no-draft
           value={i18n.locale}
+          disabled={followSystemChecked}
           onchange={(e) => {
             const next = (e.currentTarget as HTMLSelectElement).value as Locale;
             // 4.7.0 (issue #674): `config.locale` is the single source of
@@ -2982,9 +2987,45 @@
           <option value="en">English</option>
           <option value="de">Deutsch</option>
           <option value="fr">Français</option>
+          <option value="es">Español</option>
+          <option value="it">Italiano</option>
+          <option value="pl">Polski</option>
+          <option value="pt">Português (BR)</option>
+          <option value="nl">Nederlands</option>
         </select>
         <p class="hint">{t('settings.languageHint')}</p>
       </div>
+      <div class="toggle-row">
+        <label for="follow-system-language">{t('settings.languageFollowSystemLabel')}</label>
+        <input
+          id="follow-system-language"
+          data-no-draft
+          type="checkbox"
+          checked={followSystemChecked}
+          onchange={(e) => {
+            // #984: follow-system is a resolution policy, not a language — it
+            // lives in the i18n store's own mirror, never in `config.locale`.
+            // Checking re-resolves from the OS language and persists the
+            // resolution; unchecking pins the current resolution as the
+            // explicit choice, so the draft's tag is exactly what the user
+            // keeps. Either way the language select stays in step.
+            const on = (e.currentTarget as HTMLInputElement).checked;
+            if (on) {
+              void i18n.followSystemLanguage().then(() => {
+                localConfig.locale = i18n.locale;
+                followSystemChecked = i18n.followSystem;
+              });
+            } else {
+              const pinned = i18n.locale;
+              localConfig.locale = pinned;
+              void i18n.set(pinned).then(() => {
+                followSystemChecked = i18n.followSystem;
+              });
+            }
+          }}
+        />
+      </div>
+      <p class="hint">{t('settings.languageFollowSystemHint')}</p>
       <div class="toggle-row">
         <label for="autostart">{t('common.launchAtLogin')}</label>
         <input

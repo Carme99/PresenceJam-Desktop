@@ -498,6 +498,10 @@ export const fr: Dict = {
   // 4.7.0 — S6 (tray localization)
   'settings.languageHint':
     'S’applique aussi au menu de la zone de notification et au menu natif de l’application.',
+  // Best-effort translation (no native review yet) — see #984.
+  'settings.languageFollowSystemLabel': 'Suivre la langue du système',
+  'settings.languageFollowSystemHint':
+    'Si activé, le sélecteur de langue ci-dessus est ignoré : l’application reprend la langue de votre système d’exploitation à chaque démarrage. Les langues système non prises en charge retombent toujours sur l’anglais.',
 
   // Issue #932 : la bannière était réservée à Teams
   // (`settings.teamsPersistWarning`, ajoutée avec #562). Le nouveau

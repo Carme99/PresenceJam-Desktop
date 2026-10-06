@@ -22,6 +22,14 @@ import { en } from './i18n/en';
 import type { Dict } from './i18n/en';
 import { de } from './i18n/de';
 import { fr } from './i18n/fr';
+// #984: model-written translations — human review pending per language
+// (see CONTRIBUTING). The shared `Dict` type keeps every table at key
+// parity with `en`, so a missing key fails `npm run check`.
+import { es } from './i18n/es';
+import { it } from './i18n/it';
+import { pl } from './i18n/pl';
+import { pt } from './i18n/pt';
+import { nl } from './i18n/nl';
 import { i18n } from './i18n/store.svelte';
 import type { Locale } from './i18n/store.svelte';
 import { devLog } from './utils/dev';
@@ -29,21 +37,31 @@ import { devLog } from './utils/dev';
 export { i18n };
 export type { Locale } from './i18n/store.svelte';
 
-const DICTS: Record<Locale, Dict> = { en, de, fr };
+const DICTS: Record<Locale, Dict> = { en, de, fr, es, it, pl, pt, nl };
 
 // #616: built once per locale — `t()` runs on every render, and constructing
 // an `Intl` formatter per call would be the expensive part of it.
 const NUMBER_FORMATS: Record<Locale, Intl.NumberFormat> = {
   en: new Intl.NumberFormat('en'),
   de: new Intl.NumberFormat('de'),
-  fr: new Intl.NumberFormat('fr')
+  fr: new Intl.NumberFormat('fr'),
+  es: new Intl.NumberFormat('es'),
+  it: new Intl.NumberFormat('it'),
+  pl: new Intl.NumberFormat('pl'),
+  pt: new Intl.NumberFormat('pt-BR'),
+  nl: new Intl.NumberFormat('nl')
 };
 // #616: CLDR categories. `fr` puts 0 in `one`, so the choice is not
 // `count === 1` ("0 entrée", not "0 entrées").
 const PLURAL_RULES: Record<Locale, Intl.PluralRules> = {
   en: new Intl.PluralRules('en'),
   de: new Intl.PluralRules('de'),
-  fr: new Intl.PluralRules('fr')
+  fr: new Intl.PluralRules('fr'),
+  es: new Intl.PluralRules('es'),
+  it: new Intl.PluralRules('it'),
+  pl: new Intl.PluralRules('pl'),
+  pt: new Intl.PluralRules('pt-BR'),
+  nl: new Intl.PluralRules('nl')
 };
 
 export type TKey = keyof typeof en;
@@ -95,6 +113,13 @@ export function t(
  * `{key}_one` / `{key}_other`, and any other category the locale reports for
  * `count` falls back to `_other`. `count` is interpolated as `{count}` —
  * an explicit `count` in `params` wins.
+ *
+ * Known limitation (#984, follow-up #1154): locales with more than two CLDR
+ * categories (Polish `few`/`many`, e.g. "2 wpisy" vs "5 wpisów") still
+ * resolve those counts through `_other`. The fallback is always grammatical
+ * enough to ship ("5 wpisów" is correct; "2 wpisów" is understandable but
+ * not idiomatic) — full `_few`/`_many` support wants `{key}_few` entries in
+ * all eight dictionaries plus a `PluralKey` widening, and is tracked there.
  */
 export function tCount(
   key: PluralKey,

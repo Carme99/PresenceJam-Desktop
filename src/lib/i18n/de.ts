@@ -487,6 +487,10 @@ export const de: Dict = {
   // 4.7.0 — S6 (tray localization)
   'settings.languageHint':
     'Gilt auch für das Tray-Menü und das native Anwendungsmenü.',
+  // Best-effort translation (no native review yet) — see #984.
+  'settings.languageFollowSystemLabel': 'Systemsprache folgen',
+  'settings.languageFollowSystemHint':
+    'Wenn aktiviert, wird die Sprachauswahl oben ignoriert: Die App übernimmt bei jedem Start die Sprache Ihres Betriebssystems. Nicht unterstützte Systemsprachen fallen weiterhin auf Englisch zurück.',
 
   // Issue #932: das Banner war bisher nur für Teams
   // (`settings.teamsPersistWarning`, mit #562 hinzugefügt). Der neue

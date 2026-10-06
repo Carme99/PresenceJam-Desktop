@@ -1031,7 +1031,7 @@ fn sync_native_locale(app: &AppHandle, persisted: &AppConfig) {
 /// the native application menu are relabelled by the shared post-write path
 /// ([`after_persist`] / [`sync_native_locale`]).
 /// The value is canonicalised before it reaches disk — an unknown tag
-/// (`"zz"`, `"pt-BR"`) is stored as `"en"` and the fallback is logged by
+/// (`"zz"`, `"ja"`) is stored as `"en"` and the fallback is logged by
 /// `i18n::resolve_tag`, so a stored tag and the rendered tables can never
 /// disagree.
 ///
