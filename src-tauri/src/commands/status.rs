@@ -209,11 +209,14 @@ pub fn set_manual_status_inner(
 
     let _ = app.emit(
         "manual-status-updated",
-        serde_json::json!({
-            "manual_status": manual,
-            "filtered": filtered,
-            "user_text": text,
-        }),
+        crate::events::ManualStatusUpdated {
+            manual_status: Some(manual.clone()),
+            filtered: Some(filtered),
+            user_text: Some(text),
+            cleared: None,
+            expired: None,
+            expires_at: None,
+        },
     );
     log::info!(
         "[STATUS] set_manual_status: posted {} chars (filtered={}), expires in {} min",
@@ -236,7 +239,14 @@ pub fn clear_manual_status_inner(state: &AppState, app: &AppHandle) -> Result<()
         clear_manual_status_record();
         let _ = app.emit(
             "manual-status-updated",
-            serde_json::json!({ "cleared": true }),
+            crate::events::ManualStatusUpdated {
+                manual_status: None,
+                filtered: None,
+                user_text: None,
+                cleared: Some(true),
+                expired: None,
+                expires_at: None,
+            },
         );
         return Ok(());
     };
@@ -249,7 +259,14 @@ pub fn clear_manual_status_inner(state: &AppState, app: &AppHandle) -> Result<()
     clear_manual_status_record();
     let _ = app.emit(
         "manual-status-updated",
-        serde_json::json!({ "cleared": true }),
+        crate::events::ManualStatusUpdated {
+            manual_status: None,
+            filtered: None,
+            user_text: None,
+            cleared: Some(true),
+            expired: None,
+            expires_at: None,
+        },
     );
     log::info!("[STATUS] clear_manual_status: manual status cleared");
     Ok(())
@@ -271,7 +288,14 @@ pub fn tick_manual_status_expiry(app: &AppHandle, now: DateTime<Utc>) {
     clear_manual_status_record();
     let _ = app.emit(
         "manual-status-updated",
-        serde_json::json!({ "expired": true, "expires_at": status.expires_at.to_rfc3339() }),
+        crate::events::ManualStatusUpdated {
+            manual_status: None,
+            filtered: None,
+            user_text: None,
+            cleared: None,
+            expired: Some(true),
+            expires_at: Some(status.expires_at.to_rfc3339()),
+        },
     );
     log::info!(
         "[STATUS] manual status expired (set_at={}), cleared local record",

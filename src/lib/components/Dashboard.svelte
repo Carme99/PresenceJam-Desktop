@@ -354,15 +354,10 @@
   // `recentManualStatuses`) is re-hydrated from the `SyncStatus` snapshot
   // and from a `manual-status-updated` listener so a pick on another
   // surface lands here without a remount.
-  type ManualStatus = { message: string; expires_at: string; set_at: string };
-  type ManualStatusUpdatedPayload = {
-    manual_status?: ManualStatus;
-    cleared?: boolean;
-    expired?: boolean;
-    filtered?: boolean;
-    user_text?: string;
-    expires_at?: string;
-  };
+  // Issue #762: `ManualStatusUpdated` is ts-rs-generated from
+  // `src-tauri/src/events.rs` — a Rust-side field rename fails
+  // `npm run check` instead of arriving here as `undefined`.
+  import type { ManualStatus, ManualStatusUpdated } from '$lib/types';
   let manualStatus = $state<ManualStatus | null>(null);
   let recentManualStatuses = $state<{ message: string; used_at: string }[]>([]);
   let composerDraft = $state('');
@@ -622,7 +617,7 @@
     // the new ManualStatus (or `{ cleared: true }`); the listener
     // hydrates the local mirror and triggers the next-tick refresh
     // of the recent ring.
-    teardown.add(listen<ManualStatusUpdatedPayload>('manual-status-updated', (event) => {
+    teardown.add(listen<ManualStatusUpdated>('manual-status-updated', (event) => {
       const payload = event.payload ?? {};
       if (payload.cleared === true || payload.expired === true) {
         manualStatus = null;

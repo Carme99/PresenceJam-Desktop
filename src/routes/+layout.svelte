@@ -55,7 +55,17 @@
   const isMainWindow = isTauriRuntime ? getCurrentWindow().label === 'main' : false;
   import { authFlow, setTeamsPhase, setTeamsDeviceCode, setSpotifyPhase, expiresAtFromResponse, resetTeamsAuthFlow, pollTeamsAuth, teamsPollMutex } from '$lib/stores/authFlow.svelte';
   import type { Snippet } from 'svelte';
-  import type { DeviceCodeResponse, AppConfig } from '$lib/types';
+  import type {
+    DeviceCodeResponse,
+    AppConfig,
+    PresenceUpdated,
+    PresencePaused,
+    PresenceGated,
+    PresenceAvailabilityUpdated,
+    PlaybackStateChanged,
+    SyncStopped,
+    AuthPersistWarning,
+  } from '$lib/types';
   // #779: this shell was the last legacy slot element in `src/`. SvelteKit
   // hands a layout its page content as the `children` snippet; rendering it
   // keeps route navigation swapping the body inside the shell and clears the
@@ -391,13 +401,13 @@
     // was still in flight" race (#287) handled exactly as Dashboard did.
     const presenceTeardown = useListenerTeardown();
     presenceTeardown.add(
-      listen<{ status?: string }>('presence-updated', (event) => {
+      listen<PresenceUpdated>('presence-updated', (event) => {
         devLog('[LAYOUT] presence-updated received');
         markStatusPosted(String(event.payload?.status ?? ''));
       })
     );
     presenceTeardown.add(
-      listen<{ status?: string }>('presence-paused', (event) => {
+      listen<PresencePaused>('presence-paused', (event) => {
         devLog('[LAYOUT] presence-paused received');
         markPresencePaused(String(event.payload?.status ?? ''));
       })
@@ -409,19 +419,19 @@
       })
     );
     presenceTeardown.add(
-      listen<{ reason?: string }>('presence-gated', (event) => {
+      listen<PresenceGated>('presence-gated', (event) => {
         devLog('[LAYOUT] presence-gated received');
         markPresenceGated(String(event.payload?.reason ?? ''));
       })
     );
     presenceTeardown.add(
-      listen<{ available?: boolean }>('presence-availability-updated', (event) => {
+      listen<PresenceAvailabilityUpdated>('presence-availability-updated', (event) => {
         devLog('[LAYOUT] presence-availability-updated received');
         setAvailabilityListening(event.payload?.available === true);
       })
     );
     presenceTeardown.add(
-      listen<{ is_playing?: boolean }>('playback-state-changed', (event) => {
+      listen<PlaybackStateChanged>('playback-state-changed', (event) => {
         devLog('[LAYOUT] playback-state-changed received');
         setPlaybackState(event.payload?.is_playing === true);
       })
@@ -438,7 +448,7 @@
     // reported back as a surprise. An unknown/older payload counts as "not
     // self-terminated", so a user stop can never be mislabelled.
     presenceTeardown.add(
-      listen<{ self_terminated?: boolean }>('sync-stopped', (event) => {
+      listen<SyncStopped>('sync-stopped', (event) => {
         devLog('[LAYOUT] sync-stopped received');
         setSyncing(false);
         if (event.payload?.self_terminated === true) void notifySyncStopped();
@@ -547,7 +557,7 @@
   if (isTauriRuntime) {
     const persistTeardown = useListenerTeardown();
     persistTeardown.add(
-      listen<{ provider?: string; message?: string }>(
+      listen<AuthPersistWarning>(
         'teams-auth-persist-warning',
         (event) => {
           devLog(
@@ -560,7 +570,7 @@
       )
     );
     persistTeardown.add(
-      listen<{ provider?: string; message?: string }>(
+      listen<AuthPersistWarning>(
         'spotify-auth-persist-warning',
         (event) => {
           devLog(

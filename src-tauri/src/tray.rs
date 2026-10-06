@@ -11,6 +11,7 @@ use tauri::{
     AppHandle, Emitter, Listener, Manager,
 };
 
+use crate::events::PlaybackStateChanged;
 use crate::spotify::RepeatState;
 
 use crate::i18n::{self, Strings};
@@ -1041,21 +1042,15 @@ fn note_playing_state(is_playing: bool) {
     LAST_PLAYING_STATE.store(is_playing, Ordering::Release);
 }
 
-/// Payload of the polling loop's `playback-state-changed` event (issue
-/// #689). Only `is_playing` is consumed: the event's `track_key` is part of
-/// the shared contract, but the tray's dedup key already carries the track
-/// identity.
-#[derive(serde::Deserialize)]
-struct PlaybackStateChanged {
-    is_playing: bool,
-}
-
-/// Consumes a `playback-state-changed` payload (issue #689, tray half): the
-/// poll body's playing state is authoritative for a same-track change, and
-/// the poller has already re-stored it, so recording it here keeps the
-/// Play/Pause mark and the status line truthful without waiting for the
-/// next track. An unparsable payload keeps the last known state rather than
-/// inventing one.
+/// Consumes a `playback-state-changed` payload (issue #689, tray half) via
+/// the shared [`crate::events::PlaybackStateChanged`] contract, so a Rust-side
+/// field rename fails here too — not just at the emit site. Only `is_playing`
+/// is consumed: the event's `track_key` is part of the shared contract, but
+/// the tray's dedup key already carries the track identity. The poll body's
+/// playing state is authoritative for a same-track change, and the poller has
+/// already re-stored it, so recording it here keeps the Play/Pause mark and
+/// the status line truthful without waiting for the next track. An unparsable
+/// payload keeps the last known state rather than inventing one.
 fn consume_playback_state_changed(payload: &str) {
     match serde_json::from_str::<PlaybackStateChanged>(payload) {
         Ok(state) => note_playing_state(state.is_playing),

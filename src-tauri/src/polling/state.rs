@@ -322,7 +322,12 @@ pub fn start_polling(
                     // a self-termination — and stays quiet for the stop the
                     // user just asked for, which `commands::sync::stop_syncing`
                     // (the only other emitter) marks `self_terminated: false`.
-                    let _ = app.emit("sync-stopped", json!({ "self_terminated": true }));
+                    let _ = app.emit(
+                        "sync-stopped",
+                        crate::events::SyncStopped {
+                            self_terminated: true,
+                        },
+                    );
                 }
                 if state_for_cleanup.polling.is_syncing() {
                     log::warn!(

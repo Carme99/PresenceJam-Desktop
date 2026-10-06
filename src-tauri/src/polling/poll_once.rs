@@ -2365,27 +2365,35 @@ fn decision_from(
 /// and show the paused state, so a rename here is a silent break there. Built by
 /// a function rather than inline so the shape can be asserted (review round 2,
 /// item 5).
-fn presence_paused_payload(status: &str) -> serde_json::Value {
-    json!({ "status": status })
+fn presence_paused_payload(status: &str) -> crate::events::PresencePaused {
+    crate::events::PresencePaused {
+        status: status.to_string(),
+    }
 }
 
 /// The `playback-state-changed` payload (finding D6, issue #689).
 ///
 /// Cross-slice contract: the Dashboard reads `is_playing` and the tray re-seeds
 /// from `track_key`. Exactly these two fields (review round 2, item 5).
-fn playback_state_changed_payload(is_playing: bool, track_key: &str) -> serde_json::Value {
-    json!({ "is_playing": is_playing, "track_key": track_key })
+fn playback_state_changed_payload(
+    is_playing: bool,
+    track_key: &str,
+) -> crate::events::PlaybackStateChanged {
+    crate::events::PlaybackStateChanged {
+        is_playing,
+        track_key: track_key.to_string(),
+    }
 }
 
 fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activity: &str) {
     let _ = app.emit(
         "presence-gated",
-        json!({
-            "reason": reason,
-            "availability": availability,
-            "activity": activity,
-            "timestamp": Utc::now().to_rfc3339()
-        }),
+        crate::events::PresenceGated {
+            reason: reason.to_string(),
+            availability: availability.to_string(),
+            activity: activity.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        },
     );
     // Issue #863: publish the gate reason into the shared polling-state slot.
     // This is the single funnel for every announced suppression (~7 call
@@ -2460,11 +2468,11 @@ fn arm_presence_session(
             super::state::record_armed_presence(Some((&pair.availability, &pair.activity, label)));
             let _ = app.emit(
                 "presence-availability-updated",
-                json!({
-                    "available": true,
-                    "label": label,
-                    "timestamp": Utc::now().to_rfc3339()
-                }),
+                crate::events::PresenceAvailabilityUpdated {
+                    available: true,
+                    label: label.to_string(),
+                    timestamp: Utc::now().to_rfc3339(),
+                },
             );
             0
         }
@@ -2502,11 +2510,11 @@ fn clear_presence_session(
             super::state::record_armed_presence(None);
             let _ = app.emit(
                 "presence-availability-updated",
-                json!({
-                    "available": false,
-                    "label": label,
-                    "timestamp": Utc::now().to_rfc3339()
-                }),
+                crate::events::PresenceAvailabilityUpdated {
+                    available: false,
+                    label: label.to_string(),
+                    timestamp: Utc::now().to_rfc3339(),
+                },
             );
             0
         }
@@ -2596,14 +2604,14 @@ pub(crate) fn arm_preferred_presence_session(
             }));
             let _ = app.emit(
                 "preferred-presence-updated",
-                json!({
-                    "available": true,
-                    "label": label,
-                    "availability": pair.availability,
-                    "activity": pair.activity,
-                    "expires_at": expires_at.to_rfc3339(),
-                    "timestamp": now.to_rfc3339()
-                }),
+                crate::events::PreferredPresenceUpdated {
+                    available: true,
+                    label: label.to_string(),
+                    availability: Some(pair.availability.clone()),
+                    activity: Some(pair.activity.clone()),
+                    expires_at: Some(expires_at.to_rfc3339()),
+                    timestamp: now.to_rfc3339(),
+                },
             );
             // Issue #877: append a "preferred-presence-armed" entry so
             // the Dashboard's Activity card can correlate a rule-driven
@@ -2650,11 +2658,14 @@ pub(crate) fn clear_preferred_presence_session(
             record_preferred_presence_session(None);
             let _ = app.emit(
                 "preferred-presence-updated",
-                json!({
-                    "available": false,
-                    "label": label,
-                    "timestamp": Utc::now().to_rfc3339()
-                }),
+                crate::events::PreferredPresenceUpdated {
+                    available: false,
+                    label: label.to_string(),
+                    availability: None,
+                    activity: None,
+                    expires_at: None,
+                    timestamp: Utc::now().to_rfc3339(),
+                },
             );
             // Issue #877: append a "preferred-presence-cleared" entry so
             // the Activity card can pair each armed entry with its clear.
@@ -4948,10 +4959,10 @@ pub(crate) fn process_track(
                     super::state::record_posted_status(Some(&final_status));
                     let _ = app.emit(
                         "presence-updated",
-                        json!({
-                            "status": final_status,
-                            "timestamp": Utc::now().to_rfc3339()
-                        }),
+                        crate::events::PresenceUpdated {
+                            status: final_status.clone(),
+                            timestamp: Utc::now().to_rfc3339(),
+                        },
                     );
                     // Adopt the fresh token so the availability
                     // re-arm below does not 401 on the stale one.
@@ -5554,7 +5565,9 @@ pub(crate) fn handle_no_track(
             *gated_track_key = no_track_gate_key(false).map(str::to_string);
             let _ = app.emit(
                 "presence-cleared",
-                json!({ "timestamp": Utc::now().to_rfc3339() }),
+                crate::events::PresenceCleared {
+                    timestamp: Utc::now().to_rfc3339(),
+                },
             );
             teams_backoff_secs
         }
@@ -10635,10 +10648,19 @@ mod tests {
     #[test]
     fn test_self_terminating_poller_emits_sync_stopped() {
         let state_source = include_str!("state.rs");
-        let body = prod_fn_body(state_source, "pub fn start_polling(");
+        // Whitespace-normalised like `sync_source` below: the struct
+        // construction spans lines, so the adjacent event-name + payload
+        // needle only matches on the normalised form.
+        let body: String = prod_fn_body(state_source, "pub fn start_polling(")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         // #675: the self-termination marker, pinned once and reused below.
+        // Issue #762: the adjacent event-name + typed-payload needle pins the
+        // poller-exit emitter to `sync-stopped` carrying `SyncStopped(true)` —
+        // a renamed event or a flipped polarity slips neither assertion.
         let self_terminated_emit =
-            "app.emit(\"sync-stopped\", json!({ \"self_terminated\": true }))";
+            "\"sync-stopped\", crate::events::SyncStopped { self_terminated: true, }";
         assert!(
             body.contains(self_terminated_emit),
             "the poller's own thread-exit point must emit sync-stopped \
@@ -10686,18 +10708,20 @@ mod tests {
         // #675: the two emitters must DIFFER on the payload — that difference
         // is the only way a notification consumer can tell the surprise (a
         // self-termination, which toasts) from the stop the user just asked for
-        // (which must not). Both markers are pinned so neither can drift back
-        // to the old unit payload, which made the two indistinguishable.
+        // (which must not). Issue #762: both go through the typed `SyncStopped`
+        // struct, so the polarity is pinned on the struct field — not on a
+        // json! literal that a rename could silently break.
         let sync_source: String = include_str!("../commands/sync.rs")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
             sync_source.contains(
-                "app.emit( \"sync-stopped\", serde_json::json!({ \"self_terminated\": false }), )"
+                "\"sync-stopped\", crate::events::SyncStopped { self_terminated: false, }"
             ),
-            "commands::sync::stop_syncing owns the USER-requested stop and must say so \
-             (`self_terminated: false`), so #675's sync_stopped notification stays quiet for it"
+            "commands::sync::stop_syncing owns the USER-requested stop and must emit \
+             `sync-stopped` carrying `SyncStopped(false)` — the adjacent needle pins \
+             event name and polarity together, so #675's notification stays quiet for it"
         );
     }
 
@@ -11125,18 +11149,25 @@ mod tests {
     /// the tray reads `track_key`), so their serialized shapes are pinned.
     #[test]
     fn test_event_payload_shapes_are_pinned() {
+        // Issue #762: the builders now return ts-rs-typed structs, so the
+        // exact-JSON assertions below pin the wire shape THROUGH the type —
+        // renaming or dropping a field changes the serialized JSON and fails
+        // here before it can reach the UI as `undefined`.
         assert_eq!(
-            presence_paused_payload("\u{1F3B5} Paused"),
+            serde_json::to_value(presence_paused_payload("\u{1F3B5} Paused"))
+                .expect("PresencePaused must serialize"),
             json!({ "status": "\u{1F3B5} Paused" }),
             "presence-paused is {{ status }} — the Dashboard renders that text"
         );
         assert_eq!(
-            playback_state_changed_payload(false, "A - T | track | f"),
+            serde_json::to_value(playback_state_changed_payload(false, "A - T | track | f"))
+                .expect("PlaybackStateChanged must serialize"),
             json!({ "is_playing": false, "track_key": "A - T | track | f" }),
             "playback-state-changed is {{ is_playing, track_key }} — the Dashboard and \
              the tray both consume it"
         );
-        let value = playback_state_changed_payload(true, "k");
+        let value = serde_json::to_value(playback_state_changed_payload(true, "k"))
+            .expect("PlaybackStateChanged must serialize");
         let obj = value.as_object().expect("an object payload");
         assert_eq!(
             obj.len(),
@@ -11145,6 +11176,63 @@ mod tests {
              break for S2/the tray (review round 2, item 5)"
         );
         assert!(obj.contains_key("is_playing") && obj.contains_key("track_key"));
+        // The `error` envelope had NO shape assertion at all (issue #762):
+        // a rename of `source`, `message` or `severity` compiled, passed the
+        // suite, and reached the UI as `undefined`. The canonical builder
+        // path (`emit_error` → `ErrorEvent`) now pins all three plus the
+        // optional `recovery` discriminator.
+        use crate::polling::{emit_error_with_recovery, ErrorRecovery};
+        let recorder = CapturingEmitter::new();
+        emit_error(
+            &recorder,
+            "spotify",
+            "Retrying after a transient failure".to_string(),
+            ErrorSeverity::Warning,
+        );
+        emit_error_with_recovery(
+            &recorder,
+            "teams",
+            "Reconnect Teams in Settings".to_string(),
+            ErrorSeverity::Error,
+            Some(ErrorRecovery::ReconnectRequired),
+        );
+        let events = recorder
+            .events
+            .lock()
+            .expect("capturing-emitter mutex must not be poisoned");
+        let serialized = events
+            .iter()
+            .map(|(event, payload)| {
+                (
+                    event.as_str(),
+                    serde_json::to_value(payload).expect("ErrorEvent must serialize"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            serialized,
+            vec![
+                (
+                    "error",
+                    serde_json::json!({
+                        "source": "spotify",
+                        "message": "Retrying after a transient failure",
+                        "severity": "warning"
+                    })
+                ),
+                (
+                    "error",
+                    serde_json::json!({
+                        "source": "teams",
+                        "message": "Reconnect Teams in Settings",
+                        "severity": "error",
+                        "recovery": "reconnect_required"
+                    })
+                ),
+            ],
+            "error is {{ source, message, severity, recovery? }} — a renamed or \
+             dropped field is a silent break for the Dashboard banner (issue #762)"
+        );
 
         // ...and the emit sites must go through those builders.
         let prod = prod_source();
