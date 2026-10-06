@@ -11871,7 +11871,7 @@ mod tests {
             sync_source.contains("crate::polling::run_oneshot("),
             "refresh_status must route its one-shot through run_oneshot so the pause applies (#793)"
         );
-        let tray_source = include_str!("../tray.rs");
+        let tray_source = include_str!("../tray/actions.rs");
         assert!(
             tray_source.contains("crate::polling::run_oneshot("),
             "the tray catch-up must route its one-shot through run_oneshot so the pause applies (#793)"
