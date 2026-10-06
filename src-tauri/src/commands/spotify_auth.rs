@@ -1982,10 +1982,10 @@ mod tests {
 
     #[test]
     fn deep_link_handler_uses_commit_spotify_session_seam() {
-        // The deep-link path lives in lib.rs, but its post-exchange block is
+        // The deep-link path lives in deep_link.rs, but its post-exchange block is
         // the only one that calls `commit_spotify_session` from that
         // translation unit, so a targeted scan keeps the assertion tight.
-        let src = include_str!("../lib.rs");
+        let src = include_str!("../deep_link.rs");
         // No trailing '(' in the marker: the signature is generic over
         // `tauri::Runtime` (issue #937), and `fn_body` takes the first `{`
         // after the marker, so a name-only marker matches either shape.

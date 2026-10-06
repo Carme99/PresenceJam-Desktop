@@ -86,6 +86,10 @@ mod tests {
         // different, static literal and intentionally out of scope.
         for (name, src) in [
             ("lib.rs", include_str!("lib.rs")),
+            ("app.rs", include_str!("app.rs")),
+            ("cli.rs", include_str!("cli.rs")),
+            ("deep_link.rs", include_str!("deep_link.rs")),
+            ("state.rs", include_str!("state.rs")),
             ("diagnostics.rs", include_str!("diagnostics.rs")),
             ("pkce.rs", include_str!("pkce.rs")),
             (

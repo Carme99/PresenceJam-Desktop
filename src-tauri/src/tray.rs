@@ -3267,9 +3267,9 @@ mod tests {
     fn menu_events_route_through_one_dispatcher() {
         let tray_prod = prod_source(include_str!("tray.rs"));
         let menu_prod = prod_source(include_str!("menu.rs"));
-        let lib_prod = prod_source(include_str!("lib.rs"));
+        let app_prod = prod_source(include_str!("app.rs"));
         // One registration: the tray builder's global listener delegating to
-        // the named dispatcher; no per-window handler in lib.rs.
+        // the named dispatcher; no per-window handler in app.rs.
         assert!(
             tray_prod.contains(
                 ".on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))"
@@ -3277,8 +3277,8 @@ mod tests {
             "setup_tray must register the single dispatcher, not an inline match"
         );
         assert!(
-            !lib_prod.contains("window.on_menu_event"),
-            "lib.rs must not register a second menu handler (issue #804: double-fire)"
+            !app_prod.contains("window.on_menu_event"),
+            "app.rs must not register a second menu handler (issue #804: double-fire)"
         );
         let dispatcher = body_of(tray_prod, "pub fn handle_menu_event(");
         // The dispatcher owns every tray-built id ...
