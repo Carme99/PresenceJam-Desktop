@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { currentView, settingsDirty, pendingMenuNav, type View } from '$lib/stores/app';
   import { emitTo } from '@tauri-apps/api/event';
   // C7 multi-window detach: pop-out/pop-back controls.
@@ -10,14 +10,13 @@
   // the pane back into the main window (closes this one); the onboarding
   // redirect forwards the navigation to the main window first.
   let { detached = false }: { detached?: boolean } = $props();
-  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, SHORTCUT_SLOTS, shortcutBindingsOf, setShortcutBindings, DEFAULT_PROFANITY_PLACEHOLDER, type ShortcutSlot } from '$lib/stores/config';
-  import type {
-    AppConfig,
-    ShortcutReason,
-    ShortcutsStatus,
-    SlotRegistration,
-    SyncStatus
-  } from '$lib/types';
+  import RulesCard from './settings/RulesCard.svelte';
+  import LoggingCard from './settings/LoggingCard.svelte';
+  import BackupCard from './settings/BackupCard.svelte';
+  import ShortcutsCard from './settings/ShortcutsCard.svelte';
+  import { shortcutReasonLabel, normalizeShortcutReason } from '$lib/utils/shortcuts';
+  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
+  import type { AppConfig, SyncStatus } from '$lib/types';
   import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import DeviceCodeBox from './DeviceCodeBox.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
@@ -60,6 +59,15 @@
     isDirty = true;
     settingsDirty.set(true);
   }
+  // #750: per-card refs. Rules owns its pending removal (Undo/clear on
+  // save/discard); Shortcuts owns its registration status (re-register
+  // after save). Both sync through `markDirty` / `isDirty` below.
+  let rulesCard: { commitRemoval: () => void; clearRemoval: () => void } | null =
+    $state(null);
+  let shortcutsCard: {
+    pendingRejection: () => { reason: import('$lib/types').ShortcutReason } | null;
+    refreshAfterSave: () => void;
+  } | null = $state(null);
 
   /**
    * #890: an edit anywhere in the form marks the draft dirty. `input` and
@@ -136,99 +144,10 @@
     // Reset must not leave those editors showing a stale value.
     localConfig.teams.paused_status_format = defaultConfig.teams.paused_status_format;
     localConfig.teams.stopped_status_format = defaultConfig.teams.stopped_status_format;
+    // #981: the reset replaced the lists, so a pending removal would splice
+    // a stale entry back into the fresh defaults on Undo.
+    rulesCard?.clearRemoval();
     markDirty();
-  }
-  // Issue #432: format minutes-since-midnight as HH:MM for time inputs.
-  function minutesToTime(m: number): string {
-    const h = Math.floor(m / 60) % 24;
-    const mm = m % 60;
-    return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-  }
-  function timeToMinutes(value: string, fallback: number): number {
-    const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
-    if (!match) return fallback;
-    const h = Math.min(23, Math.max(0, Number(match[1])));
-    const mm = Math.min(59, Math.max(0, Number(match[2])));
-    return h * 60 + mm;
-  }
-
-  // S4 (issue #672): a track rule's window END spans 0..=1440, where 1440 is
-  // the end of the day (the config default). `<input type="time">` can only
-  // express 00:00–23:59, and a picked 00:00 is midnight — the same instant as
-  // 1440 — so it is stored as 1440 instead of 0, which would be an empty
-  // window that never matches.
-  function endMinutesFromTime(value: string, fallback: number): number {
-    const minutes = timeToMinutes(value, fallback % 1440);
-    return minutes === 0 ? 1440 : minutes;
-  }
-  // S4 (issue #672): array order is priority (the first matching rule wins), so
-  // the card needs a way to reorder the rules.
-  function moveRule(
-    rules: AppConfig['status_rules']['track_rules'],
-    index: number,
-    delta: number
-  ): void {
-    const target = index + delta;
-    if (target < 0 || target >= rules.length) return;
-    const [moved] = rules.splice(index, 1);
-    rules.splice(target, 0, moved);
-    markDirty();
-  }
-
-  // #981: removing a quiet-hours row or a track rule is reversible. A track
-  // rule carries a replacement status, a presence pair, a weekday set and a
-  // time window — one mis-click used to lose all of it, and the only recovery
-  // was a Discard that also threw away every other edit in the form. The
-  // pending removal holds the entry object itself (spliced out of the proxy
-  // array, not copied) and the index it came from, so Undo re-inserts the very
-  // same values at the very same position instead of an empty row.
-  type QuietHoursEntry = AppConfig['status_rules']['quiet_hours'][number];
-  type TrackRule = AppConfig['status_rules']['track_rules'][number];
-  type PendingRemoval =
-    | { list: 'quiet_hours'; index: number; entry: QuietHoursEntry }
-    | { list: 'track_rules'; index: number; entry: TrackRule };
-  // Only the most recent removal is undoable; removing again replaces it.
-  let pendingRemoval = $state<PendingRemoval | null>(null);
-
-  function removeQuietHours(index: number): void {
-    const list = localConfig.status_rules.quiet_hours;
-    const entry = list[index];
-    if (entry === undefined) return;
-    pendingRemoval = { list: 'quiet_hours', index, entry };
-    list.splice(index, 1);
-    markDirty();
-  }
-
-  function removeTrackRule(index: number): void {
-    const list = localConfig.status_rules.track_rules;
-    const entry = list[index];
-    if (entry === undefined) return;
-    pendingRemoval = { list: 'track_rules', index, entry };
-    list.splice(index, 1);
-    markDirty();
-  }
-
-  /** #981: put the entry back where it was, then move focus onto it. */
-  async function undoRemove(): Promise<void> {
-    const pending = pendingRemoval;
-    if (pending === null) return;
-    if (pending.list === 'quiet_hours') {
-      localConfig.status_rules.quiet_hours.splice(pending.index, 0, pending.entry);
-    } else {
-      localConfig.status_rules.track_rules.splice(pending.index, 0, pending.entry);
-    }
-    pendingRemoval = null;
-    markDirty();
-    // The restored row is the same DOM position it held before, so focus goes
-    // there rather than back to the top of the form: keyboard and screen-reader
-    // users land on the row they just recovered instead of losing their place.
-    await tick();
-    document
-      .querySelector<HTMLElement>(
-        `[data-rule-list="${pending.list}"][data-rule-index="${pending.index}"]`
-      )
-      ?.querySelector<HTMLElement>('input, select, button')
-      ?.focus();
   }
   // Issue #869: name for a freshly-added profile. The Rust side dedupes
   // again on load, so a concurrent edit cannot wedge the form — this is
@@ -248,7 +167,6 @@
   // Frontend mirrors of the Rust clamps, so a typed/pasted value shows the
   // value the backend will actually store (`config.rs::clamp_rules`,
   // `::clamp_teams`, `::clamp_polling`) instead of silently differing.
-  const MAX_RULE_STATUS_CHARS = 128;
   const EXTRA_WORDS_MAX_ENTRIES = 64;
   const EXTRA_WORDS_MAX_CHARS = 32;
   const PAUSE_BACKOFF_MIN_SECONDS = 60;
@@ -260,290 +178,6 @@
   // effective value the backend stored rather than the raw keystrokes.
   const MAX_PROFILE_ID_CHARS = 32;
   const MAX_PROFILE_IDLE_SECONDS = 86400;
-
-  /**
-   * The five availability/activity pairs Graph `presence: setPresence`
-   * accepts. Mirrors `config.rs::PRESENCE_COMBINATIONS` — the closed set the
-   * backend normalizes against — and deliberately omits the two the docs say
-   * have no effect.
-   *
-   * #955: the wire pair is the value; the visible text is a dictionary key, so
-   * the dropdown is translated like the rest of the card. The five labels were
-   * hardcoded English here and rendered verbatim by both selects.
-   */
-  const PRESENCE_OPTIONS: readonly {
-    availability: string;
-    activity: string;
-    labelKey: TKey;
-  }[] = [
-    { availability: 'Available', activity: 'Available', labelKey: 'rules.presenceAvailable' },
-    { availability: 'Busy', activity: 'InACall', labelKey: 'rules.presenceBusyCall' },
-    {
-      availability: 'Busy',
-      activity: 'InAConferenceCall',
-      labelKey: 'rules.presenceBusyConference'
-    },
-    { availability: 'Away', activity: 'Away', labelKey: 'rules.presenceAway' },
-    {
-      availability: 'DoNotDisturb',
-      activity: 'Presenting',
-      labelKey: 'rules.presenceDndPresenting'
-    }
-  ];
-
-  type PresenceFields = { presence_availability: string; presence_activity: string };
-
-  /** `"Availability|Activity"` for the row's `<select>`, `''` when unset. */
-  function presenceValue(availability: string, activity: string): string {
-    return availability && activity ? `${availability}|${activity}` : '';
-  }
-
-  /** Write a selected pair back, or clear BOTH fields for "don't change". */
-  function applyPresenceValue(target: PresenceFields, value: string) {
-    const [availability, activity] = value.split('|');
-    target.presence_availability = availability ?? '';
-    target.presence_activity = activity ?? '';
-  }
-
-  // -----------------------------------------------------------------
-  // Issue #876: Outlook "Work hours" import. The Rust command
-  // `import_working_hours` calls Graph `mailboxSettings/workingHours`,
-  // returns a preview list of `QuietHoursEntry` candidates, and the
-  // Settings UI renders them in a banner before the user applies. The
-  // IPC payload does NOT persist — the apply button rewrites
-  // `localConfig.status_rules.quiet_hours` in place and `Save` (the
-  // normal `update_config` round-trip) writes the result to disk, so
-  // the import is gated by the same dirty-flag plumbing the rest of
-  // the card already uses.
-  // -----------------------------------------------------------------
-
-  interface WorkingHoursImportEntry {
-    enabled: boolean;
-    start_minutes: number;
-    end_minutes: number;
-    days: number[];
-    replacement_status: string;
-    presence_availability: string;
-    presence_activity: string;
-    pause_polling: boolean;
-  }
-
-  interface WorkingHoursImportWorking {
-    start_minutes: number;
-    end_minutes: number;
-    days: number[];
-    time_zone_offset_minutes: number;
-  }
-
-  interface WorkingHoursImportPreview {
-    entries: WorkingHoursImportEntry[];
-    working: WorkingHoursImportWorking | null;
-    message: string | null;
-  }
-
-  let workingHoursPreview = $state<WorkingHoursImportPreview | null>(null);
-  let workingHoursReplaceExisting = $state(true);
-  let workingHoursBusy = $state(false);
-  let workingHoursError = $state('');
-
-  // Issue #868: dry-run tester state. The synthetic track the user types
-  // in the form; the parsed `now_minutes` / `weekday` feed `explain_rules`
-  // alongside it; the result renders below the button.
-  interface RuleTestSynthetic {
-    artist: string;
-    track: string;
-    album: string;
-    show: string;
-    device: string;
-    playlist_uri: string;
-    duration_ms: number;
-    weekday: number;
-  }
-  interface RuleTestStep {
-    index: number;
-    enabled: boolean;
-    matched: boolean;
-    reason: string | null;
-    negated: boolean;
-    action: unknown;
-    match_kind: 'substring' | 'exact' | 'glob';
-  }
-  interface RuleTestResult {
-    matched_index: number | null;
-    summary: string;
-    reason_chain: RuleTestStep[];
-    synthetic_track: RuleTestSynthetic;
-    now_minutes: number;
-    weekday: number;
-  }
-  let ruleTest = $state<RuleTestSynthetic>({
-    artist: '',
-    track: '',
-    album: '',
-    show: '',
-    device: '',
-    playlist_uri: '',
-    duration_ms: 0,
-    weekday: 1,
-  });
-  let ruleTestDurationInput = $state('');
-  let ruleTestMinuteInput = $state('12:00');
-  let ruleTestRunning = $state(false);
-  let ruleTestResult = $state<RuleTestResult | null>(null);
-  let ruleTestError = $state('');
-
-  function parseDurationToMs(value: string): number {
-    // `mm:ss` or empty. Anything we cannot parse becomes 0 (the
-    // documented "no duration gate" default).
-    const trimmed = value.trim();
-    if (!trimmed) return 0;
-    const parts = trimmed.split(':');
-    if (parts.length === 2) {
-      const minutes = parseInt(parts[0], 10);
-      const seconds = parseInt(parts[1], 10);
-      if (Number.isFinite(minutes) && Number.isFinite(seconds) && minutes >= 0 && seconds >= 0) {
-        return (minutes * 60 + seconds) * 1000;
-      }
-    }
-    const single = parseInt(trimmed, 10);
-    if (Number.isFinite(single) && single >= 0) {
-      // Bare number is interpreted as seconds — the same way the
-      // status-template engine treats `{duration_seconds}`.
-      return single * 1000;
-    }
-    return 0;
-  }
-
-  function parseMinuteInputToNumber(value: string): number {
-    // `HH:MM` from a `<input type="time">`. Empty / invalid falls back
-    // to 0 (the start of the day, inside every default window).
-    if (!value) return 0;
-    const parts = value.split(':');
-    if (parts.length !== 2) return 0;
-    const hours = parseInt(parts[0], 10);
-    const minutes = parseInt(parts[1], 10);
-    if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return 0;
-    return Math.max(0, Math.min(1439, hours * 60 + minutes));
-  }
-
-  // Issue #868: factory for the rule `action` discriminated union —
-  // switching the kind resets the inner fields so the old kind's
-  // payload cannot leak into the new variant (a Replace `status`
-  // showing up inside a SnoozeMinutes would silently fail to
-  // serialize through the Rust boundary). The return type matches
-  // `TrackRuleAction` exactly so the `<select onchange>` assignment
-  // typechecks against the generated Rust enum.
-  function actionForKind(kind: string): TrackRuleAction {
-    switch (kind) {
-      case 'replace':
-        return { kind: 'replace', status: '' };
-      case 'snoozeminutes':
-        return { kind: 'snoozeminutes', value: 30 };
-      case 'profile':
-        return { kind: 'profile', id: '' };
-      case 'presence':
-        return { kind: 'presence', availability: '', activity: '' };
-      default:
-        return { kind: 'suppress' };
-    }
-  }
-
-  type TrackRuleAction =
-    | { kind: 'suppress' }
-    | { kind: 'replace'; status: string }
-    | { kind: 'snoozeminutes'; value: number }
-    | { kind: 'profile'; id: string }
-    | { kind: 'presence'; availability: string; activity: string };
-
-  async function runRuleTest() {
-    ruleTestError = '';
-    ruleTestRunning = true;
-    try {
-      const now_minutes = parseMinuteInputToNumber(ruleTestMinuteInput);
-      const synthetic = {
-        ...ruleTest,
-        duration_ms: parseDurationToMs(ruleTestDurationInput),
-      };
-      const result = (await invoke('explain_rules', {
-        nowMinutes: now_minutes,
-        weekday: ruleTest.weekday,
-        syntheticTrack: synthetic,
-      })) as RuleTestResult;
-      ruleTestResult = result;
-    } catch (e) {
-      ruleTestError = typeof e === 'string' ? e : t('common.retry');
-    } finally {
-      ruleTestRunning = false;
-    }
-  }
-
-  async function requestWorkingHoursPreview() {
-    workingHoursError = '';
-    workingHoursBusy = true;
-    try {
-      const preview = (await invoke('import_working_hours')) as WorkingHoursImportPreview;
-      workingHoursPreview = preview;
-      if (preview.message) {
-        workingHoursError = preview.message;
-      }
-    } catch (e) {
-      workingHoursError =
-        typeof e === 'string' ? e : t('common.retry');
-    } finally {
-      workingHoursBusy = false;
-    }
-  }
-
-  function cancelWorkingHoursPreview() {
-    workingHoursPreview = null;
-    workingHoursError = '';
-    workingHoursReplaceExisting = true;
-  }
-
-  function applyWorkingHoursPreview() {
-    const preview = workingHoursPreview;
-    if (!preview) return;
-    const existing = localConfig.status_rules.quiet_hours;
-    const incoming = preview.entries.map((entry) => ({
-      enabled: entry.enabled,
-      start_minutes: entry.start_minutes,
-      end_minutes: entry.end_minutes,
-      days: [...entry.days].sort((a, b) => a - b),
-      replacement_status: entry.replacement_status ?? '',
-      presence_availability: entry.presence_availability ?? '',
-      presence_activity: entry.presence_activity ?? '',
-      pause_polling: entry.pause_polling ?? false
-    }));
-    localConfig.status_rules.quiet_hours = workingHoursReplaceExisting
-      ? incoming
-      : [...existing, ...incoming];
-    workingHoursPreview = null;
-    workingHoursReplaceExisting = true;
-    markDirty();
-  }
-
-  /** Issue #876: one short, translated line per preview entry so the user
-   *  can scan the proposed rules without opening a detail row. */
-  function previewEntryLine(entry: WorkingHoursImportEntry, _idx: number): string {
-    const days = entry.days.length === 0
-      ? t('rules.dayEveryDay')
-      : entry.days.map((d) => t(WEEKDAY_KEYS[d])).join(', ');
-    return `${days} · ${minutesToTime(entry.start_minutes)}–${minutesToTime(entry.end_minutes)}`;
-  }
-
-  /** Issue #876: the "Outlook reports ..." hint line above the entry list. */
-  function formatWorkingHoursSummary(working: WorkingHoursImportWorking): string {
-    if (working.days.length === 0) return t('rules.importWorkingHoursDaysAllOff');
-    const days = working.days
-      .map((d) => t(WEEKDAY_KEYS[d]))
-      .join(', ');
-    return t('rules.importWorkingHoursDaysLabel', {
-      days,
-      start: minutesToTime(working.start_minutes),
-      end: minutesToTime(working.end_minutes)
-    });
-  }
-
   /**
    * Rust bounds the lexicon to 64 entries of 32 chars at the IPC boundary
    * (issue #538). Counted here so the hint can say what will actually be
@@ -697,7 +331,8 @@
 
   async function refreshGrantedScopes() {
     try {
-      grantedScopes = await invoke<string[] | null>('get_spotify_granted_scopes');
+      grantedScopes =
+        (await invoke<string[] | null>('get_spotify_granted_scopes')) ?? null;
     } catch (e) {
       console.error('[SETTINGS] get_spotify_granted_scopes failed:', e);
       grantedScopes = null;
@@ -719,7 +354,7 @@
 
   async function refreshTeamsGrantedScopes() {
     try {
-      teamsGrantedScopes = await invoke<string[]>('get_teams_granted_scopes');
+      teamsGrantedScopes = (await invoke<string[]>('get_teams_granted_scopes')) ?? [];
     } catch (e) {
       console.error('[SETTINGS] get_teams_granted_scopes failed:', e);
       teamsGrantedScopes = [];
@@ -776,310 +411,6 @@
   // both the four auth events and the #376 extra listener below) and tracks
   // the unmount-while-registering race internally, so this is just a handle.
   let teardownAuth: (() => Promise<void>) | null = null;
-
-  // ── global shortcuts (issue #676) ───────────────────────────────────────
-  //
-  // The bindings live in the config (the backend's single source of truth) and
-  // this pane edits them like any other field, so `isDirty` and the
-  // unsaved-changes banner cover them too. Registration is a separate step:
-  // only the OS can say whether a grab was accepted.
-
-  /* Re-exported from the ts-rs generated bindings (issue #784) rather than
-     hand-copied here: `SlotRegistration` is `src/lib/types-generated/
-     SlotRegistration.ts` and `ShortcutsStatus` covers both slots in
-     `./ShortcutsStatus.ts`. `ShortcutSlot` stays frontend-owned (it is the
-     wire-name union in `config.ts`, not a ts-rs export), and the local name
-     `ShortcutsStatus` (singular) is dropped — the backend calls both slots'
-     outcome `ShortcutsStatus`, so one spelling now covers both sides. */
-
-  const SHORTCUT_LABEL_KEYS: Record<ShortcutSlot, TKey> = {
-    toggle_playback: 'settings.shortcutTogglePlayback',
-    toggle_sync: 'settings.shortcutToggleSync'
-  };
-
-  const NO_REGISTRATION: SlotRegistration = { accelerator: null, registered: false, error: null };
-  let shortcutStatus = $state<ShortcutsStatus>({
-    toggle_playback: { ...NO_REGISTRATION },
-    toggle_sync: { ...NO_REGISTRATION }
-  });
-  /** The backend's reason for the last rejected edit, per slot (issue #968).
-   *
-   * The validator used to splice an English string (e.g. `"Ctrl+P" is not a
-   * recognised shortcut (NotAKey)`) into localized copy, so a German card
-   * showed e.g. `Nicht verwendbar: "Ctrl+P" is not a recognised shortcut
-   * (NotAKey)`. The backend now returns a typed [`ShortcutReason`] — `null`
-   * here means "this slot has no pending rejection" (the value clears when
-   * the slot is edited again and clears is treated as "nothing to say").
-   * [`shortcutReasonLabel`] maps a reason to its dictionary entry.
-   */
-  let shortcutErrors = $state<Record<ShortcutSlot, ShortcutReason | null>>({ toggle_playback: null, toggle_sync: null });
-  /**
-   * The slot whose field is recording a combination. Its grab is released for
-   * as long as it records: the OS delivers the key to the grab, not to the
-   * input, so re-recording a live binding would fire its action instead of
-   * being captured.
-   */
-  let capturingSlot = $state<ShortcutSlot | null>(null);
-
-  let shortcutBindings = $derived(shortcutBindingsOf(localConfig));
-
-  /**
-   * Key tokens the plugin's parser accepts, keyed by DOM `KeyboardEvent.code`.
-   * Anything neither listed here nor a letter/digit/F-key is not captured at
-   * all, so the field can never store an accelerator the backend cannot parse.
-   */
-  const SHORTCUT_KEY_TOKENS: Record<string, string> = {
-    Space: 'Space', Enter: 'Enter', Tab: 'Tab', Escape: 'Escape',
-    ArrowUp: 'ArrowUp', ArrowDown: 'ArrowDown', ArrowLeft: 'ArrowLeft', ArrowRight: 'ArrowRight',
-    Backspace: 'Backspace', Delete: 'Delete', Insert: 'Insert',
-    Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown',
-    Minus: 'Minus', Equal: 'Equal', Comma: 'Comma', Period: 'Period',
-    Slash: 'Slash', Semicolon: 'Semicolon', Quote: 'Quote',
-    BracketLeft: 'BracketLeft', BracketRight: 'BracketRight',
-    Backslash: 'Backslash', Backquote: 'Backquote',
-    MediaPlayPause: 'MediaPlayPause', MediaStop: 'MediaStop'
-  };
-
-  /** The plugin accelerator a key press describes, or `null` when unusable. */
-  function acceleratorFromEvent(e: KeyboardEvent): string | null {
-    const code = e.code;
-    let key = SHORTCUT_KEY_TOKENS[code] ?? null;
-    if (key === null && /^Key[A-Z]$/.test(code)) key = code.slice(3);
-    if (key === null && /^Digit[0-9]$/.test(code)) key = code.slice(5);
-    if (key === null && /^F([1-9]|1[0-9]|2[0-4])$/.test(code)) key = code;
-    if (key === null) return null;
-
-    // The platform's primary modifier normalises to `CmdOrCtrl` — the spelling
-    // the defaults use and the plugin resolves per platform — so the binding
-    // still means the same key when the config moves to another machine. The
-    // secondary modifier keeps its own name.
-    const isMac = /mac/i.test(navigator.userAgent ?? '');
-    const modifiers: string[] = [];
-    if (isMac ? e.metaKey : e.ctrlKey) modifiers.push('CmdOrCtrl');
-    if (isMac ? e.ctrlKey : e.metaKey) modifiers.push(isMac ? 'Ctrl' : 'Cmd');
-    if (e.altKey) modifiers.push('Alt');
-    if (e.shiftKey) modifiers.push('Shift');
-    return [...modifiers, key].join('+');
-  }
-
-  /**
-   * Asks the backend whether a combination may bind this slot, so an unparsable,
-   * modifier-less or conflicting one is named inline instead of only failing
-   * at registration.
-   *
-   * The other row's *pending* value goes along — the conflict a user creates
-   * here is between the two rows on screen, and neither is saved yet — and a
-   * cleared row is sent as an explicit empty string, never `null`: the backend
-   * reads a present-but-blank value as "that row is unbound now", which is what
-   * makes clearing one row and moving its accelerator to the other row a single
-   * allowed edit.
-   */
-  async function validateShortcut(slot: ShortcutSlot): Promise<boolean> {
-    const accelerator = shortcutBindings[slot];
-    if (accelerator === null || accelerator.trim() === '') {
-      shortcutErrors[slot] = null;
-      return true;
-    }
-    const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
-    try {
-      await invoke('validate_shortcut', {
-        accelerator,
-        action: slot,
-        other: shortcutBindings[otherSlot] ?? ''
-      });
-      shortcutErrors[slot] = null;
-      return true;
-    } catch (e) {
-      // Issue #968: the validator rejects with a typed `ShortcutReason`
-      // (issue #968). Capture it as the structured value, not a string of
-      // JS error text — the copy is owned by the dictionary the helper
-      // maps to.
-      const reason = normalizeReason(e);
-      if (reason !== null) shortcutErrors[slot] = reason;
-      return false;
-    }
-  }
-
-  /**
-   * Issue #968: a `ShortcutReason` from the IPC boundary, defensive against a
-   * payload the backend did not shape (a partial chunk, an old build, a
-   * future variant). Anything that does not match the typed enum becomes
-   * `Unknown { message: '<unrecognized reason>' }`, so the Settings card
-   * renders *something* rather than crashing — and the unrecognized shape's
-   * raw `kind` and fields are logged in the dev console (the developer
-   * reading the log) instead of leaking into the user-facing message.
-   */
-  function normalizeReason(raw: unknown): ShortcutReason | null {
-    if (raw === null || raw === undefined) return null;
-    if (typeof raw !== 'object') {
-      return { kind: 'Unknown', message: String(raw).slice(0, 180) };
-    }
-    const obj = raw as Record<string, unknown>;
-    if (obj.kind === 'NotAKey' && typeof obj.accelerator === 'string') {
-      return { kind: 'NotAKey', accelerator: obj.accelerator };
-    }
-    if (obj.kind === 'Conflict' && typeof obj.other_slot === 'string') {
-      return { kind: 'Conflict', other_slot: obj.other_slot };
-    }
-    // Issue #810: the modifier-less rejection is a typed variant, not a
-    // foreign string — map it like the other known kinds so the card renders
-    // the localized `settings.shortcutReasonNeedsModifier` template.
-    if (obj.kind === 'NeedsModifier' && typeof obj.accelerator === 'string') {
-      return { kind: 'NeedsModifier', accelerator: obj.accelerator };
-    }
-    if (obj.kind === 'Autostart' && typeof obj.cause === 'string') {
-      return { kind: 'Autostart', cause: obj.cause };
-    }
-    if (obj.kind === 'X11Unavailable') {
-      return { kind: 'X11Unavailable' };
-    }
-    if (obj.kind === 'WorkerUnavailable') {
-      return { kind: 'WorkerUnavailable' };
-    }
-    if (obj.kind === 'Unknown' && typeof obj.message === 'string') {
-      return { kind: 'Unknown', message: obj.message };
-    }
-    console.warn(
-      '[SETTINGS] normalizeReason: unrecognized ShortcutReason payload:',
-      raw
-    );
-    return { kind: 'Unknown', message: 'Unrecognized reason' };
-  }
-
-  /**
-   * Maps a typed `ShortcutReason` to its localized copy. Mirrors
-   * `Dashboard.svelte::gatedReasonLabel`: each known `kind` resolves to a
-   * dictionary entry the translator owns, so a German card shows German
-   * copy instead of the validator's English. `Unknown` is the escape hatch
-   * — a Wayland compositor refusal, an older backend, anything the typed
-   * contract did not anticipate — and renders the backend's free-form
-   * text through the unknown template.
-   */
-  function shortcutReasonLabel(reason: ShortcutReason): string {
-    switch (reason.kind) {
-      case 'NotAKey':
-        return t('settings.shortcutReasonNotAKey', { accelerator: reason.accelerator });
-      case 'Conflict':
-        return t('settings.shortcutReasonConflict', { other: reason.other_slot });
-      // Issue #810: a bare key would be grabbed system-wide. The backend
-      // names the accelerator; the card renders the localized template.
-      case 'NeedsModifier':
-        return t('settings.shortcutReasonNeedsModifier', { accelerator: reason.accelerator });
-      case 'Autostart':
-        return t('settings.shortcutReasonAutostart', { cause: reason.cause });
-      case 'X11Unavailable':
-        return t('settings.shortcutReasonX11Unavailable');
-      case 'WorkerUnavailable':
-        return t('settings.shortcutReasonWorkerUnavailable');
-      case 'Unknown':
-        return t('settings.shortcutReasonUnknown', { message: reason.message });
-    }
-  }
-
-  /** Writes one binding into the config and re-checks the pair. */
-  function setShortcutBinding(slot: ShortcutSlot, accelerator: string | null) {
-    const bindings = shortcutBindingsOf(localConfig);
-    bindings[slot] = accelerator;
-    setShortcutBindings(localConfig, bindings);
-    markDirty();
-    const otherSlot = slot === 'toggle_playback' ? 'toggle_sync' : 'toggle_playback';
-    void validateShortcut(slot);
-    void validateShortcut(otherSlot);
-  }
-
-  /** Records the pressed combination, or leaves the field as it was. */
-  function onShortcutKeydown(e: KeyboardEvent, slot: ShortcutSlot) {
-    // A modifier-only press never completes a combination: keep waiting.
-    if (['Control', 'Meta', 'Alt', 'Shift', 'CapsLock'].includes(e.key)) return;
-    // Issue #810: a bare Escape/Enter cancels the capture instead of binding.
-    // Without this the field would record "Escape" — which the backend now
-    // rejects as a modifier-less grab — instead of doing what the user meant
-    // (back out of recording). A modified press (e.g. Ctrl+Escape) still
-    // binds, so only the modifier-less case cancels.
-    if (
-      (e.code === 'Escape' || e.code === 'Enter') &&
-      !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
-    ) {
-      e.preventDefault();
-      e.currentTarget instanceof HTMLInputElement
-        ? e.currentTarget.blur()
-        : void endShortcutCapture(slot);
-      return;
-    }
-    e.preventDefault();
-    const accelerator = acceleratorFromEvent(e);
-    if (accelerator === null) return;
-    setShortcutBinding(slot, accelerator);
-  }
-
-  /**
-   * One slot's status from an unvalidated IPC payload.
-   *
-   * `register_shortcuts` / `unregister_shortcuts` are a boundary: the payload
-   * is whatever the backend serialized. A malformed or missing slot becomes
-   * "not registered" — never a claim that a binding is live, and never a crash
-   * while rendering (a stale chunk or a partial payload used to reach
-   * `status[slot].error` unchecked).
-   */
-  function registrationFrom(raw: unknown, slot: ShortcutSlot): SlotRegistration {
-    if (raw === null || typeof raw !== 'object') return { ...NO_REGISTRATION };
-    // Named widening (the value was just proven to be an object) rather than a
-    // cast at the field; every value read below is type-checked before use.
-    const table = raw as Record<string, unknown>;
-    const entry = table[slot];
-    if (entry === undefined || entry === null || typeof entry !== 'object') {
-      return { ...NO_REGISTRATION };
-    }
-    // `in`-narrowing, not a cast: the three fields this card reads are proven
-    // present before any of them is touched.
-    if (!('accelerator' in entry) || !('registered' in entry) || !('error' in entry)) {
-      return { ...NO_REGISTRATION };
-    }
-
-    // Issue #968: the backend's error field is now a typed `ShortcutReason`
-    // (a tagged enum), not a free-form string. `normalizeReason` upgrades a
-    // raw JS value to a typed reason; anything unrecognised becomes
-    // `Unknown { message }` so a partial payload never crashes the card.
-    const error = normalizeReason(entry.error);
-    return {
-      accelerator: typeof entry.accelerator === 'string' ? entry.accelerator : null,
-      registered: entry.registered === true && error === null,
-      error
-    };
-  }
-
-  /** Both slots' status from one IPC payload. */
-  function statusFrom(raw: unknown): ShortcutsStatus {
-    return {
-      toggle_playback: registrationFrom(raw, 'toggle_playback'),
-      toggle_sync: registrationFrom(raw, 'toggle_sync')
-    };
-  }
-
-  /** Re-registers from the persisted config and adopts the reported status. */
-  async function refreshShortcutStatus() {
-    try {
-      shortcutStatus = statusFrom(await invoke<unknown>('register_shortcuts'));
-    } catch (e) {
-      console.warn('[SETTINGS] register_shortcuts failed:', e);
-    }
-  }
-
-  async function beginShortcutCapture(slot: ShortcutSlot) {
-    capturingSlot = slot;
-    try {
-      shortcutStatus = statusFrom(await invoke<unknown>('unregister_shortcuts'));
-    } catch (e) {
-      console.warn('[SETTINGS] unregister_shortcuts failed:', e);
-    }
-  }
-
-  async function endShortcutCapture(slot: ShortcutSlot) {
-    if (capturingSlot !== slot) return;
-    capturingSlot = null;
-    await refreshShortcutStatus();
-  }
-
   onMount(async () => {
     // #615: registered first, synchronously — before the config/scope IPC
     // below can suspend — so the `onDestroy` teardown always has a handle to
@@ -1139,13 +470,6 @@
     // post-save adoption below.
     extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
 
-    // 4.7.0 (issue #676): name any stored binding the backend will not accept,
-    // and re-register from the config that was just loaded — the startup pass
-    // ran before this pane existed, so this makes the status on screen the
-    // status of the config on screen.
-    for (const slot of SHORTCUT_SLOTS) void validateShortcut(slot);
-    await refreshShortcutStatus();
-
     try {
       const syncStatus = await invoke<SyncStatus>('get_sync_status');
       isConnected = syncStatus.spotify_connected ?? false;
@@ -1199,9 +523,6 @@
     settingsDirty.set(false);
     pendingMenuNav.set(null);
     if (teardownAuth) void teardownAuth();
-    // 4.7.0 (issue #676): the grabs are released while a field records a
-    // combination. Navigating away mid-recording must not leave them released.
-    if (capturingSlot) void refreshShortcutStatus();
   });
 
   async function handleSave() {
@@ -1214,12 +535,12 @@
       // saved nor registered. The card validates on every edit, so the reason
       // is already recorded — read it here rather than issuing IPC in the save
       // path, which nothing else in this handler does.
-      const rejectedSlot = SHORTCUT_SLOTS.find((slot) => shortcutErrors[slot] !== null);
-      if (rejectedSlot !== undefined && rejectedSlot !== null && shortcutErrors[rejectedSlot]) {
+      const rejected = shortcutsCard?.pendingRejection() ?? null;
+      if (rejected !== null) {
         // Issue #968: render the localized label for the typed reason, not
         // the raw English string the validator used to splice in.
         saveMessage = t('settings.shortcutRejected', {
-          reason: shortcutReasonLabel(shortcutErrors[rejectedSlot]!)
+          reason: shortcutReasonLabel(rejected.reason)
         });
         return;
       }
@@ -1242,7 +563,7 @@
       isDirty = false;
       settingsDirty.set(false);
       // #981: the removal is committed now, so there is nothing left to undo.
-      pendingRemoval = null;
+      rulesCard?.commitRemoval();
       saveMessage = t('settings.saved');
       if (saveTimeout) clearTimeout(saveTimeout);
       saveTimeout = setTimeout(() => saveMessage = '', 2000);
@@ -1255,106 +576,20 @@
     // the store write, which is not this card's business. A rejected slot
     // returned above, so nothing is re-registered for a save that never
     // happened; both save paths (Save and "Save & leave") go through here.
-    void refreshShortcutStatus();
+    shortcutsCard?.refreshAfterSave();
   }
-
-  async function openLogs() {
-    // Issue #979: surface in-pane via the existing `saveMessage` channel
-    // (same toast the rest of this view uses) instead of a console-only
-    // warning. The backend now returns a non-empty error string for a
-    // missing target instead of silently dispatching a no-op spawn.
+  // #750: BackupCard owns the dialogs and the status line; the parent only
+  // re-snapshots the draft from what is now on disk (the #297 invariant).
+  async function handleBackupImported() {
+    localConfig = await loadConfig();
+    extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
+    isDirty = false;
+    settingsDirty.set(false);
+    // #981: the imported document replaced the draft, so the pending
+    // removal refers to a row that no longer exists.
+    rulesCard?.clearRemoval();
     saveMessage = '';
-    try {
-      await invoke('open_logs_folder');
-    } catch (e) {
-      console.warn('[SETTINGS] open_logs_folder failed:', e);
-      const msg = String((e as Error)?.message ?? e).slice(0, 180);
-      saveMessage = msg || t('logs.openFolderError');
-      saveTimeout = setTimeout(() => saveMessage = '', 3000);
-    }
   }
-
-  // ── 4.7.0 (S5): logging + backup cards ────────────────────────────────
-  //
-  // Rust mirrors of `config.rs::clamp_logging` (1..=500 MB, 1..=20 files), so
-  // a typed value shows the value the backend will actually store.
-  const LOG_MAX_FILE_SIZE_MB = { min: 1, max: 500 } as const;
-  const LOG_KEEP_FILES = { min: 1, max: 20 } as const;
-  /**
-   * The wire values `config.rs::apply_log_level` matches (case-insensitively).
-   * Shown verbatim: they are identifiers a log reader is looking for, like the
-   * locale endonyms in the appearance card, not prose to translate.
-   */
-  const LOG_LEVELS = ['Off', 'Error', 'Warn', 'Info', 'Debug', 'Trace'] as const;
-
-  let backupBusy = $state(false);
-  let backupMessage = $state('');
-
-  /** `{ path, config }` — the Rust `ImportOutcome` (commands/config.rs). */
-  type ImportOutcome = { path: string; config: AppConfig };
-
-  function backupError(e: unknown): string {
-    return String((e as Error)?.message ?? e).slice(0, 180);
-  }
-
-  async function exportConfig() {
-    if (backupBusy) return;
-    backupBusy = true;
-    backupMessage = '';
-    try {
-      const path = await invoke<string | null>('export_config', {
-        title: t('settings.backupExportDialogTitle')
-      });
-      // `null` = the dialog was dismissed: not a failure, and no message.
-      if (path) backupMessage = t('settings.backupExported', { path });
-    } catch (e) {
-      console.error('[SETTINGS] export_config failed:', e);
-      backupMessage = t('settings.backupError', { error: backupError(e) });
-    } finally {
-      backupBusy = false;
-    }
-  }
-
-  async function importConfig() {
-    if (backupBusy) return;
-    backupBusy = true;
-    backupMessage = '';
-    try {
-      // Both the picker and the overwrite confirmation live in the
-      // `import_config` command (Rust), so the same dialog appears in the main
-      // window and in a popped-out Settings pane — the JS dialog plugin is
-      // ACL-gated per window, and granting it to detached panes would hand them
-      // the file dialogs too. Only the *copy* is localized here: Rust has no
-      // dictionary, so the title, the body and both button labels arrive as
-      // arguments and every one of them goes through `t()`.
-      const outcome = await invoke<ImportOutcome | null>('import_config', {
-        title: t('settings.backupImportDialogTitle'),
-        confirmBody: t('settings.backupConfirmOverwrite'),
-        confirmOk: t('common.yes'),
-        confirmCancel: t('common.no')
-      });
-      if (!outcome) return;
-      // Adopt what is now on disk (the #297 invariant) — including the
-      localConfig = await loadConfig();
-      extraWordsText = localConfig.teams.profanity_extra_words.join('\n');
-      isDirty = false;
-      settingsDirty.set(false);
-      // #981: the imported document replaced the draft, so the pending
-      // removal refers to a row that no longer exists.
-      pendingRemoval = null;
-      saveMessage = '';
-      backupMessage = t('settings.backupImported', { path: outcome.path });
-    } catch (e) {
-      console.error('[SETTINGS] import_config failed:', e);
-      // Rust refuses an import that carries a plaintext client_secret and
-      // names the offending path; surface that text rather than a generic
-      // failure, since it is the only way the user learns why.
-      backupMessage = t('settings.backupError', { error: backupError(e) });
-    } finally {
-      backupBusy = false;
-    }
-  }
-
   async function reconnectSpotify() {
     if (spotifyAuthWaiting || !localConfig.spotify.client_id) return;
     // #550: `reconnect_spotify_session` emits `spotify-reconnect-required`,
@@ -1639,7 +874,7 @@
     isDirty = false;
     settingsDirty.set(false);
     // #981: the draft is being abandoned, so its pending removal goes with it.
-    pendingRemoval = null;
+    rulesCard?.clearRemoval();
     const target = pendingNav ?? $pendingMenuNav;
     pendingNav = null;
     pendingMenuNav.set(null);
@@ -1663,7 +898,7 @@
     isDirty = false;
     settingsDirty.set(false);
     // #981: the draft the pending removal belonged to is gone with it.
-    pendingRemoval = null;
+    rulesCard?.clearRemoval();
     saveMessage = '';
   }
 
@@ -1966,593 +1201,15 @@
         {t('settings.idleAwayHint')}
       </p>
     </section>
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('rules.sectionTitle')}</h2>
-        <!-- #981: the card header is where a removal is announced and taken
-             back. It lives here, not on each row, because a row that was just
-             removed is by definition not on screen to host its own control. -->
-        <span class="section-actions">
-          {#if pendingRemoval !== null && isDirty}
-            <button type="button" class="btn-link btn-link-tap" onclick={undoRemove}>
-              {t('rules.undoRemove')}
-            </button>
-          {/if}
-          <button type="button" class="btn-link" onclick={resetRulesDefaults}>{t('common.resetToDefault')}</button>
-        </span>
-      </header>
-      <p class="hint">{t('rules.sectionHint')}</p>
-      {#if localConfig.status_rules == null}
-        <p class="hint">{t('rules.noQuietHours')}</p>
-      {:else}
-      <div class="form-group">
-        <span class="form-label">{t('rules.quietHoursLabel')}</span>
-        <p class="hint">{t('rules.quietWindowHint')}</p>
-        {#if localConfig.status_rules.quiet_hours.length === 0}
-          <p class="hint">{t('rules.noQuietHours')}</p>
-        {/if}
-        {#each localConfig.status_rules.quiet_hours as entry, i}
-          <!-- #746: the ordinal is appended so two rows are not announced under
-               the same group name; the label keys carry no `{n}` placeholder. -->
-          <div
-            class="rule-row rule-col"
-            role="group"
-            aria-label={`${t('rules.quietHoursLabel')} ${i + 1}`}
-            data-rule-list="quiet_hours"
-            data-rule-index={i}
-          >
-            <div class="rule-row">
-              <input type="checkbox" bind:checked={entry.enabled} aria-label={t('rules.ruleEnabled')} />
-              <input
-                type="time"
-                value={minutesToTime(entry.start_minutes)}
-                onchange={(e) => { entry.start_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, entry.start_minutes); }}
-                aria-label={t('rules.quietStart')}
-              />
-              <span aria-hidden="true">–</span>
-              <!-- S4 (issue #672): the same `00:00`-means-midnight mapping the
-                   track-rule window uses, so the picker can never save a
-                   silently inert `00:00–00:00` quiet window (Rust clamps the end
-                   to 1439 for the comparison, and 1440 is the end of the day
-                   there too). -->
-              <input
-                type="time"
-                value={minutesToTime(entry.end_minutes)}
-                onchange={(e) => { entry.end_minutes = endMinutesFromTime((e.currentTarget as HTMLInputElement).value, entry.end_minutes); }}
-                aria-label={t('rules.quietEnd')}
-              />
-              <button
-                type="button"
-                class="btn-link btn-link-tap"
-                onclick={() => removeQuietHours(i)}
-              >{t('rules.removeRule')}</button>
-            </div>
-            <div class="rule-row days-row" role="group" aria-label={t('rules.quietDays')}>
-              {#each [1, 2, 3, 4, 5, 6, 7] as day}
-                <label class="rule-check day-check">
-                  <input
-                    type="checkbox"
-                    checked={entry.days.includes(day)}
-                    onchange={(e) => {
-                      const on = (e.currentTarget as HTMLInputElement).checked;
-                      entry.days = on
-                        ? [...entry.days, day].sort()
-                        : entry.days.filter((d) => d !== day);
-                    }}
-                  />
-                  <span>{t(WEEKDAY_KEYS[day])}</span>
-                </label>
-              {/each}
-            </div>
-            <div class="rule-row">
-              <label class="rule-check">
-                <input type="checkbox" bind:checked={entry.pause_polling} />
-                <span>{t('rules.pausePollingLabel')}</span>
-              </label>
-            </div>
-            <p class="hint">{t('rules.pausePollingHint')}</p>
-            <div class="rule-row">
-              <!-- Issue #538: the quiet-hours replacement status was config-only
-                   until 4.6 — this is its editor. Finding #634: the same row
-                   carries the rule's Teams presence action. -->
-              <input
-                type="text"
-                bind:value={entry.replacement_status}
-                maxlength={MAX_RULE_STATUS_CHARS}
-                placeholder={t('rules.replacementPlaceholder')}
-                aria-label={t('rules.replacementPlaceholder')}
-              />
-              <select
-                value={presenceValue(entry.presence_availability, entry.presence_activity)}
-                onchange={(e) => applyPresenceValue(entry, (e.currentTarget as HTMLSelectElement).value)}
-                aria-label={t('rules.presenceLabel')}
-              >
-                <option value="">{t('rules.presenceNone')}</option>
-                {#each PRESENCE_OPTIONS as option}
-                  <option value={`${option.availability}|${option.activity}`}>{t(option.labelKey)}</option>
-                {/each}
-              </select>
-            </div>
-            {#if entry.replacement_status.length >= MAX_RULE_STATUS_CHARS}
-              <p class="clamp-hint" role="status">
-                {t('rules.replacementClampHint', { max: MAX_RULE_STATUS_CHARS })}
-              </p>
-            {/if}
-            <p class="hint">{t('rules.presenceHint')}</p>
-          </div>
-        {/each}
-        <button
-          type="button"
-          class="btn-secondary"
-          onclick={() => { localConfig.status_rules.quiet_hours.push({ enabled: true, start_minutes: 1320, end_minutes: 420, days: [], replacement_status: '', presence_availability: '', presence_activity: '', pause_polling: false }); markDirty(); }}
-        >{t('rules.addQuietHours')}</button>
-        <!-- Issue #876: Outlook "Work hours" import. The button fires a
-             `preview_working_hours` IPC call (issue #876 reads Graph
-             `mailboxSettings.workingHours`, returns a list of
-             `QuietHoursEntry` candidates). The preview renders below so
-             the user can see and reject the new rules before they
-             overwrite the existing quiet_hours table. -->
-        <button
-          type="button"
-          class="btn-link"
-          onclick={requestWorkingHoursPreview}
-          disabled={workingHoursBusy}
-        >{t('rules.importWorkingHours')}</button>
-        <p class="hint">{t('rules.importWorkingHoursHint')}</p>
-        {#if workingHoursError}
-          <p class="hint error" role="status">{workingHoursError}</p>
-        {/if}
-        {#if workingHoursPreview && workingHoursPreview.entries.length > 0}
-          <div class="rule-col import-preview" role="group" aria-label={t('rules.importWorkingHoursPreviewTitle')}>
-            <span class="form-label">{t('rules.importWorkingHoursPreviewTitle')}</span>
-            {#if workingHoursPreview.working}
-              <p class="hint">{formatWorkingHoursSummary(workingHoursPreview.working)}</p>
-            {/if}
-            <ol class="hint preview-list">
-              {#each workingHoursPreview.entries as entry, idx}
-                <li>
-                  {previewEntryLine(entry, idx)}
-                </li>
-              {/each}
-            </ol>
-            <label class="rule-check">
-              <input
-                type="checkbox"
-                bind:checked={workingHoursReplaceExisting}
-              />
-              <span>{t('rules.importWorkingHoursReplace')}</span>
-            </label>
-            <p class="hint">{t('rules.importWorkingHoursReplaceHint')}</p>
-            <div class="rule-row">
-              <button
-                type="button"
-                class="btn-secondary"
-                onclick={applyWorkingHoursPreview}
-              >{t('rules.importWorkingHoursApply')}</button>
-              <button
-                type="button"
-                class="btn-link"
-                onclick={cancelWorkingHoursPreview}
-              >{t('rules.importWorkingHoursCancel')}</button>
-            </div>
-          </div>
-        {/if}
-      </div>
-      <div class="form-group">
-        <span class="form-label">{t('rules.trackRulesLabel')}</span>
-        <p class="hint">{t('rules.trackRulesOrderHint')}</p>
-        {#if localConfig.status_rules.track_rules.length === 0}
-          <p class="hint">{t('rules.noTrackRules')}</p>
-        {/if}
-        {#each localConfig.status_rules.track_rules as rule, j}
-          <!-- #746: same ordinal as the Move up/down buttons below. -->
-          <div
-            class="rule-row rule-col"
-            role="group"
-            aria-label={`${t('rules.trackRulesLabel')} ${j + 1}`}
-            data-rule-list="track_rules"
-            data-rule-index={j}
-          >
-            <div class="rule-row">
-              <label class="rule-check">
-                <input type="checkbox" bind:checked={rule.enabled} />
-                <span>{t('rules.ruleEnabled')}</span>
-              </label>
-              <!-- #741: `.btn-link` is `padding: 0`, so these two arrows were
-                   a ~14x21px hit area 8px apart — under the WCAG 2.5.8 24x24
-                   target, and a mis-hit silently reorders a rule that only
-                   takes effect on Save. `btn-link-tap` widens the target and
-                   keeps the glyph and its aria-label. -->
-              <button
-                type="button"
-                class="btn-link btn-link-tap"
-                disabled={j === 0}
-                aria-label={t('rules.moveRuleUp', { n: j + 1 })}
-                onclick={() => moveRule(localConfig.status_rules.track_rules, j, -1)}
-              >↑</button>
-              <button
-                type="button"
-                class="btn-link btn-link-tap"
-                disabled={j === localConfig.status_rules.track_rules.length - 1}
-                aria-label={t('rules.moveRuleDown', { n: j + 1 })}
-                onclick={() => moveRule(localConfig.status_rules.track_rules, j, 1)}
-              >↓</button>
-              <button
-                type="button"
-                class="btn-link btn-link-tap"
-                onclick={() => removeTrackRule(j)}
-              >{t('rules.removeRule')}</button>
-            </div>
-            <div class="rule-row">
-              <input
-                type="text"
-                bind:value={rule.artist_substring}
-                placeholder={t('rules.artistPlaceholder')}
-                aria-label={t('rules.artistPlaceholder')}
-              />
-              <input
-                type="text"
-                bind:value={rule.track_substring}
-                placeholder={t('rules.trackPlaceholder')}
-                aria-label={t('rules.trackPlaceholder')}
-              />
-            </div>
-            <div class="rule-row">
-              <input
-                type="text"
-                bind:value={rule.replacement_status}
-                maxlength={MAX_RULE_STATUS_CHARS}
-                placeholder={t('rules.replacementPlaceholder')}
-                aria-label={t('rules.replacementPlaceholder')}
-              />
-              <select
-                value={presenceValue(rule.presence_availability, rule.presence_activity)}
-                onchange={(e) => applyPresenceValue(rule, (e.currentTarget as HTMLSelectElement).value)}
-                aria-label={t('rules.presenceLabel')}
-              >
-                <option value="">{t('rules.presenceNone')}</option>
-                {#each PRESENCE_OPTIONS as option}
-                  <option value={`${option.availability}|${option.activity}`}>{t(option.labelKey)}</option>
-                {/each}
-              </select>
-            </div>
-            {#if rule.replacement_status.length >= MAX_RULE_STATUS_CHARS}
-              <p class="clamp-hint" role="status">
-                {t('rules.replacementClampHint', { max: MAX_RULE_STATUS_CHARS })}
-              </p>
-            {/if}
-            <!-- S4 (issue #672): the rule's own window, reusing the quiet-hours
-                 time inputs and weekday picker verbatim. -->
-            <div class="rule-row">
-              <input
-                type="time"
-                value={minutesToTime(rule.start_minutes)}
-                onchange={(e) => { rule.start_minutes = timeToMinutes((e.currentTarget as HTMLInputElement).value, rule.start_minutes); }}
-                aria-label={t('rules.ruleStart')}
-              />
-              <span aria-hidden="true">–</span>
-              <input
-                type="time"
-                value={minutesToTime(rule.end_minutes)}
-                onchange={(e) => { rule.end_minutes = endMinutesFromTime((e.currentTarget as HTMLInputElement).value, rule.end_minutes); }}
-                aria-label={t('rules.ruleEnd')}
-              />
-            </div>
-            <div class="rule-row days-row" role="group" aria-label={t('rules.ruleDays')}>
-              {#each [1, 2, 3, 4, 5, 6, 7] as day}
-                <label class="rule-check day-check">
-                  <input
-                    type="checkbox"
-                    checked={rule.days.includes(day)}
-                    onchange={(e) => {
-                      const on = (e.currentTarget as HTMLInputElement).checked;
-                      rule.days = on
-                        ? [...rule.days, day].sort()
-                        : rule.days.filter((d) => d !== day);
-                    }}
-                  />
-                  <span>{t(WEEKDAY_KEYS[day])}</span>
-                </label>
-              {/each}
-            </div>
-            <p class="hint">{t('rules.presenceHint')}</p>
-            <!-- Issue #868: the new match-kind / album / show / device /
-                 playlist-uri / duration / negate / action surfaces.
-                 The Settings picker mirrors the rule walker exactly so a
-                 what-you-see-is-what-fires mental model holds.
-              -->
-            <div class="rule-row">
-              <select
-                aria-label={t('rules.matchKindLabel')}
-                value={rule.match_kind ?? 'substring'}
-                onchange={(e) => { rule.match_kind = (e.currentTarget as HTMLSelectElement).value as 'substring' | 'exact' | 'glob'; }}
-              >
-                <option value="substring">{t('rules.matchKindSubstring')}</option>
-                <option value="exact">{t('rules.matchKindExact')}</option>
-                <option value="glob">{t('rules.matchKindGlob')}</option>
-              </select>
-              <input
-                type="number"
-                min="0"
-                placeholder={t('rules.minDurationLabel')}
-                aria-label={t('rules.minDurationLabel')}
-                value={rule.min_duration_seconds ?? 0}
-                onchange={(e) => { rule.min_duration_seconds = Math.max(0, parseInt((e.currentTarget as HTMLInputElement).value, 10) || 0); }}
-              />
-            </div>
-            <div class="rule-row">
-              <input
-                type="text"
-                placeholder={t('rules.albumSubstringLabel')}
-                aria-label={t('rules.albumSubstringLabel')}
-                bind:value={rule.album_substring}
-              />
-              <input
-                type="text"
-                placeholder={t('rules.showSubstringLabel')}
-                aria-label={t('rules.showSubstringLabel')}
-                bind:value={rule.show_substring}
-              />
-            </div>
-            <div class="rule-row">
-              <input
-                type="text"
-                placeholder={t('rules.deviceSubstringLabel')}
-                aria-label={t('rules.deviceSubstringLabel')}
-                bind:value={rule.device_substring}
-              />
-              <input
-                type="text"
-                placeholder={t('rules.playlistUriLabel')}
-                aria-label={t('rules.playlistUriLabel')}
-                bind:value={rule.playlist_uri}
-              />
-            </div>
-            <div class="rule-row">
-              <label class="rule-check">
-                <input type="checkbox" bind:checked={rule.negate} />
-                <span>{t('rules.negateLabel')}</span>
-              </label>
-            </div>
-            <div class="rule-row">
-              <select
-                aria-label={t('rules.actionLabel')}
-                value={(rule.action as { kind: string })?.kind ?? 'suppress'}
-                onchange={(e) => {
-                  const next = (e.currentTarget as HTMLSelectElement).value;
-                  rule.action = actionForKind(next);
-                }}
-              >
-                <option value="suppress">{t('rules.actionSuppress')}</option>
-                <option value="replace">{t('rules.actionReplace')}</option>
-                <option value="snoozeminutes">{t('rules.actionSnoozeMinutes')}</option>
-                <option value="profile">{t('rules.actionProfile')}</option>
-                <option value="presence">{t('rules.actionPresence')}</option>
-              </select>
-            </div>
-            {#if (rule.action as { kind: string })?.kind === 'replace'}
-              <div class="rule-row">
-                <input
-                  type="text"
-                  placeholder={t('rules.actionReplaceStatusPlaceholder')}
-                  aria-label={t('rules.actionReplaceStatusPlaceholder')}
-                  value={(rule.action as { status?: string }).status ?? ''}
-                  oninput={(e) => { rule.action = { kind: 'replace', status: (e.currentTarget as HTMLInputElement).value }; }}
-                />
-              </div>
-            {/if}
-            {#if (rule.action as { kind: string })?.kind === 'snoozeminutes'}
-              <div class="rule-row">
-                <input
-                  type="number"
-                  min="1"
-                  placeholder={t('rules.actionSnoozePlaceholder')}
-                  aria-label={t('rules.actionSnoozePlaceholder')}
-                  value={(rule.action as { value?: number }).value ?? 30}
-                  oninput={(e) => { rule.action = { kind: 'snoozeminutes', value: Math.max(1, parseInt((e.currentTarget as HTMLInputElement).value, 10) || 30) }; }}
-                />
-              </div>
-            {/if}
-            {#if (rule.action as { kind: string })?.kind === 'profile'}
-              <div class="rule-row">
-                <input
-                  type="text"
-                  placeholder={t('rules.actionProfilePlaceholder')}
-                  aria-label={t('rules.actionProfilePlaceholder')}
-                  value={(rule.action as { id?: string }).id ?? ''}
-                  oninput={(e) => { rule.action = { kind: 'profile', id: (e.currentTarget as HTMLInputElement).value }; }}
-                />
-              </div>
-            {/if}
-            {#if (rule.action as { kind: string })?.kind === 'presence'}
-              <div class="rule-row">
-                <input
-                  type="text"
-                  placeholder={t('rules.actionAvailabilityPlaceholder')}
-                  aria-label={t('rules.actionAvailabilityPlaceholder')}
-                  value={(rule.action as { availability?: string }).availability ?? ''}
-                  oninput={(e) => {
-                    const prev = rule.action as { availability?: string; activity?: string };
-                    rule.action = {
-                      kind: 'presence',
-                      availability: (e.currentTarget as HTMLInputElement).value,
-                      activity: prev.activity ?? '',
-                    };
-                  }}
-                />
-                <input
-                  type="text"
-                  placeholder={t('rules.actionActivityPlaceholder')}
-                  aria-label={t('rules.actionActivityPlaceholder')}
-                  value={(rule.action as { activity?: string }).activity ?? ''}
-                  oninput={(e) => {
-                    const prev = rule.action as { availability?: string; activity?: string };
-                    rule.action = {
-                      kind: 'presence',
-                      availability: prev.availability ?? '',
-                      activity: (e.currentTarget as HTMLInputElement).value,
-                    };
-                  }}
-                />
-              </div>
-            {/if}
-          </div>
-        {/each}
-        <button
-          type="button"
-          class="btn-secondary"
-          onclick={() => {
-            localConfig.status_rules.track_rules.push({
-              enabled: false,
-              artist_substring: '',
-              track_substring: '',
-              match_kind: 'substring',
-              album_substring: '',
-              show_substring: '',
-              device_substring: '',
-              playlist_uri: '',
-              min_duration_seconds: 0,
-              negate: false,
-              replacement_status: '',
-              presence_availability: '',
-              presence_activity: '',
-              action: { kind: 'suppress' },
-              days: [],
-              start_minutes: 0,
-              end_minutes: 1440,
-            });
-            markDirty();
-          }}
-        >{t('rules.addTrackRule')}</button>
-        <!-- Issue #868: dry-run tester for the live track-rule walker. The
-             user types a synthetic track / minute / weekday and we invoke
-             `explain_rules`, which runs the same matcher the live
-             `process_track` path uses. -->
-        <div class="rule-test" role="group" aria-label={t('rules.testTitle')}>
-          <span class="form-label">{t('rules.testTitle')}</span>
-          <p class="hint">{t('rules.testHint')}</p>
-          <div class="rule-row">
-            <input
-              type="text"
-              placeholder={t('rules.testArtistLabel')}
-              aria-label={t('rules.testArtistLabel')}
-              bind:value={ruleTest.artist}
-            />
-            <input
-              type="text"
-              placeholder={t('rules.testTrackLabel')}
-              aria-label={t('rules.testTrackLabel')}
-              bind:value={ruleTest.track}
-            />
-          </div>
-          <div class="rule-row">
-            <input
-              type="text"
-              placeholder={t('rules.testAlbumLabel')}
-              aria-label={t('rules.testAlbumLabel')}
-              bind:value={ruleTest.album}
-            />
-            <input
-              type="text"
-              placeholder={t('rules.testShowLabel')}
-              aria-label={t('rules.testShowLabel')}
-              bind:value={ruleTest.show}
-            />
-          </div>
-          <div class="rule-row">
-            <input
-              type="text"
-              placeholder={t('rules.testDeviceLabel')}
-              aria-label={t('rules.testDeviceLabel')}
-              bind:value={ruleTest.device}
-            />
-            <input
-              type="text"
-              placeholder={t('rules.testPlaylistLabel')}
-              aria-label={t('rules.testPlaylistLabel')}
-              bind:value={ruleTest.playlist_uri}
-            />
-          </div>
-          <div class="rule-row">
-            <input
-              type="text"
-              placeholder={t('rules.testDurationLabel')}
-              aria-label={t('rules.testDurationLabel')}
-              bind:value={ruleTestDurationInput}
-            />
-            <select aria-label={t('rules.testWeekdayLabel')} bind:value={ruleTest.weekday}>
-              {#each [1, 2, 3, 4, 5, 6, 7] as day}
-                <option value={day}>{t(WEEKDAY_KEYS[day])}</option>
-              {/each}
-            </select>
-            <input
-              type="time"
-              aria-label={t('rules.testMinuteLabel')}
-              bind:value={ruleTestMinuteInput}
-            />
-          </div>
-          <div class="rule-row">
-            <button
-              type="button"
-              class="btn-secondary"
-              onclick={runRuleTest}
-              disabled={ruleTestRunning}
-            >{ruleTestRunning ? t('rules.testRunning') : t('rules.testRun')}</button>
-          </div>
-          {#if ruleTestError}
-            <p class="hint error" role="status">{ruleTestError}</p>
-          {/if}
-          {#if ruleTestResult}
-            <p class="hint" role="status">
-              {#if ruleTestResult.matched_index !== null && ruleTestResult.matched_index !== undefined}
-                {t('rules.testSummaryRuleMatched', {
-                  index: ruleTestResult.matched_index + 1,
-                  summary: ruleTestResult.summary,
-                })}
-              {:else}
-                {t('rules.testSummaryNoMatch')}
-              {/if}
-            </p>
-            <ol class="rule-test-chain">
-              {#each ruleTestResult.reason_chain as step, stepIdx}
-                <li class:matched={step.matched}>
-                  <strong>{`#${stepIdx + 1}`}</strong>
-                  {' — '}
-                  {step.matched ? t('rules.testStepMatched') : t('rules.testStepNotMatched')}
-                  {#if step.reason}
-                    <span class="reason">{t('rules.testStepReason', { reason: step.reason })}</span>
-                  {/if}
-                  {#if step.negated}
-                    <span class="reason">{t('rules.testStepNegated')}</span>
-                  {/if}
-                </li>
-              {/each}
-            </ol>
-          {/if}
-        </div>
-      </div>
-      <div class="form-group">
-        <span class="form-label">{t('rules.manualStatusLabel')}</span>
-        <p class="hint">{t('rules.manualStatusHint')}</p>
-        <div class="rule-row">
-          <input
-            type="text"
-            bind:value={localConfig.teams.paused_status_format}
-            maxlength={MAX_RULE_STATUS_CHARS}
-            placeholder={t('rules.pausedStatusPlaceholder')}
-            aria-label={t('rules.pausedStatusPlaceholder')}
-          />
-          <input
-            type="text"
-            bind:value={localConfig.teams.stopped_status_format}
-            maxlength={MAX_RULE_STATUS_CHARS}
-            placeholder={t('rules.stoppedStatusPlaceholder')}
-            aria-label={t('rules.stoppedStatusPlaceholder')}
-          />
-        </div>
-      </div>
-      {/if}
-    </section>
+    <RulesCard
+      bind:statusRules={localConfig.status_rules}
+      bind:pausedStatusFormat={localConfig.teams.paused_status_format}
+      bind:stoppedStatusFormat={localConfig.teams.stopped_status_format}
+      {isDirty}
+      onreset={resetRulesDefaults}
+      onchange={markDirty}
+      bind:this={rulesCard}
+    />
     <!-- Issue #869: presence-profile card. The Settings UI is the canonical
          place to author profiles; the tray / hotkey / CLI only flip the
          active id. Mirrors `clamp_presence_profiles`: names are deduped +
@@ -3057,7 +1714,7 @@
               localConfig.autostart = previous;
               target.checked = previous;
               saveMessage = t('settings.shortcutRejected', {
-                reason: shortcutReasonLabel(normalizeReason(err) ?? { kind: 'Unknown', message: String(err).slice(0, 120) })
+                reason: shortcutReasonLabel(normalizeShortcutReason(err) ?? { kind: 'Unknown', message: String(err).slice(0, 120) })
               });
               if (saveTimeout) clearTimeout(saveTimeout);
               saveTimeout = setTimeout(() => saveMessage = '', 3000);
@@ -3067,125 +1724,9 @@
       </div>
     </section>
 
-    <!-- 4.7.0 (S5): log rotation. Rust owns the file target; this card is the
-         only place `logging.*` is edited. `enabled`/`log_level` take effect
-         immediately (config::apply_log_level, CfgDiag#4); size and retention
-         are read once when the log plugin is built, i.e. at the next launch —
-         the hint says so rather than implying an immediate effect. -->
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionLogging')}</h2>
-      </header>
-      <div class="toggle-row">
-        <label for="logging-enabled">{t('settings.loggingEnabledLabel')}</label>
-        <input id="logging-enabled" type="checkbox" bind:checked={localConfig.logging.enabled} />
-      </div>
-      <div class="form-group">
-        <label for="log-level">{t('settings.logLevelLabel')}</label>
-        <select id="log-level" bind:value={localConfig.logging.log_level}>
-          {#each LOG_LEVELS as level (level)}
-            <option value={level}>{level}</option>
-          {/each}
-        </select>
-      </div>
-      <div class="row-2">
-        <div class="form-group">
-          <label for="log-max-size">{t('settings.logMaxSizeLabel')}</label>
-          <input
-            id="log-max-size"
-            type="number"
-            min={LOG_MAX_FILE_SIZE_MB.min}
-            max={LOG_MAX_FILE_SIZE_MB.max}
-            bind:value={localConfig.logging.max_file_size_mb}
-          />
-        </div>
-        <div class="form-group">
-          <label for="log-keep-files">{t('settings.logKeepFilesLabel')}</label>
-          <input
-            id="log-keep-files"
-            type="number"
-            min={LOG_KEEP_FILES.min}
-            max={LOG_KEEP_FILES.max}
-            bind:value={localConfig.logging.keep_files}
-          />
-        </div>
-      </div>
-      <p class="hint">{t('settings.logRotationHint')}</p>
-      <button class="btn-secondary btn-full" onclick={openLogs}>
-        {t('settings.openLogsFolder')}
-      </button>
-    </section>
-
-    <!-- 4.7.0 (S5): backup. Both actions run in Rust, which owns the file
-         dialogs and the resolved path; the export never carries the Spotify
-         client secret (keychain-only) and the import refuses a document that
-         does. -->
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionBackup')}</h2>
-      </header>
-      <p class="hint">{t('settings.backupHint')}</p>
-      <div class="row-2">
-        <button class="btn-secondary btn-full" onclick={exportConfig} disabled={backupBusy}>
-          {t('settings.backupExport')}
-        </button>
-        <button class="btn-secondary btn-full" onclick={importConfig} disabled={backupBusy}>
-          {t('settings.backupImport')}
-        </button>
-      </div>
-      {#if backupMessage}
-        <p class="hint" role="status">{backupMessage}</p>
-      {/if}
-
-    </section>
-    <!-- 4.7.0 (issue #676): global shortcuts. The field records what is
-         pressed — the grab is released while it records, otherwise the key
-         would fire the binding instead of being captured. -->
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionShortcuts')}</h2>
-      </header>
-      <p class="hint">{t('settings.shortcutsHint')}</p>
-      {#each SHORTCUT_SLOTS as slot (slot)}
-        <div class="form-group">
-          <label for={`shortcut-${slot}`}>{t(SHORTCUT_LABEL_KEYS[slot])}</label>
-          <div class="shortcut-row">
-            <input
-              id={`shortcut-${slot}`}
-              type="text"
-              readonly
-              value={shortcutBindings[slot] ?? ''}
-              placeholder={t('settings.shortcutUnbound')}
-              onfocus={() => beginShortcutCapture(slot)}
-              onblur={() => endShortcutCapture(slot)}
-              onkeydown={(e) => onShortcutKeydown(e, slot)}
-            />
-            <button type="button" class="btn-link" onclick={() => setShortcutBinding(slot, null)}>
-              {t('settings.shortcutClear')}
-            </button>
-          </div>
-          {#if shortcutErrors[slot]}
-            <p class="error-message" role="alert">
-              {t('settings.shortcutRejected', {
-                reason: shortcutReasonLabel(shortcutErrors[slot]!)
-              })}
-            </p>
-          {:else if shortcutStatus[slot].error}
-            <p class="error-message" role="alert">
-              {t('settings.shortcutRegistrationFailed', {
-                reason: shortcutReasonLabel(shortcutStatus[slot].error!)
-              })}
-            </p>
-          {:else if shortcutStatus[slot].registered}
-            <p class="hint" role="status">{t('settings.shortcutRegistered')}</p>
-          {:else if capturingSlot === slot}
-            <p class="hint" role="status">{t('settings.shortcutCaptureReleased')}</p>
-          {:else}
-            <p class="hint" role="status">{t('settings.shortcutNotRegistered')}</p>
-          {/if}
-        </div>
-      {/each}
-    </section>
+    <LoggingCard bind:logging={localConfig.logging} />
+    <BackupCard onimported={handleBackupImported} />
+    <ShortcutsCard bind:shortcuts={localConfig.shortcuts} onchange={markDirty} bind:this={shortcutsCard} />
 
     <!-- 4.7.0 (issue #678): release channel the updater reads. The saved
          value is the backend's single source of truth — the banner and the
@@ -3237,15 +1778,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--sp-4);
-  }
-
-  /* #981: the rules card header holds two link actions (Undo, Reset to
-     default) on its trailing edge, so they need their own row rather than
-     being flung apart by the header's `space-between`. */
-  .section-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
   }
 
 
@@ -3383,8 +1915,7 @@
     flex-wrap: wrap;
     gap: var(--sp-2);
   }
-  .rule-row input[type='text'],
-  .rule-row input[type='time'] {
+  .rule-row input[type='text'] {
     flex: 1 1 120px;
     min-width: 0;
   }
@@ -3401,26 +1932,6 @@
   }
 
 
-  /* 4.7.0 (issue #676): a shortcut row pairs the capture field with its Clear
-     action. The field is read-only on purpose — a combination is recorded, not
-     typed — so it is rendered monospaced like the other machine-readable
-     values in this pane. */
-  .shortcut-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-  }
-  .shortcut-row input[type='text'] {
-    flex: 1 1 auto;
-    min-width: 0;
-    font-family: var(--font-mono);
-    font-size: var(--fs-sm);
-    cursor: pointer;
-  }
-  .shortcut-row .btn-link {
-    flex: 0 0 auto;
-    white-space: nowrap;
-  }
   .theme-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -3475,7 +1986,6 @@
     gap: var(--sp-3);
     margin-top: var(--sp-3);
   }
-  .btn-full.btn-secondary { background: var(--bg-elevated); }
 
   .save-message {
     text-align: center;
