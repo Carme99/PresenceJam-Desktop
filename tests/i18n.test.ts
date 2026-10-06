@@ -269,12 +269,13 @@ describe('i18n key coverage (#488)', () => {
       .map((key) => `src/lib/i18n.ts: ${key}`);
     for (const f of files) {
       const body = readFileSync(f, 'utf8');
-      // `tCount('a.b', n)` reads the `a.b_one` / `a.b_other` pair, so it
-      // resolves against the suffixed keys rather than the base name.
+      // `tCount('a.b', n)` reads the `a.b_one` / `a.b_other` / `a.b_few`
+      // trio (#1154), so it resolves against the suffixed keys rather
+      // than the base name.
       const re = /\b(t|tCount)\(\s*'([^']+)'/g;
       let m: RegExpExecArray | null;
       while ((m = re.exec(body)) !== null) {
-        const keys = m[1] === 'tCount' ? [`${m[2]}_one`, `${m[2]}_other`] : [m[2]];
+        const keys = m[1] === 'tCount' ? [`${m[2]}_one`, `${m[2]}_other`, `${m[2]}_few`] : [m[2]];
         for (const key of keys) {
           if (!enKeys.includes(key))
             missing.push(`${f.replace(root + '/', '')}: ${key}`);
@@ -288,7 +289,9 @@ describe('i18n key coverage (#488)', () => {
   // exactly the slots the en template declares — no omission (renders
   // `{name}` verbatim), no misspelling, no stale extra (silently ignored
   // by `t()`). `tCount('base', n, {...})` passes extras atop the injected
-  // `{count}`, checked against the `_one`/`_other` union minus `count`.
+  // `{count}`, checked against the `_one`/`_other`/`_few` union minus `count`
+  // (#1154 — `_few` mirrors `_other` outside Polish, so the union is
+  // unchanged in content but all three keys must stay in sync).
   // Shorthand (`{ shown }`) and `key: <expr>` both count as passing `key`;
   // a spread or any non-literal params object fails loudly, so the parser
   // below never silently under-reads a call. Unknown keys are skipped —
@@ -455,8 +458,9 @@ describe('i18n key coverage (#488)', () => {
         } else {
           const one = en.get(`${key}_one`);
           const other = en.get(`${key}_other`);
-          if (one === undefined || other === undefined) continue;
-          const want = show([...placeholdersOf(one), ...placeholdersOf(other)].filter((n) => n !== 'count'));
+          const few = en.get(`${key}_few`);
+          if (one === undefined || other === undefined || few === undefined) continue;
+          const want = show([...placeholdersOf(one), ...placeholdersOf(other), ...placeholdersOf(few)].filter((n) => n !== 'count'));
           if (body[i] !== ',') {
             if (want !== '[]') offenders.push(`${rel}: tCount('${key}') passes no extra params but templates need ${want}`);
             continue;
@@ -526,15 +530,30 @@ describe('plural and number formatting (#616)', () => {
     expect(tCount('logs.count', 1)).toBe('1 Eintrag');
     expect(tCount('logs.count', 2)).toBe('2 Einträge');
 
-    // #984/#1154: Polish `few`/`many` resolve through `_other` until full
-    // `_few` support lands — pin the fallback shape so the limitation is
-    // observable, not silent.
+    // #1154: Polish `few`/`many` resolve to real forms — full CLDR, not
+    // the pre-#1154 `_other` fallback. `few`: 2–4, 22–24… ("wpisy",
+    // "minuty"); `many`: 0, 5–21, … ("wpisów", "minut", shared with
+    // `_other` — CLDR many for these nouns IS the genitive plural, so no
+    // distinct `_many` key). Pre-fix 2/22 rendered "2 wpisów"/"22 wpisów".
     void i18n.set('pl');
-    expect(tCount('logs.count', 2)).toBe(
-      `${new Intl.NumberFormat('pl').format(2)} wpisów`
+    const plFmt = (n: number): string => new Intl.NumberFormat('pl').format(n);
+    expect(tCount('logs.count', 1)).toBe(`${plFmt(1)} wpis`);
+    expect(tCount('logs.count', 2)).toBe(`${plFmt(2)} wpisy`);
+    expect(tCount('logs.count', 3)).toBe(`${plFmt(3)} wpisy`);
+    expect(tCount('logs.count', 4)).toBe(`${plFmt(4)} wpisy`);
+    expect(tCount('logs.count', 5)).toBe(`${plFmt(5)} wpisów`);
+    expect(tCount('logs.count', 0)).toBe(`${plFmt(0)} wpisów`);
+    expect(tCount('logs.count', 12)).toBe(`${plFmt(12)} wpisów`);
+    expect(tCount('logs.count', 22)).toBe(`${plFmt(22)} wpisy`);
+    expect(tCount('logs.count', 25)).toBe(`${plFmt(25)} wpisów`);
+    expect(tCount('dashboard.snoozeStatusStart', 1, { minutes: 1 })).toBe(
+      `Synchronizacja wstrzymana na ${plFmt(1)} minutę`
     );
-    expect(tCount('logs.count', 5)).toBe(
-      `${new Intl.NumberFormat('pl').format(5)} wpisów`
+    expect(tCount('dashboard.snoozeStatusStart', 2, { minutes: 2 })).toBe(
+      `Synchronizacja wstrzymana na ${plFmt(2)} minuty`
+    );
+    expect(tCount('dashboard.snoozeStatusStart', 5, { minutes: 5 })).toBe(
+      `Synchronizacja wstrzymana na ${plFmt(5)} minut`
     );
 
     i18n.set('en');

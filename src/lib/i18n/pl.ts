@@ -87,6 +87,9 @@ export const pl: Dict = {
   'logs.level.error': 'Błąd',
   'logs.count_one': '{count} wpis',
   'logs.count_other': '{count} wpisów',
+  // #1154: CLDR `few` (2–4, 22–24…): nominative plural "wpisy".
+  // Model-written per #984 provenance — human review pending.
+  'logs.count_few': '{count} wpisy',
   'logs.showingOf': 'Widoczne {shown} z {total}',
   'logs.jumpToLatest': 'Przejdź do najnowszych',
   'logs.popOut': 'Odłącz',
@@ -730,6 +733,9 @@ export const pl: Dict = {
   // "Minute" and French "minute" in the singular.
   'dashboard.snoozeStatusStart_one': 'Synchronizacja wstrzymana na {minutes} minutę',
   'dashboard.snoozeStatusStart_other': 'Synchronizacja wstrzymana na {minutes} minut',
+  // #1154: CLDR `few` (2–4, 22–24…): nominative plural "minuty".
+  // Model-written per #984 provenance — human review pending.
+  'dashboard.snoozeStatusStart_few': 'Synchronizacja wstrzymana na {minutes} minuty',
 
   // --- #739: the wizard's view name, announced on navigation (there is no
   // heading bar above the step, so the step title cannot stand in for it).

@@ -95,6 +95,9 @@ export const fr: Dict = {
   'logs.level.error': 'Erreur',
   'logs.count_one': '{count} entrée',
   'logs.count_other': '{count} entrées',
+  // #1154 : `{key}_few` — le français n’a pas de `few` CLDR ; reprend
+  // `_other` pour la parité Dict (seul le polonais sélectionne `few`).
+  'logs.count_few': '{count} entrées',
   'logs.showingOf': '{shown} sur {total} affichées',
   'logs.jumpToLatest': 'Aller aux plus récents',
   'logs.popOut': 'Détacher',
@@ -762,6 +765,8 @@ export const fr: Dict = {
   // nombre. Une mise en sourdine d’une minute annonçait « 1 minutes ».
   'dashboard.snoozeStatusStart_one': 'Synchronisation en pause pour {minutes} minute',
   'dashboard.snoozeStatusStart_other': 'Synchronisation en pause pour {minutes} minutes',
+  // #1154 : comme ci-dessus — pas de `few` CLDR ; reprend `_other`.
+  'dashboard.snoozeStatusStart_few': 'Synchronisation en pause pour {minutes} minutes',
 
   // --- #739: nom de la vue, annoncé lors de la navigation.
   'onboarding.title': 'Configuration',

@@ -86,6 +86,9 @@ export const pt: Dict = {
   'logs.level.error': 'Erro',
   'logs.count_one': '{count} entrada',
   'logs.count_other': '{count} entradas',
+  // #1154: `{key}_few` — o português não tem `few` CLDR; espelha `_other`
+  // para a paridade Dict (só o polonês seleciona `few`).
+  'logs.count_few': '{count} entradas',
   'logs.showingOf': 'Mostrando {shown} de {total}',
   'logs.jumpToLatest': 'Ir para o mais recente',
   'logs.popOut': 'Destacar',
@@ -727,6 +730,8 @@ export const pt: Dict = {
   // "Minute" and French "minute" in the singular.
   'dashboard.snoozeStatusStart_one': 'Sincronização pausada por {minutes} minuto',
   'dashboard.snoozeStatusStart_other': 'Sincronização pausada por {minutes} minutos',
+  // #1154: como acima — sem `few` CLDR; espelha `_other`.
+  'dashboard.snoozeStatusStart_few': 'Sincronização pausada por {minutes} minutos',
 
   // --- #739: the wizard's view name, announced on navigation (there is no
   // heading bar above the step, so the step title cannot stand in for it).

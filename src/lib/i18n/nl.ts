@@ -87,6 +87,9 @@ export const nl: Dict = {
   'logs.level.error': 'Fout',
   'logs.count_one': '{count} regel',
   'logs.count_other': '{count} regels',
+  // #1154: `{key}_few` — Nederlands kent geen CLDR-`few`; spiegelt `_other`
+  // voor Dict-pariteit (alleen Pools selecteert `few`).
+  'logs.count_few': '{count} regels',
   'logs.showingOf': '{shown} van {total} weergegeven',
   'logs.jumpToLatest': 'Naar nieuwste gaan',
   'logs.popOut': 'Loskoppelen',
@@ -728,6 +731,8 @@ export const nl: Dict = {
   // "Minute" and French "minute" in the singular.
   'dashboard.snoozeStatusStart_one': 'Synchronisatie {minutes} minuut gepauzeerd',
   'dashboard.snoozeStatusStart_other': 'Synchronisatie {minutes} minuten gepauzeerd',
+  // #1154: als hierboven — geen CLDR-`few`; spiegelt `_other`.
+  'dashboard.snoozeStatusStart_few': 'Synchronisatie {minutes} minuten gepauzeerd',
 
   // --- #739: the wizard's view name, announced on navigation (there is no
   // heading bar above the step, so the step title cannot stand in for it).

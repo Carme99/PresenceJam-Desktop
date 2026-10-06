@@ -90,6 +90,9 @@ export const de: Dict = {
   'logs.level.error': 'Fehler',
   'logs.count_one': '{count} Eintrag',
   'logs.count_other': '{count} Einträge',
+  // #1154: `{key}_few` — German has no CLDR `few`; mirrors `_other` for
+  // Dict parity (only Polish selects `few` of the eight).
+  'logs.count_few': '{count} Einträge',
   'logs.showingOf': '{shown} von {total} angezeigt',
   'logs.jumpToLatest': 'Zum Neuesten springen',
   'logs.popOut': 'Abkoppeln',
@@ -759,6 +762,8 @@ export const de: Dict = {
   // pausiert"; im Singular heißt es "Minute".
   'dashboard.snoozeStatusStart_one': 'Sync für {minutes} Minute pausiert',
   'dashboard.snoozeStatusStart_other': 'Sync für {minutes} Minuten pausiert',
+  // #1154: wie oben — kein CLDR-`few`; spiegelt `_other` für Dict-Parität.
+  'dashboard.snoozeStatusStart_few': 'Sync für {minutes} Minuten pausiert',
 
   // --- #739: Name der Ansicht für die Navigationsansage.
   'onboarding.title': 'Einrichtung',
