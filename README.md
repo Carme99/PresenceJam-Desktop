@@ -65,13 +65,21 @@ Download the installer for your platform from the [latest release](https://githu
 - **Windows 10/11 (64-bit)** — `PresenceJam-<tag>-setup.exe` (e.g. `PresenceJam-v4.0.0-setup.exe`). This NSIS installer is the one the in-app updater replaces, and it installs per-user with no elevation. `PresenceJam-<tag>.msi` is also published for managed/machine-wide installs, but it installs per-machine under Program Files and cannot be updated by a non-admin user, so use it only where you can install as administrator.
 - **macOS (Apple Silicon)** — `PresenceJam-macos.dmg`
 - **Debian / Ubuntu / Mint / popOS (64-bit)** — `PresenceJam-linux-amd64.deb`
+- **Fedora / RHEL / openSUSE (64-bit)** — `PresenceJam-linux-amd64.rpm`. Install with `sudo dnf install ./PresenceJam-linux-amd64.rpm`.
 - **Any modern Linux (64-bit, no install required)** — `PresenceJam-linux-amd64.AppImage`
 - **macOS via Homebrew** — `brew install carme99/tap/presence-jam` (Apple Silicon only: the formula declares `depends_on arch: :arm64` and refuses an Intel install rather than copying a bundle that cannot run)
 - **Windows 10/11 via winget** — `winget install PresenceJam.PresenceJam`
 
-<!-- canonical post-fix asset names verified via `gh release view v4.0.0` → PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb, PresenceJam-linux-amd64.AppImage, PresenceJam-v4.0.0.msi (+ .msi.sig), PresenceJam-v4.0.0.app.tar.gz (+ .sig), PresenceJam-v4.0.0.AppImage.sig, SHA256SUMS.txt, latest.json -->
+<!-- Shipped asset names, as asserted by `release.yml`'s post-publish check against
+     latest.json: PresenceJam-macos.dmg, PresenceJam-linux-amd64.deb,
+     PresenceJam-linux-amd64.rpm, PresenceJam-linux-amd64.AppImage,
+     PresenceJam-<tag>-setup.exe, PresenceJam-<tag>.msi (each + .sig),
+     SHA256SUMS.txt, latest.json.
+     NOTE: an earlier version of this comment cited `gh release view v4.0.0`,
+     which predates both #900 (the .rpm) and #897 (the NSIS setup.exe target),
+     so it could not have verified them. -->
 
-Filenames are canonical post-fix: `PresenceJam-macos.dmg`, `PresenceJam-linux-amd64.deb` / `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>.msi` — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current version.
+Filenames are canonical: `PresenceJam-macos.dmg`, `PresenceJam-linux-amd64.deb` / `PresenceJam-linux-amd64.rpm` / `PresenceJam-linux-amd64.AppImage`, `PresenceJam-<tag>-setup.exe` (per-user, the updater payload) and `PresenceJam-<tag>.msi` (per-machine, managed installs) — see the [latest release](https://github.com/Carme99/PresenceJam-Desktop/releases/latest) for the current version.
 
 ### Linux install
 

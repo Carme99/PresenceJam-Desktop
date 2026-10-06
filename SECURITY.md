@@ -503,7 +503,8 @@ The release workflow (`.github/workflows/release.yml`) uses two repository secre
 
 **Why fine-grained where possible, not classic everywhere:** A classic PAT grants the token owner full access to every repository they can see. If `HOMEBREW_TAP_TOKEN` leaks, a classic PAT lets the attacker push to PresenceJam-Desktop, the homebrew tap, and any other repo under the Carme99 account. A fine-grained PAT scoped to a single repo with `contents:write` only leaks the ability to push to that one repo. `WINGET_TOKEN` is the exception: the winget releaser action only supports classic PATs with `workflow` scope (fine-grained returns 422), so it stays classic but is scoped to the `Carme99/winget-pkgs` fork, not `microsoft/winget-pkgs`, and is rotated on the same 30-day cadence.
 
-**Why 30 days:** A compromise window of 30 days balances the operational cost of rotation against the average time-to-detection for token misuse in monitoring (per GitHub's own PAT guidance). A shorter window is acceptable if rotation can be automated; a longer one increases the blast radius of any leak.
+**Why 30 days:** A compromise window of 30 days balances the operational cost of rotation against the average time-to-detection for token misuse in monitoring (per GitHub's own PAT guidance). A 30-day window bounds a leaked PAT's exposure to a month, and both tokens are fine-grained or fork-scoped so rotation is cheap. `docs/RELEASING.md` requires the same 30-day cadence; a longer one increases the blast radius of any leak.
+
 ## Open Source
 
 PresenceJam is open source. You're encouraged to review the code yourself:
