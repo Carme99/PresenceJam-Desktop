@@ -364,9 +364,12 @@
 <div class="reconnect">
   <PageHeader title={t('reconnect.title')} onBack={goToDashboard} showThemeToggle={false} />
 
-  <!-- #742 follow-up: this `.content` is where the skip link's target moves
-       to, once every view owns one. -->
-  <div class="content">
+  <!-- #742: the skip link's target — the view body BELOW this view's header
+       bar, so activating the link bypasses the repeated Back chrome rather
+       than landing on it. `tabindex="-1"` keeps it focusable programmatically
+       without adding a tab stop, and only one view mounts at a time so the id
+       stays unique per document. -->
+  <div class="content" id="main-content" tabindex="-1">
     <p class="description">
       {t('reconnect.description')}
     </p>

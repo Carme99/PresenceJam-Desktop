@@ -292,12 +292,7 @@
 {:else}
   <!-- #739: the polite announcement for the view that just mounted. -->
   <p class="view-announcement" aria-live="polite">{viewAnnouncement}</p>
-  <!-- #742 is split out of this branch and lands last. The target has to move
-       DOWN, out of this wrapper, onto the region below each view's heading bar
-       — but that cannot happen until Settings, LogViewer and Diagnostics own
-       their targets too, or the skip link becomes a DEAD fragment on exactly
-       the three views it is meant to help. So the id stays here for now. -->
-  <div class="app-container" id="main-content" tabindex="-1">
+  <div class="app-container">
     {#if bootError}
       <div class="boot-error" role="alert">
         <span>{t('common.bootFailed')}{bootError ? `: ${bootError}` : ''}</span>

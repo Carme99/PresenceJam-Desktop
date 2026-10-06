@@ -12,11 +12,9 @@
  * Fails pre-fix: there is no navigation effect at all, so `document.activeElement`
  * is `<body>` after a switch and there is no live region to read.
  *
- * #742 (moving the skip link's target down onto each view's body) is split into
- * a follow-up that lands after the Settings / LogViewer / Diagnostics slices
- * give those views their own `#main-content`. Asserting target placement here
- * would be asserting a half-moved invariant: the id still sits on
- * `.app-container`, so those views have no target of their own yet.
+ * #742 moved the skip link's target down onto each view's body (asserted in
+ * `tests/skip-link-target.test.ts`); this file pins the focus + announcement
+ * half of the contract, not target placement.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, waitFor } from '@testing-library/svelte';

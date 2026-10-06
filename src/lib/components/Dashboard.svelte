@@ -983,8 +983,8 @@
       <Logo size={32} title={null} />
       <div class="title">
         <!-- #739: the navigation focus target for this view (see the effect in
-             `+page.svelte`) and #742's ellipsis target. `tabindex="-1"` keeps
-             it out of the tab order while letting it take focus. -->
+             `+page.svelte`). `tabindex="-1"` keeps it out of the tab order
+             while letting it take focus. -->
         <h1 data-view-heading tabindex="-1">PresenceJam</h1>
         <div class="badges">
           <span class="badge" class:success={spotifyConnected} class:error={!spotifyConnected}>
@@ -1089,10 +1089,15 @@
     <div class="error-banner" role="alert">{displayError}</div>
   {/if}
 
-  <!-- #742: this is where the skip link's target moves to, but it lands with
-       the follow-up that also gives Settings / LogViewer / Diagnostics their
-       own. Until then `.app-container` still carries the id. -->
-  <main>
+  <!-- #742: the skip link's target. It used to sit on `.app-container` in
+       +page.svelte, which wraps this view *and* the header above it, so
+       "Skip to main content" landed on the very chrome the link promises to
+       bypass. `<main>` is the first region below the header (including the
+       warning/error banners), so one Tab from here reaches the body's first
+       control. `tabindex="-1"` keeps the target focusable without putting it
+       in the tab order. Only one view is mounted at a time, so the id stays
+       unique per document. -->
+  <main id="main-content" tabindex="-1">
     {#if $presence.gated}
       <div class="presence-chip" role="status">{gatedLabel}</div>
       <!-- Issue #868: expandable "why" row. The presence-gated reason

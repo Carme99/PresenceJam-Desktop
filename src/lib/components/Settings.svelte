@@ -1699,14 +1699,17 @@
     </div>
   {/if}
 
-  <!-- #742: the skip link's target. It used to sit on `.app-container` in
-       +page.svelte, which wraps this view *and* the PageHeader above it, so
-       "Skip to main content" landed on the very chrome the link promises to
-       bypass. `.sections` is the first region below the header, so one Tab
-       from here reaches the body's first control. `tabindex="-1"` keeps the
-       target focusable without putting it in the tab order. Only one view is
-       mounted at a time, so the id stays unique per document. -->
-  <div class="sections">
+  <!-- #742: the skip link's target (main window only). It used to sit on
+       `.app-container` in +page.svelte, which wraps this view *and* the
+       PageHeader above it, so "Skip to main content" landed on the very
+       chrome the link promises to bypass. `.sections` is the first region
+       below the header, so one Tab from here reaches the body's first
+       control. `tabindex="-1"` keeps the target focusable without putting it
+       in the tab order. The id is main-window-only: a detached pane mounts
+       this view inside the detached route's own `#main-content` (#743), so
+       carrying it here too would duplicate the id in that document. Only one
+       view is mounted at a time, so the id stays unique per document. -->
+  <div class="sections" id={detached ? undefined : 'main-content'} tabindex="-1">
     <section class="card pane-card">
       <header class="section-header">
         <h2>{t('settings.sectionSpotify')}</h2>

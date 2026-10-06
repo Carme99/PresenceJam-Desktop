@@ -16,6 +16,7 @@ section to the released version and opens a fresh empty one (see `docs/RELEASING
 ### Fixed
 - **A deep link arriving before `AppState` is managed is replayed after setup instead of dropped (#1122).** `handle_deep_link`'s unmanaged-state guard now buffers the callback URL in a process-wide single slot (a second early callback overwrites; the slot drains once) and the setup closure re-dispatches it through `handle_deep_link_from_app` immediately after `app.manage(state.clone())`. The early arm returns before the #799 `deep_link_seen` claim, so the replay is the first delivery the dedup gate sees and true duplicates still drop. Both new log lines carry presence only — never the URL, code, verifier, or state contents.
 
+- **The skip link lands on the view body, not the view header (#742).** `id="main-content"` moves off the `.app-container` wrapper in `src/routes/+page.svelte` onto the region below each view's header — the Dashboard's `<main>`, Settings' `.sections`, the Logs `.log-wrap`, Diagnostics' and Reconnect's `.content`, Onboarding's `.step`, About's card — each with `tabindex="-1"` so the target takes focus without entering the tab order. Only one view mounts at a time, so the id stays unique per document, and the detached route's own pane-level target (#743) is untouched. `tests/skip-link-target.test.ts` pins one-below-the-header placement per view plus the Dashboard → Settings switch; `tests/browser/skip-link.spec.ts` proves the real-browser focus move and the first Tab into the body.
 
 ## [5.0.0] - 2026-10-06
 
