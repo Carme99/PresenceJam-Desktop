@@ -131,6 +131,29 @@ impl Tokens {
     ) -> parking_lot::RwLockWriteGuard<'_, Option<crate::teams::TeamsTokens>> {
         self.teams.write()
     }
+
+    /// Attempt to acquire the Spotify read guard without blocking.
+    ///
+    /// Issue #1126: the non-blocking seam for the status snapshot — a
+    /// writer holding the slot (the poller's commit, a reconnect/disconnect
+    /// clear) makes `try_read` miss instead of parking the reader, so
+    /// `sync_status_from_state` can serve its cached snapshot. Mirrors
+    /// `Config::try_get_mut`.
+    pub fn try_spotify(
+        &self,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<crate::spotify::SpotifyTokens>>> {
+        self.spotify.try_read()
+    }
+
+    /// Attempt to acquire the Teams read guard without blocking.
+    ///
+    /// Issue #1126: the non-blocking seam for the status snapshot — see
+    /// `try_spotify`. Mirrors `Config::try_get_mut`.
+    pub fn try_teams(
+        &self,
+    ) -> Option<parking_lot::RwLockReadGuard<'_, Option<crate::teams::TeamsTokens>>> {
+        self.teams.try_read()
+    }
 }
 
 impl Default for Tokens {
@@ -710,6 +733,12 @@ pub struct AppState {
     /// and `get_sync_status` surfaces it for late mounters. Cleared when a
     /// Spotify reconnect succeeds.
     pub secret_conflict: AtomicBool,
+    /// Issue #1126: last assembled `SyncStatus`, served when a token slot
+    /// is contended. A per-`AppState` field (not a process static) so
+    /// unit-constructed states each own their cache and the CLI/daemon
+    /// paths get the same fallback with no shared mutable state; updated
+    /// only on the fresh path, never from the fallback arm itself.
+    pub last_sync_snapshot: RwLock<Option<crate::commands::sync::SyncStatus>>,
 }
 
 impl AppState {
@@ -735,6 +764,7 @@ impl AppState {
             deep_link_seen: DeepLinkDedup::new(),
             tokens_load: TokensLoadGate::new(),
             secret_conflict: AtomicBool::new(false),
+            last_sync_snapshot: RwLock::new(None),
         }
     }
 }

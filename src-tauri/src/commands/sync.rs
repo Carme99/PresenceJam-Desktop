@@ -584,6 +584,12 @@ pub async fn app_exit(
 /// those same slots are the token refresh paths and must not queue behind
 /// work that needs no lock. New code MUST NOT move work into the section, and
 /// MUST NOT hold a guard while calling anything that acquires a lock.
+/// Issue #1126 extends the DURATION half with a contention fallback. The two
+/// token slots are probed with `try_read` (in this same order) before the
+/// section: a writer holding either slot makes the probe miss instead of
+/// parking the snapshot, and the fn serves the last cached `SyncStatus`
+/// (published on `AppState` by the fresh path only). The fresh path below is
+/// unchanged — same order, same instant, same bytes.
 #[tauri::command]
 pub async fn get_sync_status(state: tauri::State<'_, Arc<AppState>>) -> Result<SyncStatus, String> {
     log::debug!("{CMD} get_sync_status: ENTRY");
@@ -626,7 +632,52 @@ async fn sync_status_offloaded(state: Arc<AppState>) -> Result<SyncStatus, Strin
 /// needed a lock. The manual-status record and the recent-status ring are
 /// process-global state that the poller never pairs with a track, so reading
 /// them outside the section cannot tear the snapshot.
+///
+/// Issue #1126: token-slot contention serves the previous snapshot. Both
+/// token slots are probed with `try_read` first — in the #398 order — and a
+/// miss on either one returns the last cached `SyncStatus` instead of
+/// blocking. The served value is NEVER a conservative default: a synthesized
+/// `teams_connected: false` would flash the Dashboard's disconnected banner
+/// during every refresh, while the cache is the last state the Dashboard
+/// already rendered. First call with contention and an empty cache has no
+/// previous instant to serve, so the fn falls through to the blocking fresh
+/// path — the one wait is bounded by the writer that is already finishing,
+/// and every later call hits the cache. The log names only the slot
+/// (`spotify` / `teams`); token contents never reach a log line.
 pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
+    // Issue #1126: contention probe. Both token slots are `try_read` in the
+    // #398 order BEFORE any guard is taken, so a writer holding either slot
+    // (the poller's commit, a reconnect/disconnect clear) makes the probe
+    // miss instead of parking this snapshot. On a miss the fn serves the
+    // last cached `SyncStatus` — the last instant the Dashboard already
+    // rendered — never a conservative default (a synthesized
+    // `teams_connected: false` would flash the disconnected banner during
+    // every refresh). The only case with no cache is the first call racing
+    // a writer before any fresh assembly ever ran: there is no previous
+    // instant to serve, so the fn falls through to the blocking fresh path
+    // below and the cache fills for every later call. Slot names only —
+    // no token contents — reach the log line.
+    let (spotify_missed, teams_missed) = (
+        state.tokens.try_spotify().is_none(),
+        state.tokens.try_teams().is_none(),
+    );
+    if spotify_missed || teams_missed {
+        if let Some(cached) = state.last_sync_snapshot.read().clone() {
+            let slot = match (spotify_missed, teams_missed) {
+                (true, true) => "spotify+teams",
+                (true, false) => "spotify",
+                _ => "teams",
+            };
+            log::info!(
+                "{CMD} sync_status_from_state: token slot `{}` contended, serving the previous snapshot",
+                slot
+            );
+            return cached;
+        }
+        log::info!(
+            "{CMD} sync_status_from_state: token slot contended with an empty snapshot cache, taking the blocking fresh path once"
+        );
+    }
     // Single critical section: all read guards held at once, clones below
     // cannot observe a writer interleaving between fields.
     let track_guard = state.polling.current_track();
@@ -688,7 +739,7 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
         presence_paused
     );
 
-    SyncStatus {
+    let status = SyncStatus {
         is_syncing,
         current_track,
         spotify_connected,
@@ -699,7 +750,12 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
         manual_status: crate::commands::status::load_manual_status(),
         recent_manual_statuses: crate::commands::status::load_recent_statuses(),
         spotify_secret_conflict,
-    }
+    };
+    // Issue #1126: publish the fresh assembly for the contention arm above.
+    // Fresh-path only — the fallback arm returns before reaching this line,
+    // so a stale snapshot can never overwrite a newer one with itself.
+    *state.last_sync_snapshot.write() = Some(status.clone());
+    status
 }
 
 // Issue #879 test seam: fires at the exact instant the snapshot releases its
@@ -837,6 +893,10 @@ mod tests {
         let body = fn_body(prod_source, "pub fn sync_status_from_state(");
         for marker in [
             "state.polling.current_track()",
+            // Issue #1126: the contention probe runs ahead of the section in
+            // the same order, so its markers join the #398 order guard.
+            "state.tokens.try_spotify()",
+            "state.tokens.try_teams()",
             "state.tokens.spotify()",
             "state.config.get()",
             "state.tokens.teams()",
@@ -1150,6 +1210,74 @@ mod tests {
             !status.teams_connected && !status.spotify_connected,
             "narrowing the section must not change what the snapshot reports: an \
              empty token slot still reads as disconnected (issues #398, #879)"
+        );
+    }
+
+    /// Issue #1126, sibling of the release-instant probe above: with a token
+    /// write guard held — the poller's commit or a reconnect/disconnect clear
+    /// mid-write — the snapshot must still complete bounded and serve the
+    /// previous instant, never block on the writer and never synthesize a
+    /// conservative default (a fabricated `teams_connected: false` would
+    /// flash the disconnected banner during every refresh). Pre-fix the
+    /// token slots had no `try_read`, so the snapshot parked on the held
+    /// guard and the bounded wait below expired: this test fails there.
+    #[test]
+    fn test_snapshot_serves_the_previous_instant_while_a_token_slot_is_held() {
+        use super::{sync_status_from_state, AppState};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let state = Arc::new(AppState::new());
+        let mut config = crate::config::AppConfig::default();
+        config.spotify.client_id = "spotify-client".to_string();
+        *state.config.get_mut() = Some(config);
+        *state.tokens.spotify_mut() = Some(crate::spotify::SpotifyTokens {
+            access_token: "spotify-access".to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+        *state.tokens.teams_mut() = Some(crate::teams::TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+
+        // The previous instant: a fresh assembly while nothing is held, so
+        // the cache fills and the expected value is pinned.
+        let previous = sync_status_from_state(&state);
+        assert!(
+            previous.spotify_connected && previous.teams_connected,
+            "the pre-contention snapshot must see both sessions (issue #1126)"
+        );
+
+        // The poller's commit, standing in: holds the Teams slot across the
+        // whole read below.
+        let writer_state = Arc::clone(&state);
+        let held = writer_state.tokens.teams_mut();
+        let reader_state = Arc::clone(&state);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let status = sync_status_from_state(&reader_state);
+            let _ = done_tx.send(status);
+        });
+        // Bounded: pre-fix the token slots had no `try_read`, so the snapshot
+        // parked on the held guard and this wait expires. Post-fix the probe
+        // misses, the cache answers, and the reader finishes while `held`
+        // is still alive.
+        let contended = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the contended snapshot must complete bounded, not park on the held token slot (issue #1126)");
+        // Dropping here ends the stand-in commit.
+        drop(held);
+        assert!(
+            contended.spotify_connected && contended.teams_connected,
+            "a contended token slot must serve the previous snapshot, not a \
+             conservative default that flashes the disconnected banner (issue #1126)"
+        );
+        assert_eq!(
+            serde_json::to_value(&contended).expect("SyncStatus must serialise"),
+            serde_json::to_value(&previous).expect("SyncStatus must serialise"),
+            "the contended answer must equal the previous instant field-for-field (issue #1126)"
         );
     }
 
