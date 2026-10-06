@@ -558,7 +558,7 @@
     background: var(--bg-elevated);
   }
   .info-icon {
-    width: 36px; height: 36px;
+    width: var(--ctl-h); height: var(--ctl-h);
     border-radius: var(--r-md);
     background: var(--warning-soft);
     color: var(--warning);

@@ -817,9 +817,11 @@
     font-size: var(--fs-xs);
     color: var(--success);
   }
+  /* #960: the dismiss target rides the small-control token, so it keeps a
+     32px hit target in both densities. */
   .dismiss-btn {
-    width: 28px;
-    height: 28px;
+    width: var(--ctl-h-sm);
+    height: var(--ctl-h-sm);
     font-size: var(--fs-lg);
     line-height: 1;
   }

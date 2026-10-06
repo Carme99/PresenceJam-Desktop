@@ -222,9 +222,11 @@ describe('LogViewer level badge column (#949)', () => {
     } as const;
     // jsdom does not load app.css layout rules; mirror only its density token
     // contract so the component's var() declarations resolve in both states.
+    // #960: the badge font size is its own token (shrinks in compact), so it
+    // is mirrored here alongside the density type scale the badge used to ride.
     const densityCss = `
-      :root { --fs-xs: 1em; --sp-3: 1em; }
-      [data-density='compact'] { --fs-xs: 0.9em; --sp-3: 0.75em; }
+      :root { --fs-xs: 1em; --sp-3: 1em; --badge-fs: 1em; --log-col-ts: 8em; }
+      [data-density='compact'] { --fs-xs: 0.9em; --sp-3: 0.75em; --badge-fs: 0.9em; --log-col-ts: 8em; }
     `;
     const appStyle = document.createElement('style');
     appStyle.dataset.test = 'logviewer-app-css';
