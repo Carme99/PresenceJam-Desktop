@@ -44,7 +44,8 @@ pub(crate) use poll_once::{
     track_rule_conditions_match, track_rule_hit, track_rule_schedule_matches, TrackRuleContext,
 };
 #[cfg(test)]
-pub(crate) use state::{global_state_lock, record_manual_status_blocks, reset_exit_snapshot};
+pub(crate) use state::record_manual_status_blocks;
+pub(crate) use state::SessionState;
 pub(crate) use state::{load_exit_snapshot, load_failure_counters, load_gate_reason};
 #[cfg(test)]
 pub(crate) use state::{record_failure_counters, record_gate_reason, reset_sync_state};

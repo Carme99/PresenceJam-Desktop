@@ -754,6 +754,12 @@ pub struct AppState {
     /// paths get the same fallback with no shared mutable state; updated
     /// only on the fresh path, never from the fallback arm itself.
     pub last_sync_snapshot: RwLock<Option<crate::commands::sync::SyncStatus>>,
+    /// Issue #758: per-session polling state (write-decision clocks,
+    /// quiet/snooze latches, last-now-playing cache, preferred-presence
+    /// session, exit snapshot, diagnostics mirrors). Owned here so each
+    /// test constructs an isolated session and production session
+    /// boundaries are per-session resets, not global resets.
+    pub session: crate::polling::SessionState,
 }
 
 impl AppState {
@@ -778,8 +784,9 @@ impl AppState {
             tray_available: AtomicBool::new(true),
             deep_link_seen: DeepLinkDedup::new(),
             tokens_load: TokensLoadGate::new(),
-            secret_conflict: AtomicBool::new(false),
             last_sync_snapshot: RwLock::new(None),
+            secret_conflict: AtomicBool::new(false),
+            session: crate::polling::SessionState::new(),
         }
     }
 }

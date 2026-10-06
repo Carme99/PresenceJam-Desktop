@@ -14,10 +14,9 @@
 //! All three collapse to a single function here. See the regression
 //! tests at the bottom of this file for invariants.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use chrono::{DateTime, Local, TimeZone, Utc};
@@ -205,32 +204,16 @@ pub(crate) struct WriteClocks {
     pub(crate) last_idle_verdict: Option<bool>,
 }
 
-/// Process-wide slot for [`WriteClocks`]. See the struct docs for why these
-/// clocks are shared rather than per-thread.
-static WRITE_CLOCKS: Mutex<WriteClocks> = Mutex::new(WriteClocks {
-    last_track_key: None,
-    last_teams_update: None,
-    last_posted_placeholder: None,
-    gated_track_key: None,
-    last_availability_arm: None,
-    last_posted_status: None,
-    last_gate_check: None,
-    armed_presence: None,
-    suppressed_placeholder: None,
-    generation: 0,
-    force_resume_write: false,
-    last_idle_verdict: None,
-});
-
-/// Snapshot the shared write-decision clocks. A poisoned lock is recovered
+/// Snapshot the session's write-decision clocks. A poisoned lock is recovered
 /// rather than propagated (`into_inner`): these are dedup heuristics, and
 /// losing them costs at most one redundant Graph write.
 ///
 /// The snapshot carries the generation it read, so the matching
 /// [`store_write_clocks`] can tell whether it is still the slot's latest view
 /// (finding D11, issue #694).
-pub(crate) fn load_write_clocks() -> WriteClocks {
-    WRITE_CLOCKS
+pub(crate) fn load_write_clocks(session: &super::state::SessionState) -> WriteClocks {
+    session
+        .write_clocks_slot()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
@@ -267,8 +250,11 @@ pub(crate) fn load_write_clocks() -> WriteClocks {
 /// a FRESH gate, which is unbounded while the track plays), and a RULE gate
 /// always re-derives on the next iteration because its verdict is recomputed
 /// from the clock every time.
-pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
-    let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
+pub(crate) fn store_write_clocks(session: &super::state::SessionState, clocks: &WriteClocks) {
+    let mut slot = session
+        .write_clocks_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if slot.generation != clocks.generation {
         log::debug!(
             "[POLLING] store_write_clocks: discarding a superseded snapshot (loaded generation {}, slot generation {}); a concurrent iteration already published a newer one",
@@ -281,8 +267,7 @@ pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
     *slot = clocks.clone();
     slot.generation = next_generation;
 }
-
-/// Forget the shared write-decision clocks. Called when a polling session
+/// Forget the session's write-decision clocks. Called when a polling session
 /// starts and when one ends: the clocks describe the status Teams shows for
 /// the session that posted it, so a NEW session must start cold — otherwise
 /// its first iteration would read a stale `last_track_key` (no
@@ -294,8 +279,11 @@ pub(crate) fn store_write_clocks(clocks: &WriteClocks) {
 /// Finding D11 (issue #694): the reset bumps the generation too, so a snapshot
 /// loaded before it (by a dead session, or by an in-flight one-shot) can never
 /// land on the fresh slot.
-pub(crate) fn reset_write_clocks() {
-    let mut slot = WRITE_CLOCKS.lock().unwrap_or_else(|e| e.into_inner());
+pub(crate) fn reset_write_clocks(session: &super::state::SessionState) {
+    let mut slot = session
+        .write_clocks_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let next_generation = slot.generation.wrapping_add(1);
     *slot = WriteClocks::default();
     slot.generation = next_generation;
@@ -395,7 +383,7 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
     let gate = {
         // Scoped: the config read guard must not outlive the decision.
         let config = state.config.get();
-        snooze_gate(&config)
+        snooze_gate(&state.session, &config)
     };
     match gate {
         SnoozeGate::Skipped(_) => {
@@ -416,7 +404,7 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
     let paused = {
         // Scoped: the config read guard must not outlive the decision.
         let config = state.config.get();
-        quiet_pause_iteration(&config)
+        quiet_pause_iteration(&state.session, &config)
     };
     if paused.is_some() {
         log::info!(
@@ -428,7 +416,7 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
     // `Disconnected` receiver as Break, so a dropped sender would make every
     // one-shot a silent no-op. Never collapse this to `let _`.
     let (_tx, rx) = mpsc::channel::<()>();
-    let mut clocks = load_write_clocks();
+    let mut clocks = load_write_clocks(&state.session);
     let mut consecutive_pauses: u8 = 0;
     let mut transient_failure_count: u8 = 0;
     let mut consecutive_network_failures: u8 = 0;
@@ -483,7 +471,7 @@ pub(crate) fn run_oneshot(state: &Arc<AppState>, app: &AppHandle) {
         &mut clocks.force_resume_write,
         RunMode::OneShot,
     );
-    store_write_clocks(&clocks);
+    store_write_clocks(&state.session, &clocks);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -538,7 +526,12 @@ fn run_inner(
     // outlive the run).
     if let Some(teams_tokens) = state.tokens.teams().clone() {
         if !is_teams_token_expired(&teams_tokens) {
-            let _ = clear_expired_preferred_presence(app, &teams_tokens.access_token, Utc::now());
+            let _ = clear_expired_preferred_presence(
+                &state.session,
+                app,
+                &teams_tokens.access_token,
+                Utc::now(),
+            );
         }
     }
     // Issue #870: the iteration-head expiry tick for the manual status.
@@ -797,14 +790,16 @@ fn run_inner(
                 episode: None,
                 context: crate::spotify::PlaybackContext::default(),
             };
-            *LAST_NOW_PLAYING.lock() = Some(now.clone());
+            state.session.store_now_playing(Some(now.clone()));
 
             // 304-equivalent path: the Spotify source flags it via
             // `last_poll_was_not_modified` after a 304 round-trip. The
             // system sources always return false (every query is a
             // fresh read), so this branch is Spotify-only in practice.
             if playback_source.last_poll_was_not_modified() {
-                if let Some(now_for_rewrite) = config_flip_rewrite_track(last_track_key, &config) {
+                if let Some(now_for_rewrite) =
+                    config_flip_rewrite_track(&state.session, last_track_key, &config)
+                {
                     log::info!(
                         "[POLLING] poll_once: 304 but status config changed mid-track, forcing one rewrite"
                     );
@@ -902,7 +897,7 @@ fn run_inner(
             }
         }
         Ok(None) => {
-            *LAST_NOW_PLAYING.lock() = None;
+            state.session.store_now_playing(None);
             log::info!("[POLLING] poll_once: no track playing");
             let no_track_backoff = handle_no_track(
                 app,
@@ -994,11 +989,13 @@ fn run_inner(
                                             episode: None,
                                             context: crate::spotify::PlaybackContext::default(),
                                         };
-                                        *LAST_NOW_PLAYING.lock() = Some(now.clone());
+                                        state.session.store_now_playing(Some(now.clone()));
                                         if playback_source.last_poll_was_not_modified() {
-                                            if let Some(now_for_rewrite) =
-                                                config_flip_rewrite_track(last_track_key, &config)
-                                            {
+                                            if let Some(now_for_rewrite) = config_flip_rewrite_track(
+                                                &state.session,
+                                                last_track_key,
+                                                &config,
+                                            ) {
                                                 log::info!(
                                                     "[POLLING] poll_once: 304 but status config changed mid-track, forcing one rewrite"
                                                 );
@@ -1088,7 +1085,7 @@ fn run_inner(
                                         return PollIteration::Sleep { seconds: _sleep };
                                     }
                                     Ok(None) => {
-                                        *LAST_NOW_PLAYING.lock() = None;
+                                        state.session.store_now_playing(None);
                                         log::info!("[POLLING] poll_once: retry no track");
                                         let no_track_backoff = handle_no_track(
                                             app,
@@ -1909,26 +1906,17 @@ fn quiet_hours_active_now(config: &Option<std::sync::Arc<crate::config::AppConfi
 /// Whether the previous iteration was skipped by [`quiet_pause_iteration`], so
 /// the pause and the resume are each logged exactly once. The DECISION is never
 /// cached — it is re-derived from the local clock on every iteration, which is
-/// what lets the window end by itself.
-static QUIET_PAUSE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// S4 (issue #672): the quiet-hours "pause polling" gate.
-///
-/// Returns the sleep duration for an iteration the ACTIVE quiet-hours entry —
-/// the first one whose window contains the local clock, the same entry
-/// [`matching_quiet_hours`] hands the write decision — asks to skip entirely.
-/// `None` means poll normally.
-///
-/// The polling driver consults this BEFORE it loads the write clocks and before
-/// it runs an iteration, so a skipped iteration issues no Spotify/Graph request
-/// and moves no keepalive/debounce clock. The thread is never stopped or
-/// parked: a parked thread could not notice the window ending, so the window is
-/// re-evaluated every iteration and the pause/resume transitions are logged
-/// once each.
-pub(crate) fn quiet_pause_iteration(config: &Option<std::sync::Arc<AppConfig>>) -> Option<u64> {
+/// what lets the window end by itself. The latch lives on the session (issue
+/// #758) so two sessions never share a pause edge.
+pub(crate) fn quiet_pause_iteration(
+    session: &super::state::SessionState,
+    config: &Option<std::sync::Arc<AppConfig>>,
+) -> Option<u64> {
     let (now_minutes, weekday) = local_minutes_and_weekday();
     let decision = quiet_pause_at(config, now_minutes, weekday);
-    let was_paused = QUIET_PAUSE_ACTIVE.swap(decision.is_some(), Ordering::Relaxed);
+    let was_paused = session
+        .quiet_pause_latch()
+        .swap(decision.is_some(), Ordering::Relaxed);
     if let Some(line) =
         quiet_pause_log_line(decision.is_some(), was_paused, decision.map(|(_, end)| end))
     {
@@ -2028,27 +2016,15 @@ pub(crate) enum SnoozeGate {
 /// Whether the previous iteration was skipped by [`snooze_gate`], so the pause
 /// and the resume are each logged exactly once. The DECISION is never cached —
 /// it is re-derived from the stored deadline on every iteration, which is what
-/// lets the snooze end by itself.
-static SNOOZE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// S9 (issue #677): the tray snooze gate.
-///
-/// The polling driver consults this BEFORE the quiet-hours gate, before it
-/// loads the write clocks and before it runs an iteration, so a snoozed
-/// iteration issues no Spotify/Graph request and moves no keepalive/debounce
-/// clock. The thread is never stopped or parked — a parked thread could not
-/// notice the deadline — so the gate is re-evaluated every iteration and the
-/// pause/resume transitions are logged once each.
-///
-/// The sleep is the configured ceiling, exactly as the quiet-hours pause uses
-/// it, so resuming can overshoot the deadline by at most one interval. That
-/// bound is deliberate: a shorter sleep would mean waking (and re-reading the
-/// clock) more often than a normal poll, for a deadline the user set in
-/// minutes.
-pub(crate) fn snooze_gate(config: &Option<std::sync::Arc<AppConfig>>) -> SnoozeGate {
+/// lets the snooze end by itself. The latch lives on the session (issue #758)
+/// so two sessions never share a snooze edge.
+pub(crate) fn snooze_gate(
+    session: &super::state::SessionState,
+    config: &Option<std::sync::Arc<AppConfig>>,
+) -> SnoozeGate {
     let now = Utc::now();
     if let Some((seconds, deadline)) = snooze_pause_at(config, now) {
-        if !SNOOZE_ACTIVE.swap(true, Ordering::Relaxed) {
+        if !session.snooze_latch().swap(true, Ordering::Relaxed) {
             log::info!(
                 "{}",
                 snooze_pause_log_line(
@@ -2060,14 +2036,14 @@ pub(crate) fn snooze_gate(config: &Option<std::sync::Arc<AppConfig>>) -> SnoozeG
         return SnoozeGate::Skipped(seconds);
     }
     if snooze_expired(config, now) {
-        if SNOOZE_ACTIVE.swap(false, Ordering::Relaxed) {
+        if session.snooze_latch().swap(false, Ordering::Relaxed) {
             log::info!("[POLLING] snooze: polling resumed");
         } else {
             log::info!("[POLLING] snooze: the stored deadline has already passed — clearing it");
         }
         return SnoozeGate::Expired;
     }
-    SNOOZE_ACTIVE.store(false, Ordering::Relaxed);
+    session.snooze_latch().store(false, Ordering::Relaxed);
     SnoozeGate::Inactive
 }
 
@@ -2400,7 +2376,13 @@ fn playback_state_changed_payload(
     }
 }
 
-fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activity: &str) {
+fn emit_presence_gated(
+    session: &super::state::SessionState,
+    app: &AppHandle,
+    reason: &str,
+    availability: &str,
+    activity: &str,
+) {
     let _ = app.emit(
         "presence-gated",
         crate::events::PresenceGated {
@@ -2414,12 +2396,12 @@ fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activi
     // This is the single funnel for every announced suppression (~7 call
     // sites), so all presence/rule/quiet/calendar reasons are covered without
     // touching each site. Reason token only — never posted text.
-    super::state::record_gate_reason(Some(reason.to_string()));
+    super::state::record_gate_reason(session, Some(reason.to_string()));
     // Issue #877: append to the bounded decision history. The gate
     // reason is the documented wire shape; the track fingerprint is
-    // pulled off the `state.polling.current_track()` snapshot so an
+    // pulled off the session mirror so an
     // Activity card entry can pin the gate to the track it targeted.
-    let track_fingerprint = super::state::current_track_fingerprint();
+    let track_fingerprint = super::state::current_track_fingerprint(session);
     crate::history::append(
         crate::history::PresenceHistoryEntry {
             at: Utc::now(),
@@ -2455,7 +2437,9 @@ fn emit_presence_gated(app: &AppHandle, reason: &str, availability: &str, activi
 /// The single setPresence call site for the polling loop — rules and the
 /// default "listening" session both funnel through here, so the pair, the
 /// expiration bound and the re-arm cadence cannot drift apart.
+#[allow(clippy::too_many_arguments)]
 fn arm_presence_session(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     pair: &PresencePair,
@@ -2480,7 +2464,10 @@ fn arm_presence_session(
             // Finding D1 (issue #684): this session now has a live presence
             // session on Teams — record it in the exit snapshot, which
             // survives the loop's exit-tail clock reset.
-            super::state::record_armed_presence(Some((&pair.availability, &pair.activity, label)));
+            super::state::record_armed_presence(
+                session,
+                Some((&pair.availability, &pair.activity, label)),
+            );
             let _ = app.emit(
                 "presence-availability-updated",
                 crate::events::PresenceAvailabilityUpdated {
@@ -2508,6 +2495,7 @@ fn arm_presence_session(
 /// 404 = the session is already gone = success. Returns extra backoff seconds
 /// (0 unless Graph throttled the call). No-op when nothing of ours is armed.
 fn clear_presence_session(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     label: &str,
@@ -2522,7 +2510,7 @@ fn clear_presence_session(
             *armed = None;
             *last_availability_arm = None;
             // Finding D1 (issue #684): no session of ours is armed any more.
-            super::state::record_armed_presence(None);
+            super::state::record_armed_presence(session, None);
             let _ = app.emit(
                 "presence-availability-updated",
                 crate::events::PresenceAvailabilityUpdated {
@@ -2551,19 +2539,24 @@ pub(crate) struct PreferredPresenceSession {
     pub label: &'static str,
 }
 
-static PREFERRED_PRESENCE_SESSION: std::sync::Mutex<Option<PreferredPresenceSession>> =
-    std::sync::Mutex::new(None);
-
-pub(crate) fn load_preferred_presence_session() -> Option<PreferredPresenceSession> {
-    PREFERRED_PRESENCE_SESSION
+/// Issue #758: the preferred-presence slot lives on the session, owned by
+/// `AppState`. The arm/clear/expiry helpers below take it explicitly so two
+/// sessions never share an arm.
+pub(crate) fn load_preferred_presence_session(
+    session: &super::state::SessionState,
+) -> Option<PreferredPresenceSession> {
+    session
+        .preferred_presence_slot()
         .lock()
         .ok()
         .and_then(|guard| guard.clone())
 }
-
-pub(crate) fn record_preferred_presence_session(session: Option<PreferredPresenceSession>) {
-    if let Ok(mut guard) = PREFERRED_PRESENCE_SESSION.lock() {
-        *guard = session;
+pub(crate) fn record_preferred_presence_session(
+    session: &super::state::SessionState,
+    value: Option<PreferredPresenceSession>,
+) {
+    if let Ok(mut guard) = session.preferred_presence_slot().lock() {
+        *guard = value;
     }
 }
 
@@ -2576,6 +2569,7 @@ pub(crate) fn record_preferred_presence_session(session: Option<PreferredPresenc
 ///
 /// Returns extra backoff seconds (0 unless Graph throttled the call).
 pub(crate) fn arm_preferred_presence_session(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     pair: &PresencePair,
@@ -2592,7 +2586,7 @@ pub(crate) fn arm_preferred_presence_session(
         .unwrap_or(60)
         .max(5);
     let expires_at = now + chrono::Duration::minutes(minutes);
-    let last = load_preferred_presence_session();
+    let last = load_preferred_presence_session(session);
     if let Some(prev) = last.as_ref() {
         if prev.pair == *pair && prev.expires_at > now && prev.label == label {
             // Same pair, still inside the original expiry window — no need
@@ -2612,11 +2606,14 @@ pub(crate) fn arm_preferred_presence_session(
             // — both stable for the lifetime of the arm, so it lives in a
             // `&'static str` and matches the `Eq` arm above.
             let label_static: &'static str = Box::leak(Box::from(label));
-            record_preferred_presence_session(Some(PreferredPresenceSession {
-                pair: pair.clone(),
-                expires_at,
-                label: label_static,
-            }));
+            record_preferred_presence_session(
+                session,
+                Some(PreferredPresenceSession {
+                    pair: pair.clone(),
+                    expires_at,
+                    label: label_static,
+                }),
+            );
             let _ = app.emit(
                 "preferred-presence-updated",
                 crate::events::PreferredPresenceUpdated {
@@ -2637,7 +2634,7 @@ pub(crate) fn arm_preferred_presence_session(
                     at: now,
                     kind: "preferred-presence-armed".to_string(),
                     note: format!("armed ({}/{}, {})", pair.availability, pair.activity, label),
-                    track_fingerprint: super::state::current_track_fingerprint(),
+                    track_fingerprint: super::state::current_track_fingerprint(session),
                     posted_status: None,
                     gate_reason: None,
                 },
@@ -2661,16 +2658,17 @@ pub(crate) fn arm_preferred_presence_session(
 /// 404 when no preferred presence is set, which IS the success case. No-op
 /// when nothing of ours is armed.
 pub(crate) fn clear_preferred_presence_session(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     label: &str,
 ) -> u64 {
-    if load_preferred_presence_session().is_none() {
+    if load_preferred_presence_session(session).is_none() {
         return 0;
     }
     match clear_user_preferred_presence(access_token) {
         Ok(_) => {
-            record_preferred_presence_session(None);
+            record_preferred_presence_session(session, None);
             let _ = app.emit(
                 "preferred-presence-updated",
                 crate::events::PreferredPresenceUpdated {
@@ -2689,7 +2687,7 @@ pub(crate) fn clear_preferred_presence_session(
                     at: Utc::now(),
                     kind: "preferred-presence-cleared".to_string(),
                     note: format!("cleared ({label})"),
-                    track_fingerprint: super::state::current_track_fingerprint(),
+                    track_fingerprint: super::state::current_track_fingerprint(session),
                     posted_status: None,
                     gate_reason: None,
                 },
@@ -2708,21 +2706,22 @@ pub(crate) fn clear_preferred_presence_session(
 /// loop, BEFORE the rule/snooze paths can re-arm — so an expired window
 /// always clears before a re-arm can resurrect it.
 fn clear_expired_preferred_presence(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> u64 {
-    let Some(session) = load_preferred_presence_session() else {
+    let Some(armed) = load_preferred_presence_session(session) else {
         return 0;
     };
-    if session.expires_at > now {
+    if armed.expires_at > now {
         return 0;
     }
     log::info!(
         "[POLLING] preferred presence expired (label={}), clearing",
-        session.label
+        armed.label
     );
-    clear_preferred_presence_session(app, access_token, "Preferred presence expired")
+    clear_preferred_presence_session(session, app, access_token, "Preferred presence expired")
 }
 
 /// Finding #634 (issue #634): apply a matched rule's presence action on the
@@ -2741,6 +2740,7 @@ fn clear_expired_preferred_presence(
 /// the user's explicit per-track instruction.
 #[allow(clippy::too_many_arguments)]
 fn rule_presence_backoff(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     config: &Option<std::sync::Arc<AppConfig>>,
@@ -2757,6 +2757,7 @@ fn rule_presence_backoff(
     // overridden.
     if let Some(preferred) = decision.preferred_presence.as_ref() {
         return arm_preferred_presence_session(
+            session,
             app,
             access_token,
             preferred,
@@ -2779,6 +2780,7 @@ fn rule_presence_backoff(
         return 0;
     }
     arm_presence_session(
+        session,
         app,
         access_token,
         pair,
@@ -2823,6 +2825,7 @@ fn default_listening_presence() -> PresencePair {
 /// answered with a `setPresence` of ours.
 #[allow(clippy::too_many_arguments)]
 fn sync_availability(
+    session: &super::state::SessionState,
     app: &AppHandle,
     access_token: &str,
     track_is_playing: bool,
@@ -2841,6 +2844,7 @@ fn sync_availability(
     // at the `rule_gate_at` site, so by the time we get here it is `None`).
     if let Some(preferred) = rule.preferred_presence.as_ref() {
         return arm_preferred_presence_session(
+            session,
             app,
             access_token,
             preferred,
@@ -2865,6 +2869,7 @@ fn sync_availability(
     // user's real state returns.
     if let Some(pair) = rule.presence.as_ref() {
         return arm_presence_session(
+            session,
             app,
             access_token,
             pair,
@@ -2877,6 +2882,7 @@ fn sync_availability(
     if track_is_playing {
         let listening = default_listening_presence();
         return arm_presence_session(
+            session,
             app,
             access_token,
             &listening,
@@ -2887,6 +2893,7 @@ fn sync_availability(
         );
     }
     clear_presence_session(
+        session,
         app,
         access_token,
         "Availability cleared",
@@ -2968,6 +2975,7 @@ fn rearm_availability_after_304(
         format!("Rule presence ({}/{})", pair.availability, pair.activity)
     };
     arm_presence_session(
+        &state.session,
         app,
         &teams_tok.access_token,
         &pair,
@@ -3376,10 +3384,9 @@ fn status_config_fingerprint(config: &Option<std::sync::Arc<crate::config::AppCo
 /// `AppState::polling.current_track` — written on the same genuine track
 /// change, cleared by the same no-track clear — so the two can never disagree
 /// about what is playing.
-static LAST_NOW_PLAYING: std::sync::LazyLock<
-    parking_lot::Mutex<Option<crate::spotify::NowPlaying>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
-
+/// Issue #758: the last-observed-item slot lives on the session, owned by
+/// `AppState`; the writer is `SessionState::{store,load}_now_playing`.
+///
 /// Issue #343: the change key compared against `last_track_key`. Item
 /// identity — including the episode marker, so a track and an episode that
 /// share a title/artist still re-key (issue #581) — plus the status-shaping
@@ -3420,10 +3427,11 @@ fn status_track_key(
 /// rewrite must render the same template and the same context tokens the
 /// live path would have (issue #581): the whole item, not just its media.
 fn config_flip_rewrite_track(
+    session: &super::state::SessionState,
     last_track_key: &Option<String>,
     config: &Option<std::sync::Arc<crate::config::AppConfig>>,
 ) -> Option<crate::spotify::NowPlaying> {
-    let now = LAST_NOW_PLAYING.lock().clone()?;
+    let now = session.load_now_playing()?;
     let expected = status_track_key(&now, config);
     if last_track_key.as_ref() != Some(&expected) {
         Some(now)
@@ -4126,18 +4134,22 @@ fn no_track_gate_key(blocked: bool) -> Option<&'static str> {
 /// change-time and paused-clear reads, and the due mid-track re-check (which
 /// calls `presence_gate_decision` directly) for its own.
 fn observe_presence_sample(
+    session: &super::state::SessionState,
     respect_manual_status: bool,
     presence: &crate::teams::PresenceInfo,
     posted: Option<&str>,
     placeholder: Option<&str>,
 ) {
-    super::state::record_manual_status_blocks(manual_status_blocks_write(
-        respect_manual_status,
-        Some(presence),
-        posted,
-        placeholder,
-        Utc::now(),
-    ));
+    super::state::record_manual_status_blocks(
+        session,
+        manual_status_blocks_write(
+            respect_manual_status,
+            Some(presence),
+            posted,
+            placeholder,
+            Utc::now(),
+        ),
+    );
 }
 
 /// Review round 2 (item 4): whether the paused clear can skip its Graph
@@ -4363,7 +4375,13 @@ pub(crate) fn process_track(
                         posted: Option<&str>,
                         placeholder: Option<&str>|
      -> Option<String> {
-        observe_presence_sample(respect_manual_status, presence, posted, placeholder);
+        observe_presence_sample(
+            &state.session,
+            respect_manual_status,
+            presence,
+            posted,
+            placeholder,
+        );
         presence_gate_decision(
             presence,
             presence_gate_enabled,
@@ -4403,16 +4421,19 @@ pub(crate) fn process_track(
         // the gate emitter reads. Updated on every track change so a
         // subsequent gate entry anchors to the track it targeted, not to
         // the one before it.
-        super::state::record_current_track_fingerprint(Some(crate::history::TrackFingerprint {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-        }));
+        super::state::record_current_track_fingerprint(
+            &state.session,
+            Some(crate::history::TrackFingerprint {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+            }),
+        );
         // Issue #581: the config-flip rewrite path (#343) has no body to
         // re-parse, so the full item — episode metadata and playback context
         // included — is kept alongside the stored `TrackInfo`, which carries
         // neither. Written on the same condition as `current_track`, so the
         // two never disagree about what is playing.
-        *LAST_NOW_PLAYING.lock() = Some(now.clone());
+        state.session.store_now_playing(Some(now.clone()));
 
         let _ = app.emit("spotify-track-changed", track_event_payload(track));
     } else if playing_changed {
@@ -4429,11 +4450,14 @@ pub(crate) fn process_track(
         // Issue #877: same-track pause / resume also re-seeds the
         // fingerprint mirror so the gate emitter anchors to the track it
         // targeted even when the gate fires mid-pause.
-        super::state::record_current_track_fingerprint(Some(crate::history::TrackFingerprint {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
-        }));
-        *LAST_NOW_PLAYING.lock() = Some(now.clone());
+        super::state::record_current_track_fingerprint(
+            &state.session,
+            Some(crate::history::TrackFingerprint {
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+            }),
+        );
+        state.session.store_now_playing(Some(now.clone()));
         let _ = app.emit(
             "playback-state-changed",
             playback_state_changed_payload(track.is_playing, &track_key),
@@ -4491,7 +4515,7 @@ pub(crate) fn process_track(
                     );
                     *gated_track_key = Some(track_key.clone());
                     *last_gate_check = Some(Instant::now());
-                    emit_presence_gated(app, GATE_REASON_CALENDAR, "", "");
+                    emit_presence_gated(&state.session, app, GATE_REASON_CALENDAR, "", "");
                 } else if rule.suppresses() {
                     let reason = rule.reason.unwrap_or(GATE_REASON_QUIET_HOURS);
                     log::info!(
@@ -4500,7 +4524,7 @@ pub(crate) fn process_track(
                     );
                     *gated_track_key = Some(track_key.clone());
                     *last_gate_check = Some(Instant::now());
-                    emit_presence_gated(app, reason, "", "");
+                    emit_presence_gated(&state.session, app, reason, "", "");
                 } else if presence_read_needed {
                     match get_teams_presence(&teams_tok.access_token) {
                         Ok(presence) => match gate_verdict(
@@ -4516,6 +4540,7 @@ pub(crate) fn process_track(
                                 *gated_track_key = Some(track_key.clone());
                                 *last_gate_check = Some(Instant::now());
                                 emit_presence_gated(
+                                    &state.session,
                                     app,
                                     &reason,
                                     &presence.availability,
@@ -4575,6 +4600,7 @@ pub(crate) fn process_track(
                         "[POLLING] process_track: quiet hours started mid-track, suppressing status write"
                     );
                     emit_presence_gated(
+                        &state.session,
                         app,
                         rule.reason.unwrap_or(GATE_REASON_QUIET_HOURS),
                         "",
@@ -4583,6 +4609,7 @@ pub(crate) fn process_track(
                     // Finding #634: the suppression skips the write, but the
                     // rule's presence action still applies.
                     teams_backoff_secs = teams_backoff_secs.max(rule_presence_backoff(
+                        &state.session,
                         app,
                         &teams_tok.access_token,
                         config,
@@ -4678,6 +4705,7 @@ pub(crate) fn process_track(
                     }
                     log::debug!("[POLLING] process_track: still rule-gated, keeping suppression");
                     teams_backoff_secs = teams_backoff_secs.max(rule_presence_backoff(
+                        &state.session,
                         app,
                         &teams_tok.access_token,
                         config,
@@ -4705,6 +4733,7 @@ pub(crate) fn process_track(
                             // snapshot stale and quitting replaced the user's
                             // own Teams message with our placeholder.
                             observe_presence_sample(
+                                &state.session,
                                 respect_manual_status,
                                 &presence,
                                 last_posted_status.as_deref(),
@@ -4821,6 +4850,7 @@ pub(crate) fn process_track(
                                 *gated_track_key = Some(track_key.clone());
                                 *last_gate_check = Some(Instant::now());
                                 emit_presence_gated(
+                                    &state.session,
                                     app,
                                     &reason,
                                     &presence.availability,
@@ -4928,6 +4958,7 @@ pub(crate) fn process_track(
                 // re-arm winds through the shared tail here, on the 4-minute
                 // cadence, exactly as it would after a real write.
                 teams_backoff_secs = teams_backoff_secs.max(sync_availability(
+                    &state.session,
                     app,
                     &teams_tok.access_token,
                     track.is_playing,
@@ -4971,7 +5002,7 @@ pub(crate) fn process_track(
                     // Finding D1 (issue #684): the playing status is now on
                     // Teams — mirror it in the exit snapshot, which survives the
                     // loop's exit-tail clock reset (the D1 defect).
-                    super::state::record_posted_status(Some(&final_status));
+                    super::state::record_posted_status(&state.session, Some(&final_status));
                     let _ = app.emit(
                         "presence-updated",
                         crate::events::PresenceUpdated {
@@ -5174,7 +5205,13 @@ pub(crate) fn process_track(
                     if announce {
                         if let Some(reason) = gate_reason.as_deref() {
                             let (availability, activity) = gate_sample.unwrap_or_default();
-                            emit_presence_gated(app, reason, &availability, &activity);
+                            emit_presence_gated(
+                                &state.session,
+                                app,
+                                reason,
+                                &availability,
+                                &activity,
+                            );
                         }
                     }
                 }
@@ -5211,7 +5248,7 @@ pub(crate) fn process_track(
                             // Finding D1 (issue #684): mirror it in the exit
                             // snapshot, which the loop's exit-tail clock reset
                             // cannot erase.
-                            super::state::record_posted_status(None);
+                            super::state::record_posted_status(&state.session, None);
                             // Finding D7 (issue #690): a PAUSE is not a stop.
                             // The dedicated event lets the Dashboard keep the
                             // track card and show the paused state;
@@ -5270,6 +5307,7 @@ pub(crate) fn process_track(
         // `expirationDuration`). Emits `presence-availability-updated` on each
         // arm/clear.
         teams_backoff_secs = teams_backoff_secs.max(sync_availability(
+            &state.session,
             app,
             &teams_tok.access_token,
             track.is_playing,
@@ -5335,10 +5373,10 @@ pub(crate) fn handle_no_track(
         // Issue #877: clear the fingerprint mirror alongside the live
         // track — a gate that fires on a "no track" decision must not
         // anchor to the track the poller just stopped observing.
-        super::state::record_current_track_fingerprint(None);
+        super::state::record_current_track_fingerprint(&state.session, None);
         // Cleared in lockstep with `current_track` — the #343 rewrite path
         // reads this cache and must not resurrect a cleared track.
-        *LAST_NOW_PLAYING.lock() = None;
+        state.session.store_now_playing(None);
     } else {
         return 0;
     }
@@ -5381,6 +5419,7 @@ pub(crate) fn handle_no_track(
     if availability_sync_enabled(config) {
         if no_track_rule.presence.is_some() {
             teams_backoff_secs = teams_backoff_secs.max(rule_presence_backoff(
+                &state.session,
                 app,
                 &teams_tok.access_token,
                 config,
@@ -5391,6 +5430,7 @@ pub(crate) fn handle_no_track(
             ));
         } else {
             teams_backoff_secs = teams_backoff_secs.max(clear_presence_session(
+                &state.session,
                 app,
                 &teams_tok.access_token,
                 "Availability cleared",
@@ -5454,6 +5494,7 @@ pub(crate) fn handle_no_track(
             match get_teams_presence(&teams_tok.access_token) {
                 Ok(presence) => {
                     observe_presence_sample(
+                        &state.session,
                         respect_manual_status,
                         &presence,
                         last_posted_status.as_deref(),
@@ -5534,7 +5575,7 @@ pub(crate) fn handle_no_track(
             *gated_track_key = no_track_gate_key(true).map(str::to_string);
             if announce {
                 let (availability, activity) = presence_sample.unwrap_or_default();
-                emit_presence_gated(app, reason, &availability, &activity);
+                emit_presence_gated(&state.session, app, reason, &availability, &activity);
             }
             return teams_backoff_secs;
         }
@@ -5572,7 +5613,7 @@ pub(crate) fn handle_no_track(
             *last_posted_status = None;
             // Finding D1 (issue #684): Teams now shows a placeholder, not a
             // playing status — mirror it in the exit snapshot.
-            super::state::record_posted_status(None);
+            super::state::record_posted_status(&state.session, None);
             // Findings D4/D11 follow-up: the clear was posted, so no write is
             // being suppressed any more — retire the finished track's gate key
             // (a stale one made `get_sync_status` answer `presence_gated = true`
@@ -5652,7 +5693,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     // Clone out of the read guard before any blocking call: the guard must not
     // be held across a Graph round-trip on the exit path.
     let config = state.config.snapshot();
-    let snapshot = super::state::load_exit_snapshot();
+    let snapshot = super::state::load_exit_snapshot(&state.session);
     let plan = exit_cleanup_plan(
         &snapshot,
         availability_sync_enabled(&config),
@@ -5701,7 +5742,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     // does not mean the user did not opt into preferred presence, and
     // Graph accepts both. Clear unconditionally when present, using the
     // quick variant so the exit arm cannot hold the close open.
-    if load_preferred_presence_session().is_some() {
+    if load_preferred_presence_session(&state.session).is_some() {
         match clear_user_preferred_presence_quick(&tokens.access_token) {
             Ok(_) => log::info!("[POLLING] clear_presence_on_exit: preferred presence cleared"),
             Err(e) => log::warn!(
@@ -5732,7 +5773,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     if cleared {
         // Nothing of ours is left on Teams, so a repeated `RunEvent::Exit` (or
         // a later session that has not written yet) must not repeat this.
-        super::state::reset_exit_snapshot();
+        super::state::reset_exit_snapshot(&state.session);
     }
 }
 
@@ -7712,27 +7753,26 @@ mod tests {
             },
         };
 
-        // Nothing tracked → no rewrite. The cache is process-wide, so the
-        // test owns both its write and its teardown.
-        *LAST_NOW_PLAYING.lock() = None;
+        // Nothing tracked → no rewrite. The cache lives on the session, so
+        // the test owns its session and needs no teardown or global lock.
+        let session = crate::polling::SessionState::new();
+        session.store_now_playing(None);
         assert!(
-            config_flip_rewrite_track(&None, &config).is_none(),
+            config_flip_rewrite_track(&session, &None, &config).is_none(),
             "nothing tracked means nothing to rewrite"
         );
-
-        *LAST_NOW_PLAYING.lock() = Some(now.clone());
+        session.store_now_playing(Some(now.clone()));
         let key = status_track_key(&now, &config);
-
         // Matching key → steady-state 304 stays a no-op.
         assert!(
-            config_flip_rewrite_track(&Some(key.clone()), &config).is_none(),
+            config_flip_rewrite_track(&session, &Some(key.clone()), &config).is_none(),
             "a matching key must not force a rewrite"
         );
-
         // Same item, flipped filter → one rewrite carrying the full item.
         let mut flipped = crate::config::AppConfig::default();
         flipped.teams.profanity_filter = false;
-        let rewrite = config_flip_rewrite_track(&Some(key), &Some(std::sync::Arc::new(flipped)));
+        let rewrite =
+            config_flip_rewrite_track(&session, &Some(key), &Some(std::sync::Arc::new(flipped)));
         let rewrite = rewrite.expect("a config flip must force one rewrite");
         assert_eq!(rewrite.media.title, "T");
         assert_eq!(rewrite.media.artist, "A");
@@ -7741,8 +7781,6 @@ mod tests {
             "the rewrite must keep the playback context the live path would render"
         );
         assert_eq!(rewrite.context.repeat, crate::spotify::RepeatState::Context);
-
-        *LAST_NOW_PLAYING.lock() = None;
     }
 
     /// Issue #581: an episode and a track that happen to share the same
@@ -8482,7 +8520,7 @@ mod tests {
             .find("quiet_pause_iteration(")
             .expect("polling_loop must consult the quiet-hours pause gate (S4)");
         let clocks = loop_source
-            .find("load_write_clocks()")
+            .find("load_write_clocks(&state.session)")
             .expect("polling_loop must still snapshot the shared clocks");
         let run = loop_source
             .find("super::poll_once::run(")
@@ -9780,16 +9818,16 @@ mod tests {
     /// #384 identical-write guard.
     #[test]
     fn test_shared_write_clocks_prevent_one_shot_rearm_and_duplicate_write() {
-        let _guard = global_state_lock();
+        let session = crate::polling::SessionState::new();
         let now = Instant::now();
         // Finding D11 (issue #694): the shared slot is generation-checked, so a
         // test snapshot must be the one `load_write_clocks` just handed out —
         // building a `WriteClocks::default()` (generation 0) and storing it
         // would now be discarded as superseded.
-        let mut armed = load_write_clocks();
+        let mut armed = load_write_clocks(&session);
         armed.last_availability_arm = Some(now);
-        store_write_clocks(&armed);
-        let loaded = load_write_clocks();
+        store_write_clocks(&session, &armed);
+        let loaded = load_write_clocks(&session);
         assert_eq!(
             loaded.last_availability_arm,
             Some(now),
@@ -9828,8 +9866,8 @@ mod tests {
             "a manual refresh must honor the #384 identical-write guard"
         );
 
-        reset_write_clocks();
-        let cold = load_write_clocks();
+        reset_write_clocks(&session);
+        let cold = load_write_clocks(&session);
         assert!(
             cold.last_availability_arm.is_none() && cold.last_track_key.is_none(),
             "a stopped session must leave cold clocks, so the next session treats its \
@@ -9848,11 +9886,11 @@ mod tests {
         let prod = prod_source();
         let body = prod_fn_body(prod, "pub(crate) fn run_oneshot(");
         assert!(
-            body.contains("let mut clocks = load_write_clocks();"),
+            body.contains("let mut clocks = load_write_clocks(&state.session);"),
             "run_oneshot must load the shared write clocks"
         );
         assert!(
-            body.contains("store_write_clocks(&clocks);"),
+            body.contains("store_write_clocks(&state.session, &clocks);"),
             "run_oneshot must publish the clocks it advanced back to the shared slot"
         );
         assert!(
@@ -9868,12 +9906,12 @@ mod tests {
     fn test_polling_lifecycle_resets_shared_write_clocks() {
         let loop_source = include_str!("loop.rs");
         assert!(
-            loop_source.contains("reset_write_clocks()"),
+            loop_source.contains("reset_write_clocks(&state.session)"),
             "polling_loop must reset the shared clocks when the session ends"
         );
         let state_source = include_str!("state.rs");
         assert!(
-            state_source.contains("reset_write_clocks()"),
+            state_source.contains("reset_write_clocks(&state.session)"),
             "start_polling must reset the shared clocks so a panic-dead session's \
              clocks cannot leak into the next one"
         );
@@ -10550,15 +10588,6 @@ mod tests {
     // clears, the pause-as-state-change store and the clock generation guard.
     // ---------------------------------------------------------------
 
-    /// Serialises the tests that mutate the process-wide clock / exit-snapshot
-    /// statics. ONE lock for both module's tests (it lives in `state.rs`, next
-    /// to the snapshot): `cargo test` runs tests in parallel threads, the slots
-    /// are shared, and several tests touch both — an interleaved reset would
-    /// make the generation / snapshot assertions flaky.
-    fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::polling::state::global_state_lock()
-    }
-
     /// Finding D1 (issue #684): `polling_loop`'s exit tail empties the
     /// write-decision clocks BEFORE `RunEvent::Exit` runs the cleanup, so the
     /// cleanup must decide from the exit snapshot. Pre-fix this test's
@@ -10567,20 +10596,19 @@ mod tests {
     /// armed `Available` session live.
     #[test]
     fn test_exit_cleanup_survives_the_loop_exit_tail() {
-        let _guard = global_state_lock();
-        crate::polling::state::reset_exit_snapshot();
+        let session = crate::polling::SessionState::new();
+        crate::polling::state::reset_exit_snapshot(&session);
         // A session that posted a playing status AND armed a listening session.
-        crate::polling::state::record_posted_status(Some("\u{1F3B5} A - T \u{1F3A7}"));
-        crate::polling::state::record_armed_presence(Some((
-            "Available",
-            "Available",
-            "Listening (Available)",
-        )));
+        crate::polling::state::record_posted_status(&session, Some("\u{1F3B5} A - T \u{1F3A7}"));
+        crate::polling::state::record_armed_presence(
+            &session,
+            Some(("Available", "Available", "Listening (Available)")),
+        );
 
         // The loop's exit tail (what runs before `RunEvent::Exit`).
-        reset_write_clocks();
+        reset_write_clocks(&session);
 
-        let snapshot = crate::polling::state::load_exit_snapshot();
+        let snapshot = crate::polling::state::load_exit_snapshot(&session);
         assert_eq!(
             snapshot.last_posted_status.as_deref(),
             Some("\u{1F3B5} A - T \u{1F3A7}"),
@@ -10603,7 +10631,7 @@ mod tests {
 
         // The pre-fix source of truth is provably empty at this point — which
         // is exactly why the cleanup used to skip both calls.
-        let cold = load_write_clocks();
+        let cold = load_write_clocks(&session);
         let from_cold_clocks = ExitCleanupPlan {
             clear_presence: cold.last_availability_arm.is_some(),
             post_placeholder: cold.last_posted_status.is_some(),
@@ -10619,18 +10647,22 @@ mod tests {
         // sync does not change what Teams shows, so a stop→start→quit sequence
         // must still clean up (the clocks' own session reset cannot be the
         // snapshot's model).
-        reset_write_clocks();
+        reset_write_clocks(&session);
         assert_eq!(
-            crate::polling::state::load_exit_snapshot(),
+            crate::polling::state::load_exit_snapshot(&session),
             snapshot,
             "a session boundary must not forget the residue a previous session \
              left on Teams (finding D1)"
         );
 
         // Only a completed exit cleanup retires it.
-        crate::polling::state::reset_exit_snapshot();
+        crate::polling::state::reset_exit_snapshot(&session);
         assert_eq!(
-            exit_cleanup_plan(&crate::polling::state::load_exit_snapshot(), true, true),
+            exit_cleanup_plan(
+                &crate::polling::state::load_exit_snapshot(&session),
+                true,
+                true
+            ),
             ExitCleanupPlan::default()
         );
     }
@@ -10642,11 +10674,11 @@ mod tests {
         let prod = prod_source();
         let body = prod_fn_body(prod, "pub(crate) fn clear_presence_on_exit(");
         assert!(
-            body.contains("load_exit_snapshot()"),
+            body.contains("load_exit_snapshot(&state.session)"),
             "the exit cleanup must read the exit snapshot (finding D1)"
         );
         assert!(
-            !body.contains("load_write_clocks()"),
+            !body.contains("load_write_clocks"),
             "the exit cleanup must NOT read the clocks: polling_loop's exit tail \
              resets them before RunEvent::Exit runs this cleanup (finding D1)"
         );
@@ -10656,24 +10688,24 @@ mod tests {
         );
         let loop_source = include_str!("loop.rs");
         assert!(
-            loop_source.contains("reset_write_clocks()"),
+            loop_source.contains("reset_write_clocks(&state.session)"),
             "polling_loop must still reset the shared clocks when the session ends"
         );
         assert!(
-            !loop_source.contains("reset_exit_snapshot()"),
+            !loop_source.contains("reset_exit_snapshot("),
             "the loop's exit tail must not reset the exit snapshot — that would \
              resurrect finding D1"
         );
         let state_source = include_str!("state.rs");
         let start_body = prod_fn_body(state_source, "pub fn start_polling(");
         assert!(
-            !start_body.contains("reset_exit_snapshot()"),
+            !start_body.contains("reset_exit_snapshot("),
             "a session START must not clear the snapshot: Teams keeps showing the \
              previous session's status, so a stop→start→quit would skip the \
              cleanup (finding D1)"
         );
         assert!(
-            body.contains("reset_exit_snapshot();"),
+            body.contains("reset_exit_snapshot(&state.session);"),
             "a completed exit cleanup must retire the snapshot so a repeated \
              RunEvent::Exit is a no-op"
         );
@@ -10978,15 +11010,15 @@ mod tests {
     /// `gated_track_key` and let a write through mid-meeting.
     #[test]
     fn test_superseded_clock_snapshot_is_discarded() {
-        let _guard = global_state_lock();
-        reset_write_clocks();
+        let session = crate::polling::SessionState::new();
+        reset_write_clocks(&session);
 
         // The loop's iteration: loads, records the gate it observed, stores.
-        let mut iteration = load_write_clocks();
+        let mut iteration = load_write_clocks(&session);
         iteration.gated_track_key = Some("A - T | filter=true".to_string());
-        store_write_clocks(&iteration);
+        store_write_clocks(&session, &iteration);
         assert_eq!(
-            load_write_clocks().gated_track_key.as_deref(),
+            load_write_clocks(&session).gated_track_key.as_deref(),
             Some("A - T | filter=true"),
             "a snapshot loaded from the current slot must land"
         );
@@ -10999,9 +11031,10 @@ mod tests {
             ..WriteClocks::default()
         };
         stale.generation = iteration.generation;
-        store_write_clocks(&stale);
+        store_write_clocks(&session, &stale);
 
-        let landed = load_write_clocks();
+        let landed = load_write_clocks(&session);
+
         assert!(
             landed.gated_track_key.is_some(),
             "a superseded snapshot must never drop the recorded gate (finding D11)"
@@ -11017,10 +11050,10 @@ mod tests {
             generation: landed.generation,
             ..WriteClocks::default()
         };
-        reset_write_clocks();
-        store_write_clocks(&dead);
+        reset_write_clocks(&session);
+        store_write_clocks(&session, &dead);
         assert_eq!(
-            load_write_clocks().generation,
+            load_write_clocks(&session).generation,
             dead.generation.wrapping_add(1),
             "the reset's generation must not be overwritten by a pre-reset snapshot"
         );
@@ -11356,7 +11389,7 @@ mod tests {
         // The reads that route through `gate_verdict` are covered by its own
         // call; assert that too, so a future edit cannot drop it quietly.
         let verdict_start = prod
-            .find("let gate_verdict = |presence:")
+            .find("let gate_verdict = |presence")
             .expect("process_track must keep the shared gate closure");
         let verdict = &prod[verdict_start..(verdict_start + 900).min(prod.len())];
         assert!(
@@ -11367,7 +11400,7 @@ mod tests {
         let direct = prod
             .find("match presence_gate_decision(")
             .expect("the due mid-track re-check must still read presence (the #430 late-post)");
-        let window = &prod[direct.saturating_sub(900)..direct];
+        let window = &prod[direct.saturating_sub(1500)..direct];
         assert!(
             window.contains("observe_presence_sample("),
             "the direct presence read must record the manual-status verdict before deciding \
@@ -11634,13 +11667,13 @@ mod tests {
     fn snooze_gate_precedes_the_quiet_gate_the_clock_load_and_the_iteration() {
         let loop_source = include_str!("loop.rs");
         let snooze = loop_source
-            .find("snooze_gate(&config)")
+            .find("snooze_gate(&state.session, &config)")
             .expect("polling_loop must consult the snooze gate (S9)");
         let quiet = loop_source
             .find("quiet_pause_iteration(")
             .expect("the quiet-hours pause must still be consulted (S4)");
         let clocks = loop_source
-            .find("load_write_clocks()")
+            .find("load_write_clocks(&state.session)")
             .expect("polling_loop must still snapshot the shared clocks");
         let run = loop_source
             .find("super::poll_once::run(")
@@ -11660,7 +11693,9 @@ mod tests {
              must issue no Spotify GET (S9)"
         );
         assert_eq!(
-            loop_source.matches("snooze_gate(&config)").count(),
+            loop_source
+                .matches("snooze_gate(&state.session, &config)")
+                .count(),
             1,
             "exactly one snooze-gate call site is expected in the driver"
         );
@@ -11734,10 +11769,10 @@ mod tests {
         let prod = prod_source();
         let body = prod_fn_body(prod, "pub(crate) fn run_oneshot(");
         let gate = body
-            .find("snooze_gate(&config)")
+            .find("snooze_gate(&state.session, &config)")
             .expect("run_oneshot must consult the snooze gate (S9)");
         let clocks = body
-            .find("load_write_clocks()")
+            .find("load_write_clocks(&state.session)")
             .expect("run_oneshot must still load the shared clocks");
         let inner = body
             .find("run_inner(")
@@ -11789,13 +11824,13 @@ mod tests {
         let prod = prod_source();
         let body = prod_fn_body(prod, "pub(crate) fn run_oneshot(");
         let snooze = body
-            .find("snooze_gate(&config)")
+            .find("snooze_gate(&state.session, &config)")
             .expect("run_oneshot must still consult the snooze gate (S9)");
         let pause = body
-            .find("quiet_pause_iteration(&config)")
+            .find("quiet_pause_iteration(&state.session, &config)")
             .expect("run_oneshot must consult the quiet-hours pause gate (#793)");
         let clocks = body
-            .find("load_write_clocks()")
+            .find("load_write_clocks(&state.session)")
             .expect("run_oneshot must still load the shared clocks");
         let inner = body
             .find("run_inner(")
