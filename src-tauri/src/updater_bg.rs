@@ -1305,7 +1305,8 @@ fn manifest_pub_date(raw_json: &serde_json::Value) -> Option<String> {
 }
 
 /// Base of the published release-download URLs. The tag carries the app
-/// version (`v4.7.0`) and the asset name is the fixed Linux artefact name the
+/// version (the tag is composed at runtime from the signed manifest, never
+/// hardcoded here) and the asset name is the fixed Linux artefact name the
 /// release workflow publishes (`.github/workflows/release.yml`, "Package Linux
 /// artifacts").
 const RELEASES_DOWNLOAD_BASE: &str =
