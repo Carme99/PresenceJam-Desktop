@@ -23,9 +23,9 @@ pub fn throttle_bucket(fetched_at: Option<Instant>, throttle: Duration) -> u64 {
 
 /// The throttle buckets of both caches (issue #805), read under short locks —
 /// no HTTP, and no lock held past the read.
-pub fn cache_buckets() -> (u64, u64) {
-    let devices_at = DEVICES_CACHE.lock().as_ref().map(|(at, _)| *at);
-    let queue_at = QUEUE_CACHE.lock().as_ref().map(|(at, _)| *at);
+pub fn cache_buckets(caches: &crate::state::AppCaches) -> (u64, u64) {
+    let devices_at = caches.devices_slot().lock().as_ref().map(|(at, _)| *at);
+    let queue_at = caches.queue_slot().lock().as_ref().map(|(at, _)| *at);
     (
         throttle_bucket(devices_at, TRAY_SPOTIFY_FETCH_THROTTLE),
         throttle_bucket(queue_at, TRAY_SPOTIFY_FETCH_THROTTLE),
@@ -81,12 +81,6 @@ pub const TRAY_SPOTIFY_FETCH_THROTTLE: Duration = Duration::from_secs(60);
 /// live re-fetch when stale (issue #388).
 pub type DeviceCacheSlot = Option<(Instant, Vec<crate::spotify::DeviceInfo>)>;
 
-pub static DEVICES_CACHE: std::sync::LazyLock<parking_lot::Mutex<DeviceCacheSlot>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
-
-pub static QUEUE_CACHE: std::sync::LazyLock<
-    parking_lot::Mutex<Option<(Instant, crate::spotify::QueueInfo)>>,
-> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
 /// Shortest gap between the post-action re-fetches of the Devices/Up Next lists
 /// (issue #883). A player action wants those submenus to mirror what just
@@ -95,17 +89,7 @@ pub static QUEUE_CACHE: std::sync::LazyLock<
 /// matches the click the user just made.
 pub const TRAY_POST_ACTION_FETCH_MIN: Duration = Duration::from_secs(5);
 
-/// The most recent tray player action that wants the Devices/Up Next lists
-/// refreshed (issue #883). `force_tray_refresh` records the action here instead
-/// of emptying both caches, which bypassed the fetch throttle for every click.
-pub static LAST_TRAY_ACTION: std::sync::LazyLock<parking_lot::Mutex<Option<Instant>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
-/// When the most recent post-action re-fetch was issued (issue #883). Recorded
-/// before the requests run, so a click landing while they are in flight reuses
-/// them instead of paying for a pair of its own.
-pub static LAST_ACTION_FETCH: std::sync::LazyLock<parking_lot::Mutex<Option<Instant>>> =
-    std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
 /// Whether a rebuild must re-fetch the Devices/Up Next lists on behalf of a
 /// player action (issue #883). Pure in its instants, so the coalescing rule —
@@ -142,12 +126,13 @@ pub fn action_fetch_due(
 /// `min_interval` is this fetch's throttle (issue #883): the full window for an
 /// ordinary rebuild, `Duration::ZERO` for the one a player action asks for.
 pub fn cached_devices(
+    caches: &crate::state::AppCaches,
     access_token: &str,
     min_interval: Duration,
 ) -> Vec<crate::spotify::DeviceInfo> {
     // Snapshot under short lock, then drop before deciding staleness.
     let snapshot = {
-        let cache = DEVICES_CACHE.lock();
+        let cache = caches.devices_slot().lock();
         cache.clone()
     };
     let needs_fetch = match &snapshot {
@@ -157,11 +142,11 @@ pub fn cached_devices(
     if !needs_fetch {
         return snapshot.unwrap().1;
     }
-    // Throttled fetch OUTSIDE any lock — never hold DEVICES_CACHE across HTTP.
+    // Throttled fetch OUTSIDE any lock — never hold the devices slot across HTTP.
     match crate::spotify::get_devices(access_token) {
         Ok(devices) => {
             // Re-acquire only to store the fresh result.
-            *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
+            *caches.devices_slot().lock() = Some((Instant::now(), devices.clone()));
             devices
         }
         Err(e) => {
@@ -177,12 +162,13 @@ pub fn cached_devices(
 /// Same lock discipline as `cached_devices`: snapshot, drop, fetch outside
 /// lock, re-acquire to store. Benign double-fetch on a race. See issue #217.
 pub fn cached_queue(
+    caches: &crate::state::AppCaches,
     access_token: &str,
     min_interval: Duration,
 ) -> Option<crate::spotify::QueueInfo> {
     // Snapshot under short lock, then drop before deciding staleness.
     let snapshot = {
-        let cache = QUEUE_CACHE.lock();
+        let cache = caches.queue_slot().lock();
         cache.clone()
     };
     let needs_fetch = match &snapshot {
@@ -192,11 +178,11 @@ pub fn cached_queue(
     if !needs_fetch {
         return snapshot.map(|(_, queue)| queue);
     }
-    // Throttled fetch OUTSIDE any lock — never hold QUEUE_CACHE across HTTP.
+    // Throttled fetch OUTSIDE any lock — never hold the queue slot across HTTP.
     match crate::spotify::get_queue(access_token) {
         Ok(queue) => {
             // Re-acquire only to store.
-            *QUEUE_CACHE.lock() = Some((Instant::now(), queue.clone()));
+            *caches.queue_slot().lock() = Some((Instant::now(), queue.clone()));
             Some(queue)
         }
         Err(e) => {
@@ -244,13 +230,17 @@ pub fn tray_fetch_mode(snoozed: bool) -> TrayFetch {
 /// The Devices list for a rebuild, honouring [`TrayFetch`]. A missing access
 /// token is an empty submenu either way — there is nothing to fetch with.
 pub fn devices_for_menu(
+    caches: &crate::state::AppCaches,
     access_token: Option<&str>,
     fetch: TrayFetch,
 ) -> Vec<crate::spotify::DeviceInfo> {
     match (access_token, fetch) {
-        (Some(token), TrayFetch::Refresh) => cached_devices(token, TRAY_SPOTIFY_FETCH_THROTTLE),
-        (Some(token), TrayFetch::RefreshNow) => cached_devices(token, Duration::ZERO),
-        (_, TrayFetch::CacheOnly) => DEVICES_CACHE
+        (Some(token), TrayFetch::Refresh) => {
+            cached_devices(caches, token, TRAY_SPOTIFY_FETCH_THROTTLE)
+        }
+        (Some(token), TrayFetch::RefreshNow) => cached_devices(caches, token, Duration::ZERO),
+        (_, TrayFetch::CacheOnly) => caches
+            .devices_slot()
             .lock()
             .clone()
             .map(|(_, devices)| devices)
@@ -262,13 +252,16 @@ pub fn devices_for_menu(
 /// The Up Next snapshot for a rebuild, honouring [`TrayFetch`]. Same contract
 /// as [`devices_for_menu`].
 pub fn queue_for_menu(
+    caches: &crate::state::AppCaches,
     access_token: Option<&str>,
     fetch: TrayFetch,
 ) -> Option<crate::spotify::QueueInfo> {
     match (access_token, fetch) {
-        (Some(token), TrayFetch::Refresh) => cached_queue(token, TRAY_SPOTIFY_FETCH_THROTTLE),
-        (Some(token), TrayFetch::RefreshNow) => cached_queue(token, Duration::ZERO),
-        (_, TrayFetch::CacheOnly) => QUEUE_CACHE.lock().clone().map(|(_, queue)| queue),
+        (Some(token), TrayFetch::Refresh) => {
+            cached_queue(caches, token, TRAY_SPOTIFY_FETCH_THROTTLE)
+        }
+        (Some(token), TrayFetch::RefreshNow) => cached_queue(caches, token, Duration::ZERO),
+        (_, TrayFetch::CacheOnly) => caches.queue_slot().lock().clone().map(|(_, queue)| queue),
         (None, _) => None,
     }
 }
@@ -340,8 +333,8 @@ mod tests {
             10
         );
 
-        let _guard = MODE_ATOM_LOCK.lock();
-        note_playback_modes(false, RepeatState::Off);
+        let caches = crate::state::AppCaches::new();
+        note_playback_modes(&caches, false, RepeatState::Off);
         let track = crate::spotify::TrackInfo {
             title: "Title".to_string(),
             artist: "Artist".to_string(),
@@ -355,7 +348,17 @@ mod tests {
             actions: None,
         };
         let at = |devices: u64, queue: u64| {
-            tray_snapshot_for(true, true, Some(&track), None, devices, queue, None)
+            tray_snapshot_for(
+                true,
+                true,
+                Some(&track),
+                None,
+                devices,
+                queue,
+                None,
+                caches.shuffle_flag().load(Ordering::Acquire),
+                last_repeat_state(&caches),
+            )
         };
 
         // Identical track, window, modes and caches: still a no-op.

@@ -20,13 +20,6 @@ pub fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
     TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
 }
 
-/// Coalescing guard for the delayed one-shot refresh kicked after a
-/// successful tray player action: rapid next/previous clicks must not pile
-/// up unbounded 2 s-sleep threads each firing blocking Spotify+Teams HTTP.
-/// First claimant spawns; losers skip (their track change is covered by the
-/// in-flight refresh's unconditional GET plus the polling loop).
-pub static DELAYED_REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 /// Runs a Spotify player action from a tray click using the stored access
 /// token. On success the tray menu is force-refreshed and the action's
@@ -59,10 +52,10 @@ pub fn run_player_action(
         Ok(()) => {
             log::info!("[TRAY] {}: success", label);
             if let Some(playing) = resulting_playing {
-                note_playing_state(playing);
+                note_playing_state(&state.caches, playing);
             }
             if let Some((shuffle, repeat)) = resulting_modes {
-                note_playback_modes(shuffle, repeat);
+                note_playback_modes(&state.caches, shuffle, repeat);
             }
             force_tray_refresh_from_app(app);
             // Immediate Teams catch-up after a successful player action:
@@ -70,22 +63,28 @@ pub fn run_player_action(
             // a skip, then run a one-shot poll (no-op when sync is off).
             // Coalesced: rapid clicks skip while a delayed refresh is
             // already pending; its unconditional GET covers their tracks.
-            if DELAYED_REFRESH_IN_FLIGHT
+            if state
+                .caches
+                .delayed_refresh_flag()
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 let app_clone = app.clone();
                 let label_owned = label.to_string();
+                let state_for_drop = std::sync::Arc::clone(state.inner());
                 std::thread::spawn(move || {
                     // RAII: a panic in run_oneshot must not wedge future
                     // refreshes (a manual clear on each return path would).
-                    struct ResetOnDrop;
+                    struct ResetOnDrop(std::sync::Arc<crate::AppState>);
                     impl Drop for ResetOnDrop {
                         fn drop(&mut self) {
-                            DELAYED_REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+                            self.0
+                                .caches
+                                .delayed_refresh_flag()
+                                .store(false, Ordering::Release);
                         }
                     }
-                    let _reset = ResetOnDrop;
+                    let _reset = ResetOnDrop(state_for_drop);
                     std::thread::sleep(std::time::Duration::from_secs(2));
                     let state = app_clone.state::<std::sync::Arc<crate::AppState>>();
                     if !state.polling.is_syncing() {
@@ -286,14 +285,14 @@ pub fn force_tray_refresh(
     // on every player action; the action is recorded instead, and the rebuild
     // re-fetches under `TRAY_POST_ACTION_FETCH_MIN` — which coalesces a burst
     // into one pair of requests. The nudge below still forces the repaint.
-    *LAST_TRAY_ACTION.lock() = Some(Instant::now());
+    *state.caches.last_tray_action_slot().lock() = Some(Instant::now());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
     // Nudge the dedup snapshot (not clear it) with the *current* track key so
     // the rebuild below can't early-return while the re-seed logic stays
     // inert: a cleared snapshot would look like a genuine track change and
     // clobber the toggle state the action just recorded. Flipping the sync
     // bit is enough — the real snapshot is committed by that rebuild.
-    let (devices_bucket, queue_bucket) = cache_buckets();
+    let (devices_bucket, queue_bucket) = cache_buckets(&state.caches);
     // Issue #869: the nudge snapshot's profile key reads the post-action
     // value so the rebuild the function triggers sees a fresh dedup key —
     // the real write happens inside `store_active_profile`.
@@ -313,9 +312,11 @@ pub fn force_tray_refresh(
         devices_bucket,
         queue_bucket,
         nudge_profile_key,
+        state.caches.shuffle_flag().load(Ordering::Acquire),
+        last_repeat_state(&state.caches),
     );
     nudge.is_syncing = !is_syncing;
-    *last_tray_state().lock() = Some(nudge);
+    *state.caches.last_tray_state_slot().lock() = Some(nudge);
     rebuild(is_syncing, current_track);
 }
 
@@ -487,20 +488,20 @@ mod tests {
         let prod = tray_prod_source();
         let force = body_of(prod, "fn force_tray_refresh(");
         assert!(
-            force.contains("LAST_TRAY_ACTION.lock() = Some(Instant::now())"),
+            force.contains("last_tray_action_slot().lock() = Some(Instant::now())"),
             "a player action must be recorded, not enforced by emptying the caches"
         );
         assert!(
-            !force.contains("DEVICES_CACHE.lock() = None")
-                && !force.contains("QUEUE_CACHE.lock() = None"),
+            !force.contains("devices_slot().lock() = None")
+                && !force.contains("queue_slot().lock() = None"),
             "the caches must stay: emptying them bypassed the fetch throttle (issue #883)"
         );
         let body = body_of(prod, "fn rebuild_tray_menu(");
         let mark = body
-            .find("LAST_ACTION_FETCH.lock() = Some(Instant::now())")
+            .find("last_action_fetch_slot().lock() = Some(Instant::now())")
             .expect("a post-action rebuild must mark its fetch in flight");
         let devices = body
-            .find("devices_for_menu(access_token.as_deref(), fetch)")
+            .find("devices_for_menu(caches, access_token.as_deref(), fetch)")
             .expect("the rebuild must build the devices submenu from the fetch mode");
         assert!(
             mark < devices,

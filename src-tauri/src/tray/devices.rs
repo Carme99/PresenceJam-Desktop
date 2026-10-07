@@ -64,10 +64,12 @@ pub fn selected_for_log(selected: &DeviceMenuSelection) -> String {
 /// expired access token does not strand a transfer on "unknown device"
 /// (issue #586).
 pub fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Option<String> {
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let caches = &state.caches;
     match selected {
         DeviceMenuSelection::DeviceId(id) => {
             // Fast path: still in the cached list and transferable.
-            let cached = DEVICES_CACHE.lock().as_ref().and_then(|(_, devices)| {
+            let cached = caches.devices_slot().lock().as_ref().and_then(|(_, devices)| {
                 devices
                     .iter()
                     .find(|d| d.id.as_deref() == Some(id.as_str()))
@@ -78,7 +80,6 @@ pub fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Opt
             }
             // Slow path: live re-fetch; the device may have appeared after
             // the submenu was built, or the cache may be stale.
-            let state = app.state::<std::sync::Arc<crate::AppState>>();
             match crate::commands::playback::player_with_refresh_typed(
                 state.inner(),
                 app,
@@ -86,7 +87,7 @@ pub fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Opt
                 crate::spotify::get_devices,
             ) {
                 Ok(devices) => {
-                    *DEVICES_CACHE.lock() = Some((Instant::now(), devices.clone()));
+                    *caches.devices_slot().lock() = Some((Instant::now(), devices.clone()));
                     devices
                         .into_iter()
                         .find(|d| d.id.as_deref() == Some(id.as_str()))
@@ -98,7 +99,8 @@ pub fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Opt
                 }
             }
         }
-        DeviceMenuSelection::LegacyIndex(i) => DEVICES_CACHE
+        DeviceMenuSelection::LegacyIndex(i) => caches
+            .devices_slot()
             .lock()
             .as_ref()
             .and_then(|(_, devices)| devices.get(*i).cloned())

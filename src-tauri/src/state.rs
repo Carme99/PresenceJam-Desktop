@@ -726,6 +726,109 @@ impl TokensLoadGate {
     }
 }
 
+/// Issue #758 slice 2: per-`AppState` tray + config caches and mirrors.
+///
+/// The tray throttled caches (`devices`/`queue`), the post-action fetch
+/// instants, the dedup snapshot, the window/playing/mode mirrors, the delayed
+/// refresh coalescing guard, and the config quarantine/conflict flags used to
+/// live as module-level statics, which forced test-wide locks and meant two
+/// `AppState`s in one process shared one tray. They now live here, owned by
+/// `AppState` (see `AppState::caches`): each test constructs its own
+/// `AppCaches::new()`, and production paths reach them via `state.caches`.
+///
+/// Genuinely process-wide handles stay statics (issue #758 step 3): the tray
+/// icon handle (`tray::TRAY`), the tray write serialization lock
+/// (`tray::TRAY_WRITE_LOCK`), the locale table (`i18n::CURRENT`),
+/// `macos_deeplink::CLAIMED`, and the keychain/HTTP client caches.
+///
+/// Lock shapes match the previous statics exactly (`parking_lot` mutexes for
+/// the cache slots and dedup snapshot, atomics elsewhere), so the
+/// single-session behaviour is unchanged. All fields are private; the
+/// `*_slot` / `*_flag` accessors are the only path to the inner data.
+pub struct AppCaches {
+    devices_cache: Mutex<Option<(Instant, Vec<crate::spotify::DeviceInfo>)>>,
+    queue_cache: Mutex<Option<(Instant, crate::spotify::QueueInfo)>>,
+    last_tray_action: Mutex<Option<Instant>>,
+    last_action_fetch: Mutex<Option<Instant>>,
+    last_tray_state: Mutex<Option<crate::tray::TrayStateSnapshot>>,
+    window_visible: AtomicBool,
+    last_playing_state: AtomicBool,
+    last_shuffle_state: AtomicBool,
+    last_repeat_state: AtomicU8,
+    delayed_refresh_in_flight: AtomicBool,
+    config_quarantined: AtomicBool,
+    conflict_event_sent: AtomicBool,
+}
+
+impl AppCaches {
+    pub(crate) fn new() -> Self {
+        Self {
+            devices_cache: Mutex::new(None),
+            queue_cache: Mutex::new(None),
+            last_tray_action: Mutex::new(None),
+            last_action_fetch: Mutex::new(None),
+            last_tray_state: Mutex::new(None),
+            window_visible: AtomicBool::new(false),
+            last_playing_state: AtomicBool::new(false),
+            last_shuffle_state: AtomicBool::new(false),
+            last_repeat_state: AtomicU8::new(crate::spotify::RepeatState::Off as u8),
+            delayed_refresh_in_flight: AtomicBool::new(false),
+            config_quarantined: AtomicBool::new(false),
+            conflict_event_sent: AtomicBool::new(false),
+        }
+    }
+    pub(crate) fn devices_slot(
+        &self,
+    ) -> &Mutex<Option<(Instant, Vec<crate::spotify::DeviceInfo>)>> {
+        &self.devices_cache
+    }
+    pub(crate) fn queue_slot(
+        &self,
+    ) -> &Mutex<Option<(Instant, crate::spotify::QueueInfo)>> {
+        &self.queue_cache
+    }
+    pub(crate) fn last_tray_action_slot(&self) -> &Mutex<Option<Instant>> {
+        &self.last_tray_action
+    }
+    pub(crate) fn last_action_fetch_slot(&self) -> &Mutex<Option<Instant>> {
+        &self.last_action_fetch
+    }
+    pub(crate) fn last_tray_state_slot(
+        &self,
+    ) -> &Mutex<Option<crate::tray::TrayStateSnapshot>> {
+        &self.last_tray_state
+    }
+    pub(crate) fn window_visible_flag(&self) -> &AtomicBool {
+        &self.window_visible
+    }
+    pub(crate) fn playing_flag(&self) -> &AtomicBool {
+        &self.last_playing_state
+    }
+    pub(crate) fn shuffle_flag(&self) -> &AtomicBool {
+        &self.last_shuffle_state
+    }
+    pub(crate) fn repeat_flag(&self) -> &AtomicU8 {
+        &self.last_repeat_state
+    }
+    pub(crate) fn delayed_refresh_flag(&self) -> &AtomicBool {
+        &self.delayed_refresh_in_flight
+    }
+    pub(crate) fn quarantined_flag(&self) -> &AtomicBool {
+        &self.config_quarantined
+    }
+    pub(crate) fn conflict_sent_flag(&self) -> &AtomicBool {
+        &self.conflict_event_sent
+    }
+}
+
+impl Default for AppCaches {
+    /// Required by `clippy::new_without_default`. Equivalent to
+    /// `AppCaches::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct AppState {
     pub tokens: Tokens,
     pub polling: Polling,
@@ -790,6 +893,12 @@ pub struct AppState {
     /// test constructs an isolated session and production session
     /// boundaries are per-session resets, not global resets.
     pub session: crate::polling::SessionState,
+    /// Issue #758 slice 2: per-`AppState` tray + config caches and mirrors
+    /// (throttled devices/queue caches, post-action fetch instants, dedup
+    /// snapshot, window/playing/mode mirrors, delayed-refresh guard,
+    /// quarantine/conflict flags). Owned here so each test constructs
+    /// isolated caches and two `AppState`s never share one tray.
+    pub caches: AppCaches,
 }
 
 impl AppState {
@@ -817,6 +926,7 @@ impl AppState {
             secret_conflict: AtomicBool::new(false),
             last_sync_snapshot: RwLock::new(None),
             session: crate::polling::SessionState::new(),
+            caches: AppCaches::new(),
         }
     }
 }

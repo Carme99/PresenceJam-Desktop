@@ -87,13 +87,17 @@ pub fn tray_snapshot_for(
     // dedup reason as the snooze — a switch changes the check mark, so the
     // key has to include the id or the rebuild early-returns.
     active_profile_key: Option<String>,
+    // The two playback modes (issue #691): fed in by the caller from
+    // `AppCaches` for the same purity reason as the buckets above.
+    shuffle: bool,
+    repeat: RepeatState,
 ) -> TrayStateSnapshot {
     TrayStateSnapshot {
         is_syncing,
         is_window_visible,
         track_key: current_track.map(|t| format!("{}|{}|{}", t.artist, t.title, t.is_playing)),
-        shuffle: LAST_SHUFFLE_STATE.load(Ordering::Acquire),
-        repeat: last_repeat_state(),
+        shuffle,
+        repeat,
         snooze_key,
         devices_bucket,
         queue_bucket,
@@ -101,36 +105,20 @@ pub fn tray_snapshot_for(
     }
 }
 
-pub static LAST_TRAY_STATE: std::sync::OnceLock<parking_lot::Mutex<Option<TrayStateSnapshot>>> =
-    std::sync::OnceLock::new();
-
-pub fn last_tray_state() -> &'static parking_lot::Mutex<Option<TrayStateSnapshot>> {
-    LAST_TRAY_STATE.get_or_init(|| parking_lot::Mutex::new(None))
-}
-
-/// Last known main-window visibility, which is what the dedup key carries
-/// (issue #886).
-///
-/// The rebuild used to ask the window directly, and `is_visible()` blocks the
-/// calling thread on an event-loop reply — a hop paid by every poll, including
-/// the ones the dedup key discards a few lines later. [`note_window_visibility`]
-/// keeps the mirror honest, and the rebuild re-reads the real window whenever it
-/// paints anyway (see the self-heal in `rebuild_tray_menu`).
-pub static WINDOW_VISIBLE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Records the main window's visibility (issue #886). Every path that shows or
 /// hides the window should report it — the tray's own Show/Hide and Open
 /// Settings arms do, and the window commands / close-to-tray paths are expected
 /// to; the poll loop then never has to ask the event loop for it.
-pub fn note_window_visibility(visible: bool) {
-    WINDOW_VISIBLE.store(visible, Ordering::Release);
+pub fn note_window_visibility(caches: &crate::state::AppCaches, visible: bool) {
+    caches
+        .window_visible_flag()
+        .store(visible, Ordering::Release);
 }
 
 /// The visibility the dedup key is built from (issue #886) — the mirror, so the
 /// discarded path performs no event-loop hop.
-pub fn window_visible() -> bool {
-    WINDOW_VISIBLE.load(Ordering::Acquire)
+pub fn window_visible(caches: &crate::state::AppCaches) -> bool {
+    caches.window_visible_flag().load(Ordering::Acquire)
 }
 
 /// The real main-window visibility, queried once per paint (issue #886). Only
@@ -154,14 +142,12 @@ pub fn shuffle_toggle_target(current: bool) -> bool {
 /// poller's `playback-state-changed` event when the playing state changes
 /// for the same track (issue #689), and by the tray's own successful
 /// play/pause/transfer actions. Issue #3.0-P3.
-pub static LAST_PLAYING_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
-    std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(false));
 
 /// Records the playing state the Play/Pause mark and the status line render.
 /// Every path that learns the truth writes it here, so the mark never infers
 /// playback from a candidate that may already be stale. Issue #3.0-P3.
-pub fn note_playing_state(is_playing: bool) {
-    LAST_PLAYING_STATE.store(is_playing, Ordering::Release);
+pub fn note_playing_state(caches: &crate::state::AppCaches, is_playing: bool) {
+    caches.playing_flag().store(is_playing, Ordering::Release);
 }
 
 /// Consumes a `playback-state-changed` payload (issue #689, tray half) via
@@ -173,9 +159,9 @@ pub fn note_playing_state(is_playing: bool) {
 /// already re-stored it, so recording it here keeps the Play/Pause mark and
 /// the status line truthful without waiting for the next track. An unparsable
 /// payload keeps the last known state rather than inventing one.
-pub fn consume_playback_state_changed(payload: &str) {
+pub fn consume_playback_state_changed(caches: &crate::state::AppCaches, payload: &str) {
     match serde_json::from_str::<PlaybackStateChanged>(payload) {
-        Ok(state) => note_playing_state(state.is_playing),
+        Ok(state) => note_playing_state(caches, state.is_playing),
         Err(e) => log::warn!(
             "[TRAY] playback-state-changed: unparsable payload, keeping the last playing state: {}",
             e
@@ -190,28 +176,26 @@ pub fn consume_playback_state_changed(payload: &str) {
 /// module-level atomic rather than a field on the app's frozen `TrackInfo`
 /// because that type is the ts-rs-exported IPC shape shared with the
 /// Dashboard and built by exhaustive literals outside this module.
-pub static LAST_SHUFFLE_STATE: std::sync::LazyLock<std::sync::atomic::AtomicBool> =
-    std::sync::LazyLock::new(|| std::sync::atomic::AtomicBool::new(false));
 
-/// Last known repeat mode, encoded as [`RepeatState`]'s `u8` discriminant.
-/// Same lifecycle as `LAST_SHUFFLE_STATE`.
-pub static LAST_REPEAT_STATE: std::sync::LazyLock<std::sync::atomic::AtomicU8> =
-    std::sync::LazyLock::new(|| std::sync::atomic::AtomicU8::new(RepeatState::Off as u8));
 
 /// Records the playback modes a poll body reported. Called by the polling
 /// loop for every observed item (playing or paused) — the poll response is
 /// the source of truth for both toggles, so no extra Spotify request is
 /// needed to render them. See issue #582.
-pub fn note_playback_modes(shuffle: bool, repeat: RepeatState) {
-    LAST_SHUFFLE_STATE.store(shuffle, Ordering::Release);
-    LAST_REPEAT_STATE.store(repeat as u8, Ordering::Release);
+pub fn note_playback_modes(
+    caches: &crate::state::AppCaches,
+    shuffle: bool,
+    repeat: RepeatState,
+) {
+    caches.shuffle_flag().store(shuffle, Ordering::Release);
+    caches.repeat_flag().store(repeat as u8, Ordering::Release);
 }
 
 /// The tray's view of the current repeat mode. An out-of-range byte (only
 /// possible if the encoder above is changed without this decoder) degrades
 /// to `Off` rather than panicking in a menu build.
-pub fn last_repeat_state() -> RepeatState {
-    match LAST_REPEAT_STATE.load(Ordering::Acquire) {
+pub fn last_repeat_state(caches: &crate::state::AppCaches) -> RepeatState {
+    match caches.repeat_flag().load(Ordering::Acquire) {
         1 => RepeatState::Context,
         2 => RepeatState::Track,
         _ => RepeatState::Off,
@@ -266,25 +250,27 @@ mod tests {
     /// the item showing what the API was just told to adopt.
     #[test]
     fn playback_modes_feed_both_toggle_items() {
-        // The mode atoms are process-global and read by the rebuild path, so
-        // the tests that drive them must not interleave.
-        let _guard = MODE_ATOM_LOCK.lock();
-        note_playback_modes(true, RepeatState::Track);
-        assert!(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
-        assert_eq!(last_repeat_state(), RepeatState::Track);
-        assert_eq!(repeat_menu_label(&EN, last_repeat_state()), "Repeat: Track");
+        // Per-test caches (issue #758 slice 2): no global lock needed.
+        let caches = crate::state::AppCaches::new();
+        note_playback_modes(&caches, true, RepeatState::Track);
+        assert!(caches.shuffle_flag().load(Ordering::Acquire));
+        assert_eq!(last_repeat_state(&caches), RepeatState::Track);
+        assert_eq!(
+            repeat_menu_label(&EN, last_repeat_state(&caches)),
+            "Repeat: Track"
+        );
         // The click targets: Repeat advances along the documented cycle,
         // Shuffle flips whatever was last observed.
-        assert_eq!(last_repeat_state().next(), RepeatState::Off);
+        assert_eq!(last_repeat_state(&caches).next(), RepeatState::Off);
         assert!(!shuffle_toggle_target(
-            LAST_SHUFFLE_STATE.load(Ordering::Acquire)
+            caches.shuffle_flag().load(Ordering::Acquire)
         ));
 
         // A poll that reports everything off must clear both items.
-        note_playback_modes(false, RepeatState::Off);
-        assert!(!LAST_SHUFFLE_STATE.load(Ordering::Acquire));
-        assert_eq!(last_repeat_state(), RepeatState::Off);
-        assert!(!last_repeat_state().is_on());
+        note_playback_modes(&caches, false, RepeatState::Off);
+        assert!(!caches.shuffle_flag().load(Ordering::Acquire));
+        assert_eq!(last_repeat_state(&caches), RepeatState::Off);
+        assert!(!last_repeat_state(&caches).is_on());
     }
     /// Issue #691: the dedup key is built by the same function the rebuild
     /// path uses, and it carries both playback modes — so a shuffle/repeat
@@ -293,7 +279,7 @@ mod tests {
     /// while an unchanged poll still dedupes to a no-op.
     #[test]
     fn mode_change_forces_a_tray_rebuild() {
-        let _guard = MODE_ATOM_LOCK.lock();
+        let caches = crate::state::AppCaches::new();
         let track = |is_playing: bool| crate::spotify::TrackInfo {
             title: "Title".to_string(),
             artist: "Artist".to_string(),
@@ -306,24 +292,34 @@ mod tests {
             supports_volume: None,
             actions: None,
         };
-        let key = |sync: bool, visible: bool| {
-            tray_snapshot_for(sync, visible, Some(&track(true)), None, 0, 0, None)
+        let key = |caches: &crate::state::AppCaches, sync: bool, visible: bool| {
+            tray_snapshot_for(
+                sync,
+                visible,
+                Some(&track(true)),
+                None,
+                0,
+                0,
+                None,
+                caches.shuffle_flag().load(Ordering::Acquire),
+                last_repeat_state(caches),
+            )
         };
 
-        note_playback_modes(false, RepeatState::Off);
-        let base = key(true, true);
+        note_playback_modes(&caches, false, RepeatState::Off);
+        let base = key(&caches, true, true);
 
         // The poll body reports a shuffle the user toggled in the Spotify app.
-        note_playback_modes(true, RepeatState::Off);
-        let shuffled = key(true, true);
+        note_playback_modes(&caches, true, RepeatState::Off);
+        let shuffled = key(&caches, true, true);
         assert!(
             tray_state_changed(Some(&base), &shuffled),
             "an external shuffle change must repaint the tray (issue #691)"
         );
 
         // …and a repeat-mode change.
-        note_playback_modes(true, RepeatState::Context);
-        let repeated = key(true, true);
+        note_playback_modes(&caches, true, RepeatState::Context);
+        let repeated = key(&caches, true, true);
         assert!(
             tray_state_changed(Some(&shuffled), &repeated),
             "an external repeat change must repaint the tray (issue #691)"
@@ -331,7 +327,7 @@ mod tests {
 
         // An unchanged poll is still a no-op.
         assert!(
-            !tray_state_changed(Some(&repeated), &key(true, true)),
+            !tray_state_changed(Some(&repeated), &key(&caches, true, true)),
             "an unchanged poll must not rebuild the menu"
         );
         assert!(
@@ -341,23 +337,33 @@ mod tests {
 
         // The pre-existing parts of the key still repaint.
         assert!(
-            tray_state_changed(Some(&repeated), &key(false, true)),
+            tray_state_changed(Some(&repeated), &key(&caches, false, true)),
             "a sync toggle must still repaint (issue #71)"
         );
         assert!(
-            tray_state_changed(Some(&repeated), &key(true, false)),
+            tray_state_changed(Some(&repeated), &key(&caches, true, false)),
             "a Show/Hide click must still repaint (issue #71)"
         );
 
         // A same-track pause lives in the track half of the key (issue #229).
-        let paused = tray_snapshot_for(true, true, Some(&track(false)), None, 0, 0, None);
+        let paused = tray_snapshot_for(
+            true,
+            true,
+            Some(&track(false)),
+            None,
+            0,
+            0,
+            None,
+            caches.shuffle_flag().load(Ordering::Acquire),
+            last_repeat_state(&caches),
+        );
         assert!(
             tray_state_changed(Some(&repeated), &paused),
             "a same-track pause must still repaint the Play/Pause mark (#229)"
         );
 
         // Leave the shared atoms as a fresh poll would find them.
-        note_playback_modes(false, RepeatState::Off);
+        note_playback_modes(&caches, false, RepeatState::Off);
     }
     /// Issue #689 (D6, tray half): the poller emits `playback-state-changed`
     /// when a track's playing state changes without the track itself
@@ -380,35 +386,42 @@ mod tests {
         };
         let mark = |playing: bool| sync_status_line(&EN, true, playing, Some(&track));
 
-        note_playing_state(true);
+        let caches = crate::state::AppCaches::new();
+        note_playing_state(&caches, true);
         assert_eq!(
-            mark(LAST_PLAYING_STATE.load(Ordering::Acquire)),
+            mark(caches.playing_flag().load(Ordering::Acquire)),
             "Syncing — Artist — Track"
         );
 
         // The exact payload shape the poller emits for a same-track pause.
-        consume_playback_state_changed(r#"{"is_playing":false,"track_key":"Artist|Title"}"#);
+        consume_playback_state_changed(
+            &caches,
+            r#"{"is_playing":false,"track_key":"Artist|Title"}"#,
+        );
         assert!(
-            !LAST_PLAYING_STATE.load(Ordering::Acquire),
+            !caches.playing_flag().load(Ordering::Acquire),
             "the tray must believe a same-track pause (issue #689)"
         );
         assert_eq!(
-            mark(LAST_PLAYING_STATE.load(Ordering::Acquire)),
+            mark(caches.playing_flag().load(Ordering::Acquire)),
             "Paused — Artist — Track"
         );
 
-        consume_playback_state_changed(r#"{"is_playing":true,"track_key":"Artist|Title"}"#);
-        assert!(LAST_PLAYING_STATE.load(Ordering::Acquire));
+        consume_playback_state_changed(
+            &caches,
+            r#"{"is_playing":true,"track_key":"Artist|Title"}"#,
+        );
+        assert!(caches.playing_flag().load(Ordering::Acquire));
         assert_eq!(
-            mark(LAST_PLAYING_STATE.load(Ordering::Acquire)),
+            mark(caches.playing_flag().load(Ordering::Acquire)),
             "Syncing — Artist — Track"
         );
 
         // A payload the tray cannot parse must keep the last known state
         // rather than invent one.
-        consume_playback_state_changed("not json");
+        consume_playback_state_changed(&caches, "not json");
         assert!(
-            LAST_PLAYING_STATE.load(Ordering::Acquire),
+            caches.playing_flag().load(Ordering::Acquire),
             "an unparsable payload must not clobber the last playing state"
         );
     }
