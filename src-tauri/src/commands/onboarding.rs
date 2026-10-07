@@ -702,7 +702,12 @@ mod tests {
              reconnect the user just clicked back to them as an expired session"
         );
         assert!(
-            !include_str!("../polling/poll_once.rs").contains("user_initiated"),
+            !concat!(
+                include_str!("../polling/iteration.rs"),
+                include_str!("../polling/write.rs"),
+                include_str!("../polling/refresh.rs"),
+            )
+            .contains("user_initiated"),
             "the poller's `teams-reconnect-required` emitters are the dead-session ones and \
              must NOT claim to be user-initiated: if one starts doing so, a genuine expiry \
              would be silently swallowed and the user would never be told to sign in again"

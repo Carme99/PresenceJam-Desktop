@@ -684,7 +684,7 @@ jobs:
       # lowers that file's number and fails this step once calibrated.
       # TODO(#838): calibrate each floor to the merged-head measurement
       # (see PR body). Floors are 0 until then (report-only).
-      - name: Per-file floors (poll_once, config, token_io)
+      - name: Per-file floors (polling slices, config, token_io)
         run: |
           cargo llvm-cov report --manifest-path src-tauri/Cargo.toml --json \
             | jq -e '
@@ -697,8 +697,9 @@ jobs:
                     "below floor: \(name) \($pct)% < \(want)%" | halt_error(1)
                   else ("ok: \(name) \($pct)% >= \(want)%" | stderr | true)
                   end;
-              floor("polling/poll_once.rs"; 0),
-              floor("config.rs"; 0),
+              floor("polling/iteration.rs"; 0),
+              floor("polling/clocks.rs"; 0),
+              floor("config/mod.rs"; 0),
               floor("token_io.rs"; 0)
             ' > /dev/null
 

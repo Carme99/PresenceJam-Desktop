@@ -14,7 +14,7 @@
 //!      immediately from its interruptible sleeps.
 //!
 //! The actual iteration logic lives in [`super::loop_`] and
-//! [`super::poll_once`].
+//! [`super::iteration`].
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc;
@@ -75,11 +75,11 @@ pub(crate) struct ExitSnapshot {
 /// the statics used them, `parking_lot` for the now-playing cache), so the
 /// single-session behaviour is unchanged.
 pub struct SessionState {
-    write_clocks: Mutex<super::poll_once::WriteClocks>,
+    write_clocks: Mutex<super::clocks::WriteClocks>,
     quiet_pause_active: AtomicBool,
     snooze_active: AtomicBool,
     last_now_playing: parking_lot::Mutex<Option<crate::spotify::NowPlaying>>,
-    preferred_presence: Mutex<Option<super::poll_once::PreferredPresenceSession>>,
+    preferred_presence: Mutex<Option<super::presence::PreferredPresenceSession>>,
     exit_snapshot: Mutex<ExitSnapshot>,
     transient_failures: AtomicU8,
     network_failures: AtomicU8,
@@ -89,7 +89,7 @@ pub struct SessionState {
 impl SessionState {
     pub(crate) fn new() -> Self {
         Self {
-            write_clocks: Mutex::new(super::poll_once::WriteClocks::default()),
+            write_clocks: Mutex::new(super::clocks::WriteClocks::default()),
             quiet_pause_active: AtomicBool::new(false),
             snooze_active: AtomicBool::new(false),
             last_now_playing: parking_lot::Mutex::new(None),
@@ -117,17 +117,17 @@ impl SessionState {
     pub(crate) fn load_now_playing(&self) -> Option<crate::spotify::NowPlaying> {
         self.last_now_playing.lock().clone()
     }
-    /// The write-decision clock slot. Owned by [`super::poll_once`]'s
+    /// The write-decision clock slot. Owned by [`super::clocks`]'s
     /// load/store/reset trio, which implement the generation-checked
     /// publish contract (finding D11, issue #694) against this slot.
-    pub(super) fn write_clocks_slot(&self) -> &Mutex<super::poll_once::WriteClocks> {
+    pub(super) fn write_clocks_slot(&self) -> &Mutex<super::clocks::WriteClocks> {
         &self.write_clocks
     }
     /// The preferred-presence slot (issue #866). Owned by the
-    /// [`super::poll_once`] arm/clear/expiry helpers.
+    /// [`super::presence`] arm/clear/expiry helpers.
     pub(super) fn preferred_presence_slot(
         &self,
-    ) -> &Mutex<Option<super::poll_once::PreferredPresenceSession>> {
+    ) -> &Mutex<Option<super::presence::PreferredPresenceSession>> {
         &self.preferred_presence
     }
 }
@@ -293,7 +293,7 @@ pub fn start_polling(
     // write-decision clocks. `polling_loop` resets them on a clean exit; this
     // covers the case it cannot — a previous thread that died by panic, whose
     // `catch_unwind` below never reaches the loop's own reset.
-    super::poll_once::reset_write_clocks(&state.session);
+    super::clocks::reset_write_clocks(&state.session);
     // Issue #863: the mirrored counters/gate reason start cold too — a fresh
     // session must not inherit the previous session's values. Deliberately NOT
     // `reset_exit_snapshot`, which must survive a session start (finding D1).
@@ -462,6 +462,40 @@ pub fn stop_polling(state: &AppState) {
 mod tests {
     use super::*;
 
+    /// Brace-counted body isolation for a production fn (house style — never
+    /// boundary anchors, which drift). Copied from `poll_once.rs` with the
+    /// split so `state.rs`'s own structural guards keep working post-#754.
+    fn prod_fn_body<'a>(prod: &'a str, sig: &str) -> &'a str {
+        brace_counted_body(prod, sig)
+    }
+
+    /// Brace-count the block that starts at the first `{` after `anchor`.
+    fn brace_counted_body<'a>(block: &'a str, anchor: &str) -> &'a str {
+        let after_anchor = block
+            .split(anchor)
+            .nth(1)
+            .unwrap_or_else(|| panic!("production source has no `{}`", anchor));
+        let open = after_anchor
+            .find('{')
+            .unwrap_or_else(|| panic!("`{}` has no opening brace", anchor));
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_anchor[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &after_anchor[..end.unwrap_or_else(|| panic!("`{}` body never closed", anchor))]
+    }
+
     /// Finding D1 (issue #684), review round 2 (item 6) — the ordering
     /// guarantee as BEHAVIOUR, not source text: `polling_loop`'s exit tail
     /// resets the write-decision clocks before `RunEvent::Exit` runs the
@@ -479,7 +513,7 @@ mod tests {
         );
 
         // Exactly what `polling_loop`'s exit tail does before `RunEvent::Exit`:
-        crate::polling::poll_once::reset_write_clocks(&session);
+        crate::polling::clocks::reset_write_clocks(&session);
 
         let snapshot = load_exit_snapshot(&session);
         assert_eq!(
@@ -494,7 +528,7 @@ mod tests {
         );
 
         // The clocks really did reset — the snapshot is what survives.
-        let cold = crate::polling::poll_once::load_write_clocks(&session);
+        let cold = crate::polling::clocks::load_write_clocks(&session);
         assert!(
             cold.last_posted_status.is_none() && cold.last_availability_arm.is_none(),
             "this test only means something if the reset actually happened"
@@ -533,18 +567,17 @@ mod tests {
     fn test_write_clocks_are_shared_within_a_session() {
         use std::sync::Arc;
         let session = Arc::new(SessionState::new());
-        crate::polling::poll_once::reset_write_clocks(&session);
+        crate::polling::clocks::reset_write_clocks(&session);
 
-        let mut mine = crate::polling::poll_once::load_write_clocks(&session);
+        let mut mine = crate::polling::clocks::load_write_clocks(&session);
         mine.last_track_key = Some("cross-thread-key".to_string());
-        crate::polling::poll_once::store_write_clocks(&session, &mine);
+        crate::polling::clocks::store_write_clocks(&session, &mine);
 
         let other_session = Arc::clone(&session);
-        let other = std::thread::spawn(move || {
-            crate::polling::poll_once::load_write_clocks(&other_session)
-        })
-        .join()
-        .expect("the clock-reading thread must not panic");
+        let other =
+            std::thread::spawn(move || crate::polling::clocks::load_write_clocks(&other_session))
+                .join()
+                .expect("the clock-reading thread must not panic");
         assert_eq!(
             other.last_track_key.as_deref(),
             Some("cross-thread-key"),
@@ -552,9 +585,9 @@ mod tests {
              loads — the driver and the manual refresh share a single slot (#572)"
         );
 
-        crate::polling::poll_once::reset_write_clocks(&session);
+        crate::polling::clocks::reset_write_clocks(&session);
         assert!(
-            crate::polling::poll_once::load_write_clocks(&session)
+            crate::polling::clocks::load_write_clocks(&session)
                 .last_track_key
                 .is_none(),
             "resetting the session slot is what a session boundary does, so the \
@@ -658,9 +691,9 @@ mod tests {
         // reason, posted status, armed presence, manual-status verdict,
         // now-playing cache, track fingerprint, preferred-presence session).
         // A static-regression in ANY slot leaks into `second` and fails below.
-        let mut clocks = crate::polling::poll_once::load_write_clocks(&first);
+        let mut clocks = crate::polling::clocks::load_write_clocks(&first);
         clocks.last_track_key = Some("first-session-key".to_string());
-        crate::polling::poll_once::store_write_clocks(&first, &clocks);
+        crate::polling::clocks::store_write_clocks(&first, &clocks);
         first
             .quiet_pause_latch()
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -683,9 +716,9 @@ mod tests {
                 artist: "T".to_string(),
             }),
         );
-        crate::polling::poll_once::record_preferred_presence_session(
+        crate::polling::presence::record_preferred_presence_session(
             &first,
-            Some(crate::polling::poll_once::PreferredPresenceSession {
+            Some(crate::polling::presence::PreferredPresenceSession {
                 pair: crate::config::normalize_presence_pair("Available", "Available")
                     .expect("Available/Available is a valid pair"),
                 expires_at: chrono::Utc::now() + chrono::Duration::minutes(30),
@@ -695,7 +728,7 @@ mod tests {
 
         // The second session is untouched by all of it.
         assert!(
-            crate::polling::poll_once::load_write_clocks(&second)
+            crate::polling::clocks::load_write_clocks(&second)
                 .last_track_key
                 .is_none(),
             "a fresh session must start with cold clocks, not the first session's"
@@ -735,8 +768,123 @@ mod tests {
             "the track fingerprint must be per-session"
         );
         assert!(
-            crate::polling::poll_once::load_preferred_presence_session(&second).is_none(),
+            crate::polling::presence::load_preferred_presence_session(&second).is_none(),
             "the preferred-presence session must be per-session"
+        );
+    }
+
+    #[test]
+    fn test_start_polling_does_not_claim_is_syncing() {
+        let source = include_str!("state.rs");
+        let after_sig = source
+            .split("pub fn start_polling(")
+            .nth(1)
+            .expect("state.rs has no `pub fn start_polling(`");
+        let open = after_sig
+            .find('{')
+            .expect("start_polling has no opening brace");
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, ch) in after_sig[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &after_sig[..end.expect("start_polling body never closed")];
+        assert!(
+            !body.contains(".compare_exchange("),
+            "polling::start_polling must not CAS is_syncing. See issue #60."
+        );
+    }
+
+    /// Regression guard for issue #79/#117: poll_once.rs must NOT emit raw
+    /// "error" events directly.
+
+    #[test]
+    fn test_self_terminating_poller_emits_sync_stopped() {
+        let state_source = include_str!("state.rs");
+        // Whitespace-normalised like `sync_source` below: the struct
+        // construction spans lines, so the adjacent event-name + payload
+        // needle only matches on the normalised form.
+        let body: String = prod_fn_body(state_source, "pub fn start_polling(")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // #675: the self-termination marker, pinned once and reused below.
+        // Issue #762: the adjacent event-name + typed-payload needle pins the
+        // poller-exit emitter to `sync-stopped` carrying `SyncStopped(true)` —
+        // a renamed event or a flipped polarity slips neither assertion.
+        let self_terminated_emit =
+            "\"sync-stopped\", crate::events::SyncStopped { self_terminated: true, }";
+        assert!(
+            body.contains(self_terminated_emit),
+            "the poller's own thread-exit point must emit sync-stopped \
+             (finding D5) — otherwise the Dashboard mirror stays on \"Syncing\" \
+             and the tray on \"Pause Sync\""
+        );
+        assert!(
+            body.contains("exit_reason"),
+            "the self-termination log line must name the exit reason (finding D5)"
+        );
+        let owner = body
+            .find("if is_owner {")
+            .expect("start_polling must keep the ownership check");
+        let gate = body.find("let stop_requested =").expect(
+            "the announce decision must hinge on whether a stop was requested (D5/round 2)",
+        );
+        let emit = body.find(self_terminated_emit).expect("sync-stopped emit");
+        assert!(
+            emit > owner,
+            "the emit must sit inside the ownership-checked block (finding D5), so a \
+             superseded thread's exit cannot report a stop for the live one"
+        );
+        assert!(
+            emit > gate,
+            "the emit must be decided by `stop_requested`, not before it"
+        );
+        assert!(
+            !body[gate..emit].contains("is_syncing"),
+            "the announce decision must NOT hinge on `is_syncing` (review round 2, item 2): \
+             an explicit stop leaves it true until after the join (so gating on it emitted \
+             a SECOND sync-stopped) while a self-terminating exit may leave it false (so it \
+             emitted NONE). `stop_polling` clearing the stored stop sender is the requested-\
+             stop signal, and commands::sync::stop_syncing owns that path's emit."
+        );
+        // Review round 3, item 1: the SIGNAL itself must be pinned, not just its
+        // use — `let stop_requested = false;` (the round-1 double-emit behaviour)
+        // otherwise leaves every test green.
+        assert!(
+            body.contains("let stop_requested = state_for_cleanup.polling.stop_tx().is_none();"),
+            "the requested-stop signal must be the stored stop sender being gone: only \
+             `stop_polling` clears it, so `is_none()` is exactly 'a stop was requested and \
+             commands::sync::stop_syncing owns the emit'. Any other derivation (or a hard-\
+             coded false) re-inverts the polarity (review round 3, item 1)."
+        );
+        // #675: the two emitters must DIFFER on the payload — that difference
+        // is the only way a notification consumer can tell the surprise (a
+        // self-termination, which toasts) from the stop the user just asked for
+        // (which must not). Issue #762: both go through the typed `SyncStopped`
+        // struct, so the polarity is pinned on the struct field — not on a
+        // json! literal that a rename could silently break.
+        let sync_source: String = include_str!("../commands/sync.rs")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            sync_source.contains(
+                "\"sync-stopped\", crate::events::SyncStopped { self_terminated: false, }"
+            ),
+            "commands::sync::stop_syncing owns the USER-requested stop and must emit \
+             `sync-stopped` carrying `SyncStopped(false)` — the adjacent needle pins \
+             event name and polarity together, so #675's notification stays quiet for it"
         );
     }
 }

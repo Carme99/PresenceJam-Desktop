@@ -3,7 +3,7 @@
 //! `polling_loop` is the outermost loop: it owns the per-thread state whose
 //! lifetime spans iterations (`consecutive_pauses`, `transient_failure_count`,
 //! `consecutive_network_failures`, `last_etag`, `first_iteration`) and the
-//! write-decision clocks (`WriteClocks`, which live in [`super::poll_once`]
+//! write-decision clocks (`WriteClocks`, which live in [`super::clocks`]
 //! because the manual `run_oneshot` refresh shares them), checks the stop
 //! channel and the `is_syncing` flag, dispatches one iteration to
 //! [`super::poll_once::run`], refreshes the tray, and sleeps for the duration
@@ -14,8 +14,8 @@
 //! performs no request and moves no clock.
 //!
 //! The actual fetch / 401-retry / no-track / CAS-discard logic lives in
-//! [`super::poll_once`] — the single source of truth for one iteration,
-//! per issue #72. The driver owns state lifetime; `poll_once` mutates
+//! [`super::iteration`] — the single source of truth for one iteration,
+//! per issue #72. The driver owns state lifetime; `iteration` mutates
 //! state as a side effect.
 
 use std::sync::mpsc;
@@ -64,7 +64,7 @@ fn arm_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
     let Some(tokens) = state.tokens.teams().clone() else {
         return;
     };
-    super::poll_once::arm_preferred_presence_session(
+    super::presence::arm_preferred_presence_session(
         &state.session,
         app,
         &tokens.access_token,
@@ -83,7 +83,7 @@ fn clear_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
     let Some(tokens) = state.tokens.teams().clone() else {
         return;
     };
-    super::poll_once::clear_preferred_presence_session(
+    super::presence::clear_preferred_presence_session(
         &state.session,
         app,
         &tokens.access_token,
@@ -93,22 +93,22 @@ fn clear_preferred_for_snooze(state: &AppState, app: &tauri::AppHandle) {
 
 /// Drive the polling loop. Owns the mutable per-thread state across
 /// iterations; each iteration's logic lives in
-/// [`super::poll_once::run`].
+/// [`super::iteration::run`].
 pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::Receiver<()>) {
     log::info!("[POLLING] polling_loop: STARTED");
     // Tracks consecutive empty/paused responses so we can widen the poll
     // interval (30→60→120→300s) instead of hammering the API on a paused user.
     // See issue #38. Owned by the driver because the counter's lifetime spans
-    // iterations; `poll_once::run` mutates it as a side effect of computing
+    // iterations; `iteration::run` mutates it as a side effect of computing
     // the per-iteration sleep. There is exactly ONE increment site per
-    // no-track outcome — inside poll_once::run — so the 401-retry no-track
+    // no-track outcome — inside iteration::run — so the 401-retry no-track
     // branch and the main no-track branch cannot drift apart. (Issue #72
     // drift point #1.)
     let mut consecutive_pauses: u8 = 0;
     // Counts consecutive AUTH failures toward the 5-strikes exit that emits
     // `reconnect-required`. Owned by the driver because the counter's lifetime
-    // spans iterations; `poll_once::run` mutates it inside the single error arm.
-    // Reset by `poll_once` on any non-error iteration. Finding PollCore#0
+    // spans iterations; `iteration::run` mutates it inside the single error arm.
+    // Reset by `iteration` on any non-error iteration. Finding PollCore#0
     // (issue #568): this counter is bumped ONLY for genuinely dead credentials
     // (`ExpiredToken`/`InvalidGrant`) — a network failure can no longer stop the
     // session nor pop an OAuth window.
@@ -129,7 +129,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // Issue #862: the ETag now lives inside the Spotify playback source
     // (see `sources::spotify`). Constructing the source fresh each
     // iteration would reset the etag; we therefore reuse the source
-    // across iterations, which means the `poll_once::run` signature
+    // across iterations, which means the `iteration::run` signature
     // drops the explicit `last_etag: &mut Option<String>` parameter and
     // accepts `&mut Box<dyn PlaybackSource>` instead. A change to
     // `config.playback.source` (Spotify / System / Auto) from Settings
@@ -154,7 +154,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // Issue #373: fresh threads start with `last_track_key=None` — this
     // flag lets the first no-track poll attempt one clear instead of
     // returning early and leaving pre-restart status stale. Consumed
-    // exactly once; `poll_once` owns the consumption.
+    // exactly once; `iteration` owns the consumption.
     let mut first_iteration = true;
 
     loop {
@@ -186,10 +186,10 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         let snooze_gate = {
             // Scoped: the config read guard must not be held across the sleep.
             let config = state.config.get();
-            super::poll_once::snooze_gate(&state.session, &config)
+            super::gate::snooze_gate(&state.session, &config)
         };
         match snooze_gate {
-            super::poll_once::SnoozeGate::Skipped(seconds) => {
+            super::gate::SnoozeGate::Skipped(seconds) => {
                 // Issue #866: the snooze transition is the second site (after
                 // `rule_gate_at`) where the app drives the
                 // `setUserPreferredPresence` POST. `snooze_gate` already
@@ -258,7 +258,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
                 }
             }
-            super::poll_once::SnoozeGate::Expired => {
+            super::gate::SnoozeGate::Expired => {
                 // Issue #866: a snooze ending is the natural clear of the
                 // preferred-presence session — the user opted into
                 // "be Busy/DND for the duration of the snooze" and the
@@ -284,13 +284,13 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
                 // The deadline passed while the thread slept. Clear the stored
                 // value once, so the chip and the tray stop claiming a snooze,
                 // then fall through to a normal iteration.
-                super::poll_once::clear_snooze_if_expired(&state);
+                super::gate::clear_snooze_if_expired(&state);
             }
-            super::poll_once::SnoozeGate::Inactive => {}
+            super::gate::SnoozeGate::Inactive => {}
         }
         // S4 (issue #672): quiet hours may stop polling entirely for the
         // duration of the window. Decided BEFORE the write clocks are loaded
-        // and before `poll_once::run`, so a skipped iteration issues no
+        // and before `iteration::run`, so a skipped iteration issues no
         // Spotify/Graph request and moves no keepalive/debounce clock. The
         // window is re-derived from the local clock on every iteration — the
         // thread is never stopped or parked, because a parked thread could not
@@ -299,7 +299,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         let quiet_pause_seconds = {
             // Scoped: the config read guard must not be held across the sleep.
             let config = state.config.get();
-            super::poll_once::quiet_pause_iteration(&state.session, &config)
+            super::gate::quiet_pause_iteration(&state.session, &config)
         };
         if let Some(seconds) = quiet_pause_seconds {
             log::debug!(
@@ -325,36 +325,38 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
         // fresh clock or re-POSTing a status the #384 guard would skip. A
         // concurrent load/store can only lose dedup precision (one redundant
         // write), never correctness.
-        let mut clocks = super::poll_once::load_write_clocks(&state.session);
+        let mut ps = super::clocks::PollState {
+            clocks: super::clocks::load_write_clocks(&state.session),
+            consecutive_pauses,
+            transient_failure_count,
+            consecutive_network_failures,
+            playback_source,
+            last_source_kind,
+            first_iteration,
+        };
 
         // Delegate the iteration. The driver passes `&mut` to per-iteration
-        // state so poll_once can mutate consecutive_pauses / transient counters
-        // / the shared write clocks without owning them.
+        // state (issue #754: one bundled `PollState`) so the iteration can
+        // mutate consecutive_pauses / transient counters / the shared write
+        // clocks without owning them.
         // The returned `PollIteration` tells the driver what to do next:
         // sleep N seconds, or break.
-        let iteration = super::poll_once::run(
+        let iteration = super::iteration::run(
             &state,
             &app,
             &stop_rx,
-            &mut clocks.last_track_key,
-            &mut clocks.last_teams_update,
-            &mut clocks.last_posted_placeholder,
-            &mut clocks.suppressed_placeholder,
-            &mut consecutive_pauses,
-            &mut transient_failure_count,
-            &mut consecutive_network_failures,
-            &mut clocks.gated_track_key,
-            &mut clocks.last_availability_arm,
-            &mut clocks.armed_presence,
-            &mut playback_source,
-            &mut last_source_kind,
-            &mut first_iteration,
-            &mut clocks.last_posted_status,
-            &mut clocks.last_gate_check,
-            &mut clocks.last_idle_verdict,
-            &mut clocks.force_resume_write,
+            &mut ps,
+            super::iteration::RunMode::Loop,
         );
-        super::poll_once::store_write_clocks(&state.session, &clocks);
+        super::clocks::store_write_clocks(&state.session, &ps.clocks);
+        // Restore the driver-owned handles the iteration advanced.
+        consecutive_pauses = ps.consecutive_pauses;
+        transient_failure_count = ps.transient_failure_count;
+        consecutive_network_failures = ps.consecutive_network_failures;
+        playback_source = ps.playback_source;
+        last_source_kind = ps.last_source_kind;
+        first_iteration = ps.first_iteration;
+        let clocks = ps.clocks;
         // Issue #863: mirror the driver's per-iteration failure counters into
         // the shared polling-state slot (the `token_metadata` slot pattern on
         // the consume side in `diagnostics.rs`) so the diagnostics snapshot
@@ -383,11 +385,11 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
 
         tray::set_presence_gated_badge(&app, clocks.gated_track_key.is_some());
         match iteration {
-            super::poll_once::PollIteration::Break => {
+            super::iteration::PollIteration::Break => {
                 log::info!("[POLLING] polling_loop: poll_once requested break");
                 break;
             }
-            super::poll_once::PollIteration::Sleep { seconds } => {
+            super::iteration::PollIteration::Sleep { seconds } => {
                 log::debug!("[POLLING] polling_loop: sleeping for {} seconds", seconds);
                 match stop_rx.recv_timeout(StdDuration::from_secs(seconds)) {
                     Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -407,7 +409,7 @@ pub(crate) fn polling_loop(state: Arc<AppState>, app: AppHandle, stop_rx: mpsc::
     // no session runs) would read a stale `last_track_key`/gate and skip the
     // `spotify-track-changed` emit and the `current_track` update for a track
     // that is already playing.
-    super::poll_once::reset_write_clocks(&state.session);
+    super::clocks::reset_write_clocks(&state.session);
     // Issue #863: the mirrored counters/gate reason die with the session too —
     // a stopped poller reports zeros/`None` instead of the last session's
     // values. Deliberately NOT `reset_exit_snapshot`: the exit residue must
@@ -529,11 +531,11 @@ mod tests {
         );
 
         // The exit tail, verbatim...
-        crate::polling::poll_once::reset_write_clocks(&session);
+        crate::polling::clocks::reset_write_clocks(&session);
         // ...and the next session's start, which resets the same slot.
-        crate::polling::poll_once::reset_write_clocks(&session);
+        crate::polling::clocks::reset_write_clocks(&session);
 
-        let cold = crate::polling::poll_once::load_write_clocks(&session);
+        let cold = crate::polling::clocks::load_write_clocks(&session);
         assert!(
             cold.last_track_key.is_none()
                 && cold.last_posted_status.is_none()

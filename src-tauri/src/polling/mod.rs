@@ -1,12 +1,23 @@
-//! Polling subsystem — split into five files:
+//! Polling subsystem — split into focused modules (issue #754):
 //!
-//! - [`loop`]      — the polling driver (`polling_loop`).
-//! - [`poll_once`] — the single source of truth for one poll iteration
+//! - [`loop_`]      — the polling driver (`polling_loop`).
+//! - [`iteration`]  — the single source of truth for one poll iteration
 //!   (CAS refresh, 401-retry, no-track handling, error emission). The
 //!   3-branch drift that motivated #72 collapses to one path here.
-//! - [`state`]     — thread-lifecycle glue (`start_polling`,
+//! - [`clocks`]     — the shared write-decision clocks (`WriteClocks`,
+//!   load/store/reset).
+//! - [`timing`]     — backoff, jitter, debounce and interval helpers.
+//! - [`refresh`]    — the Spotify/Teams CAS refresh path.
+//! - [`gate`]       — quiet-hours, snooze and gate-recheck predicates.
+//! - [`rules`]      — the track-rule engine (`RuleDecision`, walker).
+//! - [`presence`]   — the Teams presence session.
+//! - [`status_text`]— the status-text builder.
+//! - [`write`]      — the Teams write path (`process_track`,
+//!   `handle_no_track`, debounce/keepalive decisions).
+//! - [`exit`]       — the loop-exit cleanup tail.
+//! - [`state`]      — thread-lifecycle glue (`start_polling`,
 //!   `stop_polling`).
-//! - [`daemon`]    — supervised `--daemon` mode (issue #896): SIGTERM/
+//! - [`daemon`]     — supervised `--daemon` mode (issue #896): SIGTERM/
 //!   SIGINT handlers, bounded join, clean shutdown.
 //!
 //! `token_io` was historically part of `polling/loop.rs` per the #72 issue
@@ -21,17 +32,31 @@
 
 // `loop` is a Rust keyword so the module identifier is `loop_`; the file is
 // still named `loop.rs` per the #72 issue spec via the `#[path]` attribute.
+pub(crate) mod clocks;
 mod daemon;
+pub(crate) mod exit;
+pub(crate) mod gate;
+pub(crate) mod iteration;
 #[path = "loop.rs"]
 mod loop_;
-mod poll_once;
-mod state;
+pub(crate) mod presence;
+pub(crate) mod refresh;
+pub(crate) mod rules;
+pub(crate) mod state;
+pub(crate) mod status_text;
+pub(crate) mod timing;
+pub(crate) mod write;
 
-pub(crate) use poll_once::MUSIC_EMOJI;
-pub(crate) use poll_once::{
-    cas_refresh_spotify, cas_refresh_teams, clear_presence_on_exit, load_write_clocks, run_oneshot,
-    CasOutcome,
-};
+// Issue #754: `poll_once.rs` is deleted; its public surface is re-exported
+// from the focused modules so existing call sites do not move. Only the
+// names used outside `polling/` are re-exported here — sibling modules
+// reach each other through `super::<module>::` paths directly.
+pub(crate) use clocks::load_write_clocks;
+pub(crate) use exit::clear_presence_on_exit;
+pub(crate) use iteration::run_oneshot;
+pub(crate) use refresh::{cas_refresh_spotify, cas_refresh_teams, CasOutcome};
+pub(crate) use status_text::MUSIC_EMOJI;
+
 // Issue #868: the rule walker (TrackRuleContext, track_rule_hit,
 // track_rule_conditions_match, track_rule_schedule_matches) is the
 // dry-run tester's source of truth — `commands::rules::explain_rules`
@@ -40,7 +65,7 @@ pub(crate) use poll_once::{
 // too. `matching_track_rule_at_with_ctx` is the public-in-this-crate
 // entry point the live path calls; the rule walker pieces are
 // re-exported for the IPC path to compose the same evaluation.
-pub(crate) use poll_once::{
+pub(crate) use rules::{
     track_rule_conditions_match, track_rule_hit, track_rule_schedule_matches, TrackRuleContext,
 };
 #[cfg(test)]
