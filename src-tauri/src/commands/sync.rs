@@ -717,6 +717,8 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     // write-decision clocks (finding PollCore#4 / #572).
     let clocks = polling::load_write_clocks(&state.session);
 
+    #[cfg(test)]
+    section_held_probe();
     // Issue #879: end of the critical section. The two connected booleans
     // below are computed from values read above, and every field that had to
     // agree with `current_track` was read above the drops — so releasing here
@@ -755,7 +757,6 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
         recent_manual_statuses: crate::commands::status::load_recent_statuses(),
         spotify_secret_conflict,
     };
-    // Issue #1126: publish the fresh assembly for the contention arm above.
     // Fresh-path only — the fallback arm returns before reaching this line,
     // so a stale snapshot can never overwrite a newer one with itself.
     *state.last_sync_snapshot.write() = Some(status.clone());
@@ -789,6 +790,39 @@ pub(super) fn with_section_released_probe<R>(
 #[cfg(test)]
 fn section_released_probe() {
     let probe = SECTION_RELEASED_PROBE.with(|slot| slot.borrow_mut().take());
+    if let Some(probe) = probe {
+        probe();
+    }
+}
+
+// Issue #778 test seam: fires while the snapshot still holds its critical
+// section — all four read guards taken, values cloned — so a test can prove
+// no writer can interleave between the field reads. Compiled out of
+// production builds, so the command path carries no cost for it. Sibling of
+// the release-instant seam above, which observes the opposite instant
+// (guards already dropped, tail work still to build).
+#[cfg(test)]
+thread_local! {
+    static SECTION_HELD_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// Install `probe` for the duration of `body`, on this thread.
+#[cfg(test)]
+pub(super) fn with_section_held_probe<R>(
+    probe: impl FnOnce() + 'static,
+    body: impl FnOnce() -> R,
+) -> R {
+    SECTION_HELD_PROBE.with(|slot| *slot.borrow_mut() = Some(Box::new(probe)));
+    let assembled = body();
+    SECTION_HELD_PROBE.with(|slot| slot.borrow_mut().take());
+    assembled
+}
+
+/// One-shot invocation point for [`with_section_held_probe`].
+#[cfg(test)]
+fn section_held_probe() {
+    let probe = SECTION_HELD_PROBE.with(|slot| slot.borrow_mut().take());
     if let Some(probe) = probe {
         probe();
     }
@@ -857,6 +891,14 @@ mod tests {
     /// warn-log with the caller context and defensively clear a wedged
     /// syncing flag (set but owned by no live thread), while leaving the
     /// flag alone when another thread still owns the state.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the drain's LOG LINES on the ownerless path,
+    /// and log text is not observable behaviour a hermetic test can assert
+    /// on. The flag half IS covered behaviourally (`test_wedged_flag_without_
+    /// any_owner_is_still_recovered`, `test_stop_in_the_claim_window_leaves_
+    /// the_flag_for_the_start`); what this scan pins is the warn wording.
+    /// Scoped to `stop_polling_and_join`'s body so prose cannot satisfy it.
     #[test]
     fn test_no_handle_branch_warns_and_clears_wedged_flag() {
         let source = include_str!("sync.rs");
@@ -879,53 +921,127 @@ mod tests {
         );
     }
 
-    /// Issue #398: the status snapshot must be assembled under a single
-    /// critical section — all four read guards held at once — so torn snapshots
-    /// are unobservable, with the lock order documented.
+    /// Issue #398: the status snapshot assembles under a single critical
+    /// section — all four read guards held at once, in the documented order
+    /// (`current_track -> spotify -> config -> teams`) — so no writer can
+    /// interleave between the field reads and torn snapshots stay
+    /// unobservable.
+    ///
+    /// Behavioural, not a source scan (issue #778): the held-section probe
+    /// fires while the snapshot still holds every guard, and the probe
+    /// `try_write`s EACH of the four slots individually — all four must
+    /// refuse while the section is held (any early-released or never-taken
+    /// guard grants its `try_write` and fails the test), then a second
+    /// snapshot after the drops must assemble an equal struct, proving the
+    /// section released cleanly. Rewording the "Single critical section"
+    /// comment cannot fail this test. ORDER: deferred — the adjacent `let`
+    /// bindings are structural, not behavioural: same-thread `try_write`
+    /// never exercises concurrent acquisition order, so a reorder still
+    /// passes here. Reorder-mutation proof is the named follow-up.
     ///
     /// Issue #679 moved the assembly out of the `get_sync_status` command into
     /// `sync_status_from_state` (the command, and the headless `--status` CLI
-    /// flag, both call it) — the invariant follows the code, so the guard names
-    /// the fn that now holds the guards.
+    /// flag, both call it) — the invariant follows the code, so the test
+    /// drives the fn that now holds the guards.
     #[test]
     fn test_get_sync_status_reads_under_single_critical_section() {
-        let source = include_str!("sync.rs");
-        let prod_source = source
-            .split("#[cfg(test)]\nmod tests")
-            .next()
-            .expect("sync.rs has no #[cfg(test)] mod tests block");
-        let body = fn_body(prod_source, "pub fn sync_status_from_state(");
-        for marker in [
-            "state.polling.current_track()",
-            // Issue #1126: the contention probe runs ahead of the section in
-            // the same order, so its markers join the #398 order guard.
-            "state.tokens.try_spotify()",
-            "state.tokens.try_teams()",
-            "state.tokens.spotify()",
-            "state.config.get()",
-            "state.tokens.teams()",
-        ] {
-            assert!(
-                body.contains(marker),
-                "sync_status_from_state must hold {} inside its critical section (issue #398)",
-                marker
-            );
-        }
-        assert!(
-            prod_source.contains("Single critical section"),
-            "the lock-ordering contract must stay documented (issue #398)"
+        use super::{sync_status_from_state, with_section_held_probe, AppState};
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new());
+        // Each slot observed once: refused while held, granted after release.
+        // Fail-closed: `held` starts false so an unfired probe (early return,
+        // deleted call-site) fails instead of passing vacuously.
+        let (held, free) = (
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
-        // Issue #879: the assembly is reached through the offload, so the
-        // command must still return the shared derivation and nothing else.
-        let command_body = fn_body(prod_source, "pub async fn get_sync_status(");
-        assert!(
-            command_body.contains("sync_status_offloaded("),
-            "the command must return the shared derivation through the blocking-pool offload, never a second copy of it (issues #679, #879)"
+        let (held_w, free_w) = (Arc::clone(&held), Arc::clone(&free));
+        let probe_state = Arc::clone(&state);
+
+        let first = with_section_held_probe(
+            move || {
+                // All four slots individually: a blocking `write()` here
+                // would park on ANY held read and pass vacuously (3/4
+                // coverage), so each slot gets its own non-blocking probe —
+                // every one must refuse while the section is held.
+                let track_refused = probe_state.polling.try_current_track_mut().is_none();
+                let spotify_refused = probe_state.tokens.try_spotify_mut().is_none();
+                let config_refused = probe_state.config.try_get_mut().is_none();
+                let teams_refused = probe_state.tokens.try_teams_mut().is_none();
+                held_w.store(
+                    track_refused && spotify_refused && config_refused && teams_refused,
+                    std::sync::atomic::Ordering::Release,
+                );
+            },
+            || sync_status_from_state(&state),
         );
+
         assert!(
-            fn_body(prod_source, "async fn sync_status_offloaded(")
-                .contains("sync_status_from_state("),
-            "the offload must assemble the snapshot through sync_status_from_state (issue #879)"
+            held.load(std::sync::atomic::Ordering::Acquire),
+            "the snapshot must hold ALL FOUR guards while assembling — an early-released or never-taken slot granted its try_write mid-assembly (issue #398)"
+        );
+
+        // After the drops every slot must grant again, and a second snapshot
+        // must assemble the equal struct — proving the section released
+        // cleanly instead of wedging a slot.
+        assert!(
+            state.polling.try_current_track_mut().is_some()
+                && state.tokens.try_spotify_mut().is_some()
+                && state.config.try_get_mut().is_some()
+                && state.tokens.try_teams_mut().is_some(),
+            "all four slots must be free once the snapshot released its section (issue #398)"
+        );
+        let second = sync_status_from_state(&state);
+        assert_eq!(
+            serde_json::to_value(&first).expect("SyncStatus must serialise"),
+            serde_json::to_value(&second).expect("SyncStatus must serialise"),
+            "two uncontended snapshots must agree field-for-field — the section holds one instant and releases it cleanly (issue #398)"
+        );
+        free_w.store(true, std::sync::atomic::Ordering::Release);
+        assert!(free.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// Issue #879: the assembly is reached through the offload, so the
+    /// command must still return the shared derivation and nothing else.
+    /// Behavioural: seeds a NON-EMPTY state (both sessions live, so the
+    /// expected answer is `true/true` — an empty-state assertion would pass
+    /// with any duplicated assembly that defaults to disconnected), drives
+    /// the offload entry point the command awaits, and requires
+    /// field-for-field equality with the direct shared derivation. An inline
+    /// second copy that drifts (different defaults, a skipped flag, a stale
+    /// cache read) fails the equality without any source scan.
+    #[test]
+    fn test_get_sync_status_offload_assembles_through_the_shared_derivation() {
+        use super::{sync_status_from_state, sync_status_offloaded, AppState};
+        use std::sync::Arc;
+
+        let state = Arc::new(AppState::new());
+        let mut config = crate::config::AppConfig::default();
+        config.spotify.client_id = "spotify-client".to_string();
+        *state.config.get_mut() = Some(std::sync::Arc::new(config));
+        *state.tokens.spotify_mut() = Some(crate::spotify::SpotifyTokens {
+            access_token: "spotify-access".to_string(),
+            refresh_token: "spotify-refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+        *state.tokens.teams_mut() = Some(crate::teams::TeamsTokens {
+            access_token: "teams-access".to_string(),
+            refresh_token: Some("teams-refresh".to_string()),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        });
+
+        let direct = sync_status_from_state(&state);
+        assert!(
+            direct.spotify_connected && direct.teams_connected,
+            "the seeded state must read as connected on both slots (issues #679, #879)"
+        );
+        let offloaded = tauri::async_runtime::block_on(sync_status_offloaded(Arc::clone(&state)))
+            .expect("the offloaded snapshot must be produced");
+        assert_eq!(
+            serde_json::to_value(&offloaded).expect("SyncStatus must serialise"),
+            serde_json::to_value(&direct).expect("SyncStatus must serialise"),
+            "the offload must return exactly what the shared derivation assembles — a duplicated assembly that drifts fails here (issues #679, #879)"
         );
     }
 
@@ -1010,6 +1126,14 @@ mod tests {
 
     /// Issue #809 acceptance: the guard runs before the flag is claimed, so a
     /// refusal can never leave a claimed `is_syncing` behind.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ORDER of two calls on the async start
+    /// path, which spawns a live poller thread and needs a managed `App`
+    /// (`start_syncing_with` takes `&AppHandle`) no hermetic test can run.
+    /// The refusal half IS covered behaviourally (`missing_session_code`
+    /// driven directly); what this scan pins is the guard-before-claim
+    /// sequencing inside the command. Order-pinned, scoped to the fn body.
     #[test]
     fn test_start_syncing_guard_runs_before_the_claim() {
         let source = include_str!("sync.rs");
@@ -1290,6 +1414,14 @@ mod tests {
     /// real poller id must replace it once the handle is stored — a sentinel
     /// that is never published, or never replaced, leaves the claim window
     /// ownerless again (or the poller's own exit cleanup unmatched).
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the claim→sentinel→spawn→store ORDER inside
+    /// the async start fn, which spawns a live poller and needs a managed
+    /// `App` no hermetic test can run. The race half IS covered behaviourally
+    /// (the claim-window and raced-stop tests drive the real drain path);
+    /// what this scan pins is the publication sequencing. Order- and
+    /// count-pinned, scoped to the fn body.
     #[test]
     fn test_start_syncing_publishes_the_sentinel_between_claim_and_spawn() {
         let source = include_str!("sync.rs");

@@ -613,6 +613,9 @@ mod tests {
     /// A snooze means "no Spotify request", and the tray's own rebuild is one
     /// of the two things that still runs while snoozed — so its fetch mode must
     /// follow the snooze rather than the caller.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the snooze-aware fetch wiring — that the rebuild derives fetch mode from paint+snooze for both submenu sources — the rebuild needs a live menu + AppHandle; the fetch-mode decision (tray_fetch_mode/paint_fetch_mode) is driven behaviourally; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn snooze_makes_the_tray_rebuild_cache_only() {
         assert_eq!(tray_fetch_mode(true), TrayFetch::CacheOnly);
@@ -652,6 +655,9 @@ mod tests {
     }
     /// The snooze must be resolved BEFORE the dedup comparison — a key computed
     /// after the early return would never see it.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the snooze-before-dedup ordering — that the snooze resolves before the dedup guard — the rebuild needs a live window + config; the order is pinned textually at the builder body; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn snooze_is_resolved_before_the_dedup_guard() {
         let prod = tray_prod_source();
@@ -678,15 +684,18 @@ mod tests {
     }
     /// A snooze click writes `config.json`, so it must happen off the
     /// menu-event thread, and the repaint must follow the write.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the snooze click-arm offload — that the arm writes through write_snooze and repaints off the menu thread — the arm needs a live AppHandle (config write + repaint); the classification itself is covered by tray_click_target_orders_every_arm; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn snooze_click_arms_write_off_thread_and_repaint() {
         let prod = tray_prod_source();
         let body = body_of(prod, "pub fn handle_menu_event(");
         let arm_pos = body
-            .find("id if id.starts_with(SNOOZE_ITEM_PREFIX)")
-            .expect("handle_menu_event must handle the snooze submenu ids");
+            .find("TrayClickTarget::Snooze =>")
+            .expect("handle_menu_event must handle the Snooze decision");
         let arm_end = body[arm_pos..]
-            .find("id if id.starts_with(DEVICE_ITEM_PREFIX)")
+            .find("TrayClickTarget::Profile =>")
             .map(|i| arm_pos + i)
             .unwrap_or(body.len());
         let arm = &body[arm_pos..arm_end];
@@ -717,6 +726,9 @@ mod tests {
     /// discipline as `commands::config::update_config` (issues #297 / #536) — an
     /// in-memory value that disagrees with disk would show a countdown for a
     /// snooze the next launch does not honour.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the store-what-was-persisted discipline — that the in-memory store follows the successful save — the atomic save needs a live filesystem + config guard; the order is pinned textually at the writer body; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn store_snooze_persists_the_clamped_stamped_value() {
         let prod = tray_prod_source();
@@ -752,6 +764,9 @@ mod tests {
     }
     /// The tray must log what it did: the deadline on the way in and the
     /// explicit resume on the way out (issue #677's logging contract).
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the snooze log lines — that start and resume log their own copies — log text is not observable behaviour a hermetic test can assert on; the write path itself is exercised elsewhere; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn write_snooze_logs_both_edges() {
         let prod = tray_prod_source();
@@ -774,6 +789,9 @@ mod tests {
     /// store helper that holds the config write guard across the atomic
     /// save. Splitting the two means the same guarded path can be reused
     /// by the CLI without re-doing the lock dance.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the profile writer discipline + log lines — that the guarded writer stores after save and logs both edges — the atomic save + log text need a live filesystem + AppHandle; the order is pinned textually; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn write_active_profile_uses_the_guarded_writer_and_logs_both_edges() {
         let prod = tray_prod_source();
@@ -810,6 +828,9 @@ mod tests {
     /// snooze items and the click handler dispatches both the base
     /// sentinel and the per-profile prefixed ids through the same off-
     /// thread writer.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the profile submenu + click-arm wiring — that the build carries the submenu and the dispatcher handles the Profile decision — the build and arm need a live menu + AppHandle; the id classification is covered by tray_click_target_orders_every_arm; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn profile_submenu_is_in_the_main_menu_and_its_click_arm_is_off_thread() {
         let prod = tray_prod_source();
@@ -829,10 +850,13 @@ mod tests {
             "the dedup key must carry the active profile id so a switch repaints"
         );
         // The click handler validates the picked name and offloads the write.
+        // Classification lives in the pure `tray_click_target` decision fn
+        // (pinned behaviourally in tray/mod.rs) — the dispatcher only needs
+        // the decision variant here, not the raw id shapes.
         let setup = body_of(prod, "pub fn handle_menu_event(");
         assert!(
-            setup.contains("ID_PROFILE_BASE") && setup.contains("PROFILE_ITEM_PREFIX"),
-            "the click dispatcher must handle both the base sentinel and per-profile ids"
+            setup.contains("TrayClickTarget::Profile =>"),
+            "the click dispatcher must handle the Profile decision"
         );
         assert!(
             setup.contains("write_active_profile(&app_handle, target)"),
@@ -856,6 +880,9 @@ mod tests {
     /// A deadline that expired while the app was closed is cleared from
     /// `config.json` at startup, so the clamp log line cannot repeat on every
     /// launch and the persisted document matches what the app honours.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the startup-cleanup wiring — that setup runs the expired-deadline cleanup before the first paint — setup_tray needs a live Tauri App; the order is pinned textually; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn startup_cleanup_clears_an_expired_deadline_through_the_guarded_writer() {
         let prod = tray_prod_source();

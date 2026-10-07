@@ -1193,10 +1193,11 @@ mod tests {
     /// stale draft cannot leave the tray and the app menu in the old language
     /// while `config.json` and the webview move on.
     ///
-    /// Source-level by necessity: the relabel itself calls into two Tauri
-    /// surfaces that need a live app handle, which no unit test can build. The
-    /// behaviour behind it — which table gets installed, and whether a repaint
-    /// is warranted — is covered by
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the relabel itself calls into two Tauri surfaces that need a
+    /// live `AppHandle`, which no hermetic unit test can build. The behaviour
+    /// behind it — which table gets installed, and whether a repaint is
+    /// warranted — is covered behaviourally by
     /// `i18n::tests::install_from_config_reports_only_real_locale_changes`.
     #[test]
     fn every_config_write_converges_the_native_locale() {
@@ -1227,9 +1228,16 @@ mod tests {
     /// OS-only half (`apply_os_autostart`), never through the persisting
     /// `set_autostart_enabled` command — calling the command from the
     /// post-write path would persist again and recurse.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is WHICH autostart half the post-write path
+    /// calls, and both halves touch the live OS login registry no hermetic
+    /// unit test can exercise. Scoped to `after_persist`'s body so prose
+    /// elsewhere cannot satisfy it.
     #[test]
     fn after_persist_syncs_autostart_without_reentering_the_command() {
         let prod = prod_source(include_str!("config.rs"));
+
         let persisted = body_of(prod, "async fn after_persist(");
         assert!(
             persisted.contains("apply_os_autostart("),
@@ -1240,6 +1248,12 @@ mod tests {
     /// The `set_locale` command must converge through the same post-write path
     /// as every other config write instead of keeping its own copy of the
     /// relabel sequence.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is WHICH post-write path the command awaits,
+    /// and that path ends at live `AppHandle` surfaces (native menu + tray
+    /// relabel) no hermetic unit test can execute. Scoped to `set_locale`'s
+    /// body so prose elsewhere cannot satisfy it.
     #[test]
     fn set_locale_routes_through_the_shared_post_write_path() {
         let prod = prod_source(include_str!("config.rs"));
@@ -1329,10 +1343,11 @@ mod tests {
     /// command that hops through the async runtime. Both pickers must
     /// therefore run on the blocking pool.
     ///
-    /// Source-level by necessity: showing a native picker needs a real desktop
-    /// session. The structural check — the call is an argument of the
-    /// `spawn_blocking` call, and the join handle is awaited — is what makes
-    /// this more than a proximity scan.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): showing a native picker needs a real desktop session no
+    /// hermetic unit test can build. The structural check — the call is an
+    /// argument of the `spawn_blocking` call, and the join handle is awaited —
+    /// is what makes this more than a proximity scan.
     #[test]
     fn file_pickers_run_on_the_blocking_pool() {
         let prod = prod_source(include_str!("config.rs"));
@@ -1381,6 +1396,9 @@ mod tests {
 
     /// The refusal runs on the command path and touches nothing: the live
     /// `config.json` stays byte-identical and no `.bak` appears (issue #963).
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the import-guard binding — that import_config refuses non-PresenceJam files on its own path — the refusal itself is driven behaviourally above; only the command-path call-site is pinned textually; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn refused_import_leaves_the_live_config_byte_identical() {
         let dir = temp_dir("pj-test-import-refuse");

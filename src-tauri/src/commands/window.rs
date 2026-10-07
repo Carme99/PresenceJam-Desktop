@@ -336,6 +336,12 @@ mod tests {
     /// Issue #391: show_window must unminimize (a minimized window stays
     /// minimized after show()). Brace-counted body isolation
     /// (order-independent): do not anchor on the next fn.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the window-handle CALL SEQUENCE on a live
+    /// `WebviewWindow` (`show` + `unminimize` + `set_focus`), and no hermetic
+    /// unit test can construct a window. Scoped to `show_window`'s body so
+    /// prose elsewhere cannot satisfy it.
     #[test]
     fn show_window_unminimizes() {
         let src = include_str!("window.rs");
@@ -381,6 +387,13 @@ mod tests {
 
     /// Issue #826: the not-found arm must fail instead of falling through to
     /// a SUCCESS line that describes the opposite outcome.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the not-found ARM's control flow on a live
+    /// window lookup (`get_webview_window("main")` returning `None`), and no
+    /// hermetic unit test can produce a missing main window. Scoped to
+    /// `show_window`'s body with order pins (Err after the condition,
+    /// SUCCESS on the raise path), so prose cannot satisfy it.
     #[test]
     fn show_window_fails_and_logs_no_success_when_the_main_window_is_missing() {
         let src = include_str!("window.rs");
@@ -435,6 +448,11 @@ mod tests {
     /// re-derives the entry from. Extract the command body by brace-counting
     /// (order-independent: never anchor on the next fn) and require the
     /// guarded persist plus the idempotent `after_persist` convergence.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the command's OS-login-entry side effect,
+    /// which needs a live OS autostart registry no hermetic unit test can
+    /// touch. Scoped to the command body so prose cannot satisfy it.
     #[test]
     fn set_autostart_enabled_persists_the_flag_it_toggles() {
         let src = include_str!("window.rs");
