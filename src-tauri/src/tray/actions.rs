@@ -329,6 +329,9 @@ mod tests {
     /// click with no refresh and no retry, while the refresh-aware policy in
     /// `commands/playback.rs` had no callers. Both tray paths must now route
     /// through that shared policy.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the refresh-aware token binding — that both player paths resolve through the shared policy, never a raw snapshot — the arms need a live AppHandle for HTTP + emitters; the policy itself is tested at its own layer; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn tray_player_actions_use_refresh_aware_token() {
         let src = tray_prod_source();
@@ -344,10 +347,10 @@ mod tests {
         );
         let setup_body = body_of(prod, "pub fn handle_menu_event(");
         let play_pos = setup_body
-            .find("ID_PLAY_PAUSE =>")
-            .expect("handle_menu_event must handle ID_PLAY_PAUSE");
+            .find("TrayClickTarget::PlayPause =>")
+            .expect("handle_menu_event must handle the PlayPause decision");
         let play_end = setup_body[play_pos..]
-            .find("ID_PREVIOUS =>")
+            .find("TrayClickTarget::Previous =>")
             .map(|i| play_pos + i)
             .unwrap_or(setup_body.len());
         let play_arm = &setup_body[play_pos..play_end];
@@ -427,6 +430,9 @@ mod tests {
     /// protects the API was bypassed entirely. The action is now recorded and the
     /// rebuild re-fetches under a short minimum interval, which a burst of clicks
     /// shares instead of multiplying.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the post-action fetch wiring — that the action is recorded and the rebuild marks its fetch before requesting — the burst-coalescing decision (action_fetch_due) is driven behaviourally above; only the call-site wiring is pinned textually; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn post_action_refresh_coalesces_a_burst_of_clicks() {
         let min = TRAY_POST_ACTION_FETCH_MIN;

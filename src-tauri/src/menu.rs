@@ -405,6 +405,15 @@ mod tests {
     /// drain time to run (polling stop + staged-update install) instead of a
     /// fixed 500 ms sleep-then-exit. Brace-counted body isolation
     /// (order-independent): do not anchor on the next fn.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the shutdown SEQUENCE — emit, bounded
+    /// poll-for-drain, unconditional exit — and every step needs a live
+    /// `AppHandle` (`app.emit`, `try_state`, `app.exit`) that no hermetic
+    /// unit test can construct. Driving the fn behaviourally would exit the
+    /// test process; asserting the sequence textually at its own body is the
+    /// only observable pin. Scoped to `request_graceful_shutdown`'s body so
+    /// prose elsewhere cannot satisfy it.
     #[test]
     fn quit_arm_uses_bounded_graceful_shutdown() {
         let src = include_str!("menu.rs");
@@ -475,6 +484,13 @@ mod tests {
     /// Issue #383: the app-menu Quit handler must stay wired through
     /// `request_graceful_shutdown` so the forced exit cannot be dropped
     /// without this test failing.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is WHICH exit path the Quit decision arm calls,
+    /// and the arm needs a live `AppHandle` to run. The decision half IS
+    /// covered behaviourally (`tray_click_target_orders_every_arm` pins the
+    /// id-to-Quit-decision mapping); what this scan pins is the arm's body,
+    /// which no hermetic test can execute. Scoped to the dispatcher's body.
     #[test]
     fn quit_handler_routes_through_graceful_shutdown() {
         // Issue #804: Quit moved to the single dispatcher
@@ -509,12 +525,12 @@ mod tests {
         };
         let body = &src[body_start + 1..body_end];
         let quit_pos = body
-            .find("ID_QUIT =>")
-            .expect("handle_menu_event must own ID_QUIT (issue #804)");
+            .find("TrayClickTarget::Quit =>")
+            .expect("handle_menu_event must own the Quit decision (issue #804)");
         let tail = &body[quit_pos..];
         assert!(
             tail.contains("request_graceful_shutdown(app)"),
-            "ID_QUIT arm must route through request_graceful_shutdown"
+            "Quit arm must route through request_graceful_shutdown"
         );
     }
 }

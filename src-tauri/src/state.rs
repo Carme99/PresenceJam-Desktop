@@ -116,6 +116,18 @@ impl Tokens {
         self.spotify.write()
     }
 
+    /// Attempt to acquire the Spotify write guard without blocking.
+    ///
+    /// Issue #778: the deterministic concurrency-test seam proving the
+    /// snapshot holds its critical section — `None` while a reader holds the
+    /// slot, `Some` once released. Mirrors `Config::try_get_mut`.
+    #[cfg(test)]
+    pub fn try_spotify_mut(
+        &self,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::SpotifyTokens>>> {
+        self.spotify.try_write()
+    }
+
     /// Read guard for the Teams token slot. Use this instead of
     /// touching the `teams` field directly.
     pub fn teams(&self) -> parking_lot::RwLockReadGuard<'_, Option<crate::teams::TeamsTokens>> {
@@ -128,6 +140,18 @@ impl Tokens {
         &self,
     ) -> parking_lot::RwLockWriteGuard<'_, Option<crate::teams::TeamsTokens>> {
         self.teams.write()
+    }
+
+    /// Attempt to acquire the Teams write guard without blocking.
+    ///
+    /// Issue #778: the deterministic concurrency-test seam proving the
+    /// snapshot holds its critical section — `None` while a reader holds the
+    /// slot, `Some` once released. Mirrors `try_spotify_mut`.
+    #[cfg(test)]
+    pub fn try_teams_mut(
+        &self,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<crate::teams::TeamsTokens>>> {
+        self.teams.try_write()
     }
 
     /// Attempt to acquire the Spotify read guard without blocking.
@@ -351,6 +375,18 @@ impl Polling {
         &self,
     ) -> parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::TrackInfo>> {
         self.current_track.write()
+    }
+
+    /// Attempt to acquire the track write guard without blocking.
+    ///
+    /// Issue #778: the deterministic concurrency-test seam proving the
+    /// snapshot holds its critical section — `None` while a reader holds the
+    /// slot, `Some` once released. Mirrors `Tokens::try_spotify_mut`.
+    #[cfg(test)]
+    pub fn try_current_track_mut(
+        &self,
+    ) -> Option<parking_lot::RwLockWriteGuard<'_, Option<crate::spotify::TrackInfo>>> {
+        self.current_track.try_write()
     }
 
     /// Read guard for the stored polling thread id.

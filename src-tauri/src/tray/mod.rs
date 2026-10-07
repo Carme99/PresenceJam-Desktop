@@ -195,6 +195,62 @@ pub(crate) static TRAY: OnceLock<TrayIcon> = OnceLock::new();
 pub fn get_tray() -> Option<&'static TrayIcon> {
     TRAY.get()
 }
+/// Pure decision half of [`handle_menu_event`] (issue #778).
+///
+/// Maps a clicked menu id to the arm the dispatcher must run, with no
+/// `AppHandle` and no side effect. Behavioural tests drive this fn directly:
+/// the ordering it observes is the ordering the dispatcher executes, so a
+/// reorder or a dropped arm fails the suite without any source-text scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayClickTarget {
+    ShowHide,
+    PauseResume,
+    Quit,
+    Settings,
+    OpenLogs,
+    PlayPause,
+    Previous,
+    Next,
+    Shuffle,
+    Repeat,
+    Snooze,
+    Profile,
+    ManualStatusClear,
+    ManualStatusPick,
+    Volume,
+    Seek,
+    Device,
+    AppMenu,
+}
+
+/// Classify `id` into the dispatch arm [`handle_menu_event`] runs for it.
+/// Every fixed id the tray builder emits maps to its own variant; the guards
+/// below run in the same order as the dispatcher's match, so prefixed ids
+/// resolve before the app-menu fallback.
+pub fn tray_click_target(id: &str) -> TrayClickTarget {
+    match id {
+        ID_SHOW_HIDE => TrayClickTarget::ShowHide,
+        ID_PAUSE_SYNC | ID_RESUME_SYNC => TrayClickTarget::PauseResume,
+        ID_QUIT => TrayClickTarget::Quit,
+        ID_SETTINGS => TrayClickTarget::Settings,
+        ID_OPEN_LOGS => TrayClickTarget::OpenLogs,
+        ID_PLAY_PAUSE => TrayClickTarget::PlayPause,
+        ID_PREVIOUS => TrayClickTarget::Previous,
+        ID_NEXT => TrayClickTarget::Next,
+        ID_SHUFFLE => TrayClickTarget::Shuffle,
+        ID_REPEAT => TrayClickTarget::Repeat,
+        ID_MANUAL_STATUS_CLEAR => TrayClickTarget::ManualStatusClear,
+        _ if id == ID_PROFILE_BASE || id.starts_with(PROFILE_ITEM_PREFIX) => {
+            TrayClickTarget::Profile
+        }
+        _ if id.starts_with(SNOOZE_ITEM_PREFIX) => TrayClickTarget::Snooze,
+        _ if id.starts_with(MANUAL_STATUS_ITEM_PREFIX) => TrayClickTarget::ManualStatusPick,
+        _ if id.starts_with(VOLUME_ITEM_PREFIX) => TrayClickTarget::Volume,
+        _ if id.starts_with(SEEK_ITEM_PREFIX) => TrayClickTarget::Seek,
+        _ if id.starts_with(DEVICE_ITEM_PREFIX) => TrayClickTarget::Device,
+        _ => TrayClickTarget::AppMenu,
+    }
+}
 
 /// Single dispatcher for every native menu click (issue #804).
 ///
@@ -208,8 +264,10 @@ pub fn get_tray() -> Option<&'static TrayIcon> {
 /// double-fired every shared id and is gone.
 pub fn handle_menu_event(app: &AppHandle, id: &str) {
     log_dispatched_menu_event(id);
-    match id {
-        ID_SHOW_HIDE => {
+    // Issue #778: dispatch through the pure decision fn above, so the
+    // behavioural ordering test on `tray_click_target` pins these arms.
+    match tray_click_target(id) {
+        TrayClickTarget::ShowHide => {
             if let Some(window) = app.get_webview_window("main") {
                 if window.is_visible().unwrap_or(false) {
                     let _ = window.hide();
@@ -237,7 +295,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             // menu-event thread — offload it like the #386 player arms.
             refresh_tray_from_state(app);
         }
-        ID_PAUSE_SYNC | ID_RESUME_SYNC => {
+        TrayClickTarget::PauseResume => {
             // Issue #588: this arm only *asks* the frontend to toggle
             // (the frontend owns the start/stop call), so the running
             // flag settles asynchronously. Watch it from a worker and
@@ -259,7 +317,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 repaint_tray_from_state(&app_handle, "pause/resume");
             });
         }
-        ID_QUIT => {
+        TrayClickTarget::Quit => {
             // Issue #383: Quit must terminate the process even with no
             // frontend listener — the old hide-only arm wedged the app
             // in the tray with no way out. Route through the shared
@@ -269,7 +327,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         // Shared with the app menu (issue #804): the tray builder's listener is
         // global, so this arm owns every `settings` click from either surface.
-        ID_SETTINGS => {
+        TrayClickTarget::Settings => {
             let _ = app.emit("navigate", "settings");
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -282,12 +340,12 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             // label, so the tray must be repainted from backend state.
             refresh_tray_from_state(app);
         }
-        ID_OPEN_LOGS => {
+        TrayClickTarget::OpenLogs => {
             let _ = app.emit("open-logs-folder", ());
         }
         // Spotify playback control (issue #3.0-P3). These dispatch
         // directly against the Spotify API with the stored access
-        ID_PLAY_PAUSE => {
+        TrayClickTarget::PlayPause => {
             // Issue #386: the click-path blocking Spotify HTTP must not
             // run on the menu-event thread — a slow network would wedge
             // the tray menu. Offload everything (the currently-playing
@@ -335,7 +393,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 }
             });
         }
-        ID_PREVIOUS => {
+        TrayClickTarget::Previous => {
             // Issue #386: offload the blocking Spotify HTTP off the
             // menu-event thread. Skipping doesn't change playing state.
             let app_handle = app.clone();
@@ -345,7 +403,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 });
             });
         }
-        ID_NEXT => {
+        TrayClickTarget::Next => {
             // Issue #386: offload the blocking Spotify HTTP off the
             // menu-event thread. Skipping doesn't change playing state.
             let app_handle = app.clone();
@@ -355,7 +413,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 });
             });
         }
-        ID_SHUFFLE => {
+        TrayClickTarget::Shuffle => {
             // Issue #582: the target state is the inverse of the last
             // state we know about (the poll body's `shuffle_state`, or
             // this item's own last successful toggle). Issue #386: the
@@ -382,7 +440,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 );
             });
         }
-        ID_REPEAT => {
+        TrayClickTarget::Repeat => {
             // Issue #582: repeat cycles off → context → track → off,
             // matching Spotify's own player button, so "repeat one" is
             // reachable from the tray. Same off-thread and
@@ -400,7 +458,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 );
             });
         }
-        id if id.starts_with(SNOOZE_ITEM_PREFIX) => {
+        TrayClickTarget::Snooze => {
             // S9 (issue #677): a snooze click writes `config.json` (atomic
             // write + fsync), so it must run off the menu-event thread like
             // every other arm here — a slow disk would otherwise wedge the
@@ -453,7 +511,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 repaint_tray_from_state(&app_handle, "snooze");
             });
         }
-        id if id == ID_PROFILE_BASE || id.starts_with(PROFILE_ITEM_PREFIX) => {
+        TrayClickTarget::Profile => {
             // Issue #869: a profile click writes `config.json` (atomic
             // write + fsync), so it must run off the menu-event thread
             // like the snooze arm above — a slow disk would otherwise
@@ -511,7 +569,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 repaint_tray_from_state(&app_handle, "profile");
             });
         }
-        id if id == ID_MANUAL_STATUS_CLEAR => {
+        TrayClickTarget::ManualStatusClear => {
             // Issue #870: the tray's "Clear manual status" entry. Routes
             // through the same `clear_manual_status_inner` helper the
             // Dashboard composer uses, on a worker thread — the Graph
@@ -528,7 +586,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 repaint_tray_from_state(&app_handle, "manual status clear");
             });
         }
-        id if id.starts_with(MANUAL_STATUS_ITEM_PREFIX) => {
+        TrayClickTarget::ManualStatusPick => {
             // Issue #870: a "Recent statuses" pick. The trailing index
             // resolves to one of the ring's slots; a stale index (the
             // ring rotated since the menu was built) is logged and
@@ -563,7 +621,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 repaint_tray_from_state(&app_handle, "manual status pick");
             });
         }
-        id if id.starts_with(VOLUME_ITEM_PREFIX) => {
+        TrayClickTarget::Volume => {
             // Issue #871: the tray's Volume submenu picked a percentage.
             // The click handler offloads the Spotify HTTP and records the
             // new volume so the Dashboard slider mirrors the new value
@@ -586,7 +644,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 });
             });
         }
-        id if id.starts_with(SEEK_ITEM_PREFIX) => {
+        TrayClickTarget::Seek => {
             // Issue #871: the tray's Seek submenu picked a delta. The
             // click handler reads the stored progress + duration from
             // the AppState, computes the new position, and dispatches
@@ -632,7 +690,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 });
             });
         }
-        id if id.starts_with(DEVICE_ITEM_PREFIX) => {
+        TrayClickTarget::Device => {
             // Device submenu item: `{ID_DEVICES}|{stable device id}`
             // resolved by id (issue #388), with a live re-fetch fallback
             // when the cached list went stale. Issue #386: the whole
@@ -662,7 +720,7 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                 }
             });
         }
-        _ => crate::menu::handle_app_menu_event(app, id),
+        TrayClickTarget::AppMenu => crate::menu::handle_app_menu_event(app, id),
     }
 }
 
@@ -1558,6 +1616,9 @@ mod tests {
     /// Issue #918: capture the production global-dispatcher record, then bind
     /// the real handler to that seam. A raw-id call at the handler is therefore
     /// a regression even when the formatter itself still behaves correctly.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the global-dispatcher record seam binding — which log record the dispatcher emits — the dispatcher needs a live AppHandle to click through, so the seam binding is pinned textually; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn dispatched_menu_event_record_redacts_device_id() {
         let device_id = "aB3deviceCredentialValueWithThirtyTwoChars";
@@ -1601,23 +1662,126 @@ mod tests {
             "the production wrapper must delegate to the captured record seam"
         );
     }
-    /// Issues #383/#386: the tray Quit arm must terminate via the shared
-    /// graceful shutdown, and the playback/device click arms must offload
-    /// blocking Spotify HTTP onto worker threads. Issue #587: the Show/Hide
-    /// repaint rebuilds a menu that can fetch Spotify over the network, so
-    /// it must be offloaded too.
+    /// Issue #778: click ordering is pinned behaviourally on the pure
+    /// [`tray_click_target`] decision fn — the dispatcher matches on it, so
+    /// this test observes the same classification the real dispatch runs. A
+    /// dropped arm, a retargeted id, or a reordered prefix (manual-clear
+    /// swallowed by the manual-pick prefix, profile-base swallowed by the
+    /// device prefix) fails here with the misrouted variant, not a scan.
+    ///
+    /// Why the offload half stays a source scan: which thread an arm's
+    /// blocking Spotify HTTP runs on is NOT observable from the decision —
+    /// `tray_click_target` returns a variant, not a thread. Driving the real
+    /// arms behaviourally needs a live `AppHandle` (window, state, emitters),
+    /// which no hermetic unit test may construct (issue #778 keeps exactly
+    /// this shape: genuine `AppHandle` needs survive with a why-not comment).
+    /// The offload scan below is scoped to the arm, not the file, for that
+    /// reason — see its own comment.
+    #[test]
+    fn tray_click_target_orders_every_arm() {
+        use super::{tray_click_target, TrayClickTarget};
+        use super::{
+            DEVICE_ITEM_PREFIX, ID_MANUAL_STATUS_CLEAR, ID_NEXT, ID_OPEN_LOGS, ID_PAUSE_SYNC,
+            ID_PLAY_PAUSE, ID_PREVIOUS, ID_PROFILE_BASE, ID_QUIT, ID_REPEAT, ID_RESUME_SYNC,
+            ID_SETTINGS, ID_SHOW_HIDE, ID_SHUFFLE, MANUAL_STATUS_ITEM_PREFIX, PROFILE_ITEM_PREFIX,
+            SEEK_ITEM_PREFIX, SNOOZE_ITEM_PREFIX, VOLUME_ITEM_PREFIX,
+        };
+        // Every fixed id the tray builder emits classifies to its own arm.
+        for (id, expected) in [
+            (ID_SHOW_HIDE, TrayClickTarget::ShowHide),
+            (ID_PAUSE_SYNC, TrayClickTarget::PauseResume),
+            (ID_RESUME_SYNC, TrayClickTarget::PauseResume),
+            (ID_QUIT, TrayClickTarget::Quit),
+            (ID_SETTINGS, TrayClickTarget::Settings),
+            (ID_OPEN_LOGS, TrayClickTarget::OpenLogs),
+            (ID_PLAY_PAUSE, TrayClickTarget::PlayPause),
+            (ID_PREVIOUS, TrayClickTarget::Previous),
+            (ID_NEXT, TrayClickTarget::Next),
+            (ID_SHUFFLE, TrayClickTarget::Shuffle),
+            (ID_REPEAT, TrayClickTarget::Repeat),
+            (ID_MANUAL_STATUS_CLEAR, TrayClickTarget::ManualStatusClear),
+        ] {
+            assert_eq!(
+                tray_click_target(id),
+                expected,
+                "click id `{id}` must classify to its own arm (issue #778)"
+            );
+        }
+        // Prefixed ids resolve to their arm: the ordering the dispatcher runs.
+        for (id, expected) in [
+            (format!("{SNOOZE_ITEM_PREFIX}30m"), TrayClickTarget::Snooze),
+            (
+                format!("{PROFILE_ITEM_PREFIX}Focus"),
+                TrayClickTarget::Profile,
+            ),
+            (
+                format!("{MANUAL_STATUS_ITEM_PREFIX}2"),
+                TrayClickTarget::ManualStatusPick,
+            ),
+            (format!("{VOLUME_ITEM_PREFIX}50"), TrayClickTarget::Volume),
+            (format!("{SEEK_ITEM_PREFIX}+30"), TrayClickTarget::Seek),
+            (
+                format!("{DEVICE_ITEM_PREFIX}abc123"),
+                TrayClickTarget::Device,
+            ),
+        ] {
+            assert_eq!(
+                tray_click_target(&id),
+                expected,
+                "prefixed click id `{id}` must classify to its own arm (issue #778)"
+            );
+        }
+        // The base-profile id is an exact match, not a prefix hit.
+        assert_eq!(
+            tray_click_target(ID_PROFILE_BASE),
+            TrayClickTarget::Profile,
+            "the base-profile id must classify to the profile arm (issue #778)"
+        );
+        // Unknown ids fall through to the app-menu handler (issue #804).
+        for id in ["show_dashboard", "show_logs", "about", "mystery"] {
+            assert_eq!(
+                tray_click_target(id),
+                TrayClickTarget::AppMenu,
+                "unknown click id `{id}` must delegate to the app-menu handler (issues #778, #804)"
+            );
+        }
+        // Exact-before-prefix: the manual-clear id must NOT be swallowed by
+        // the manual-pick prefix it textually starts with.
+        assert_ne!(
+            tray_click_target(ID_MANUAL_STATUS_CLEAR),
+            TrayClickTarget::ManualStatusPick,
+            "manual-clear must keep its exact arm, not the pick prefix (issue #778)"
+        );
+    }
+    /// Issues #383/#386/#587/#588: the arms' offload discipline — Quit via
+    /// the shared graceful shutdown, blocking Spotify HTTP on worker threads,
+    /// the Show/Hide repaint through the offloading refresh helper, the
+    /// Pause/Resume repaint from a settled-toggle worker.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is *which thread the arm's body runs on*, and
+    /// the arms need a live `AppHandle` (window handles, managed state,
+    /// emitters) that no hermetic unit test can construct. Driving the
+    /// decision fn above cannot observe thread placement — it returns a
+    /// variant, not a thread — and extracting the bodies into seam-bearing
+    /// fns would only move the hole: the test would drive the extracted fn
+    /// while a reverted arm stayed green. Scoped to the dispatcher body
+    /// (not the file) so prose elsewhere cannot satisfy it.
     #[test]
     fn tray_click_arms_quit_and_offload() {
         let src = tray_prod_source();
         let body = body_of(prod_source(src), "pub fn handle_menu_event(");
-        // #383: Quit terminates even with no frontend listener.
+        // #383: Quit terminates even with no frontend listener. The arm now
+        // matches on the decision variant, so the scan anchors on the
+        // variant (not the menu id) — the behavioural test above owns the
+        // id-to-variant mapping, this scan owns what the arm DOES.
         let quit_pos = body
-            .find("ID_QUIT =>")
-            .expect("handle_menu_event must handle ID_QUIT");
+            .find("TrayClickTarget::Quit =>")
+            .expect("handle_menu_event must handle the Quit decision");
         let quit_tail = &body[quit_pos..quit_pos + 600.min(body.len() - quit_pos)];
         assert!(
             quit_tail.contains("request_graceful_shutdown"),
-            "tray ID_QUIT arm must route through request_graceful_shutdown"
+            "tray Quit arm must route through request_graceful_shutdown"
         );
         assert!(
             !quit_tail.contains("window.hide()"),
@@ -1632,9 +1796,12 @@ mod tests {
             "player_next(token, None)",
             "player_transfer(token,",
         ] {
-            let pos = body
-                .find(marker)
-                .unwrap_or_else(|| panic!("expected click-path marker `{}` in setup_tray", marker));
+            let pos = body.find(marker).unwrap_or_else(|| {
+                panic!(
+                    "expected click-path marker `{}` in handle_menu_event",
+                    marker
+                )
+            });
             let before = &body[..pos];
             assert!(
                 before.rfind("std::thread::spawn").is_some(),
@@ -1645,12 +1812,13 @@ mod tests {
         // #587: the Show/Hide repaint must be offloaded. `update_tray_menu`
         // fetches Spotify devices/queue with a 10 s timeout once the fetch
         // throttle lapses, so rebuilding inline would wedge the menu the
-        // same way the #386 player arms used to.
+        // same way the #386 player arms used to. Anchored on the decision
+        // variant — the behavioural test above owns the id mapping.
         let show_pos = body
-            .find("ID_SHOW_HIDE =>")
-            .expect("handle_menu_event must handle ID_SHOW_HIDE");
+            .find("TrayClickTarget::ShowHide =>")
+            .expect("handle_menu_event must handle the ShowHide decision");
         let show_end = body[show_pos..]
-            .find("ID_PAUSE_SYNC")
+            .find("TrayClickTarget::PauseResume")
             .map(|i| show_pos + i)
             .unwrap_or(body.len());
         let show_arm = &body[show_pos..show_end];
@@ -1665,10 +1833,10 @@ mod tests {
         // #588: the Pause/Resume label is repainted from backend truth after
         // the frontend's asynchronous toggle, not left to the Dashboard.
         let pause_pos = body
-            .find("ID_PAUSE_SYNC | ID_RESUME_SYNC =>")
-            .expect("handle_menu_event must handle ID_PAUSE_SYNC | ID_RESUME_SYNC");
+            .find("TrayClickTarget::PauseResume =>")
+            .expect("handle_menu_event must handle the PauseResume decision");
         let pause_end = body[pause_pos..]
-            .find("ID_QUIT =>")
+            .find("TrayClickTarget::Quit")
             .map(|i| pause_pos + i)
             .unwrap_or(body.len());
         let pause_arm = &body[pause_pos..pause_end];
@@ -1695,6 +1863,9 @@ mod tests {
     /// every tray id and delegates the app-menu-only ids to
     /// `menu::handle_app_menu_event`, which keeps only those three arms.
     /// Fails pre-fix with twins (and with the second lib.rs registration).
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the single-dispatcher wiring — that every click routes through tray_click_target with the app-menu fallback — the arms need a live AppHandle to execute; the id-to-arm mapping itself is covered behaviourally by tray_click_target_orders_every_arm; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn menu_events_route_through_one_dispatcher() {
         let tray_prod = tray_prod_source();
@@ -1713,42 +1884,31 @@ mod tests {
             "app.rs must not register a second menu handler (issue #804: double-fire)"
         );
         let dispatcher = body_of(tray_prod, "pub fn handle_menu_event(");
-        // The dispatcher owns every tray-built id ...
-        for marker in [
-            "ID_SHOW_HIDE =>",
-            "ID_PAUSE_SYNC | ID_RESUME_SYNC =>",
-            "ID_QUIT =>",
-            "ID_SETTINGS =>",
-            "ID_OPEN_LOGS =>",
-            "ID_PLAY_PAUSE =>",
-            "ID_PREVIOUS =>",
-            "ID_NEXT =>",
-            "ID_SHUFFLE =>",
-            "ID_REPEAT =>",
-            "SNOOZE_ITEM_PREFIX",
-            "ID_PROFILE_BASE",
-            "PROFILE_ITEM_PREFIX",
-            "ID_MANUAL_STATUS_CLEAR",
-            "MANUAL_STATUS_ITEM_PREFIX",
-            "VOLUME_ITEM_PREFIX",
-            "SEEK_ITEM_PREFIX",
-            "DEVICE_ITEM_PREFIX",
-        ] {
-            assert!(
-                dispatcher.contains(marker),
-                "handle_menu_event must own `{}`",
-                marker
-            );
-        }
+        // The dispatcher routes through the pure decision fn — the
+        // behavioural ordering test above (`tray_click_target_orders_every_arm`)
+        // owns the id-to-arm mapping, so this scan only pins the wiring:
+        // one dispatch through the decision, one fallback delegation.
+        // (Issue #778: the arm-ownership half now has a behavioural test;
+        // what survives as a scan is the single-dispatcher wiring, which
+        // needs a live `AppHandle` to observe behaviourally.)
+        assert!(
+            dispatcher.contains("match tray_click_target(id)"),
+            "handle_menu_event must dispatch through the pure tray_click_target decision fn (issue #778)"
+        );
         // ... and hands anything else to the app-menu handler.
         assert!(
-            dispatcher.contains("crate::menu::handle_app_menu_event(app, id)"),
+            dispatcher.contains(
+                "TrayClickTarget::AppMenu => crate::menu::handle_app_menu_event(app, id)"
+            ),
             "handle_menu_event must delegate app-menu-only ids to menu::handle_app_menu_event"
         );
-        // setup_tray itself carries no match arms any more.
+        // setup_tray itself carries no match arms any more — the decision fn
+        // owns the classification, so a second copy of the dispatch arms
+        // here would double-fire. Scoped to the decision markers (not bare
+        // ids): the builder legitimately names ids when CONSTRUCTING items.
         let setup = body_of(tray_prod, "pub fn setup_tray(");
         assert!(
-            !setup.contains("ID_QUIT =>"),
+            !setup.contains("TrayClickTarget::"),
             "setup_tray must not keep a second copy of the dispatch arms"
         );
         // The app-menu handler keeps only its three window-menu-only arms, so
@@ -1776,6 +1936,9 @@ mod tests {
     /// deleted `app.listen` would leave the functional test above green — it
     /// calls the consumer directly — while the running app ignored the event.
     /// Guards the registration inside `setup_tray`, like the click-arm scans.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the playback-state subscription registration — that setup_tray subscribes to the poller event — registering a Tauri listener needs a live App; the consumer itself is driven behaviourally elsewhere; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn setup_tray_subscribes_to_playback_state_changes() {
         let src = tray_prod_source();
@@ -1794,6 +1957,9 @@ mod tests {
     /// the devices/queue GETs (10 s timeout each, with no window on screen to
     /// explain the wait). It renders the throttled caches and hands the real
     /// fetch to the worker refresh.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the startup-paint wiring — that setup paints cache-only and hands fetch to the worker — setup_tray runs inside Tauri setup on the main thread — no hermetic test can build it; the fetch-mode decision is covered behaviourally via paint_fetch_mode; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn startup_paint_is_cache_only_and_fetches_nothing() {
         // The decision itself: the startup paint renders the caches whether or
@@ -1859,6 +2025,9 @@ mod tests {
     /// poller's stored `TrackInfo` — which a tray pause does not re-store. So a
     /// pause left the row naming a track that was no longer playing and the
     /// tooltip claiming ▶ over a menu that said paused, until the next poll.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the now-playing row/tooltip data flow — that the row and glyph read the rebuild's playing state, not the stored track — the rebuild needs a live menu + AppHandle to execute; the order is pinned textually at the builder body; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn now_playing_row_and_tooltip_follow_the_rebuilds_playing_state() {
         let prod = tray_prod_source();
@@ -1905,6 +2074,9 @@ mod tests {
     /// Windows and macOS — must ride as the AppIndicator's title there, or the
     /// sync state, the current track and the snooze countdown are only visible
     /// after opening the menu.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the Linux AppIndicator title wiring — that the status summary rides as the title where tooltips are unsupported — the builder arm needs a live tray/menu on Linux; the status-line content itself is asserted behaviourally; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn linux_tray_title_carries_the_status_line() {
         let prod = tray_prod_source();
@@ -1940,6 +2112,9 @@ mod tests {
     /// that blocks the calling thread on an event-loop reply and a clone of the
     /// whole `AppConfig`. The key now reads a visibility mirror and a scoped
     /// snooze read, and the real query sits below the early return.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the dedup key ordering — that the key reads the mirror/snooze before the guard and the live query after — the rebuild needs a live window + config to execute; the mirror round-trip itself is asserted behaviourally; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn discarded_rebuilds_query_neither_the_window_nor_a_config_clone() {
         // The mirror is the key's source and round-trips.
@@ -1999,6 +2174,9 @@ mod tests {
     /// close-to-tray guard reads.
     ///
     /// The panic message this test provokes is expected output.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tray-build panic guard wiring — that setup_tray guards the build and exposes tray_available — the guard behaviour itself is driven directly; only the setup_tray call-site wiring is pinned textually; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn a_missing_tray_library_is_an_error_not_a_panic() {
         let err = guard_tray_panic("tray icon", || -> Result<(), String> {
@@ -2042,6 +2220,9 @@ mod tests {
     /// is what makes the item invert in a dark bar and dim with the bar for a
     /// modal. The tray used `default_window_icon()`, the full-colour 32/128 px
     /// application icon, which is why the item was oversized and ignored the tint.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the platform icon wiring — that setup uses the template glyph on macOS and the app icon elsewhere — setup_tray needs a live Tauri App; the glyph bytes and RGBA mapping are asserted behaviourally above; scoped to its own
+    /// fn body so prose elsewhere cannot satisfy it.
     #[test]
     fn the_menu_bar_icon_is_a_monochrome_template_at_menu_bar_size() {
         // The glyph is a square bitmap of ink and transparency, and it is a mark
