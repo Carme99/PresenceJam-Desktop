@@ -20,12 +20,14 @@
 <section class="card pane-card">
   <header class="section-header">
     <h2>{title}</h2>
-    {#if resetLabel !== undefined && onreset !== undefined}
+    {#if (resetLabel !== undefined && onreset !== undefined) || actions !== undefined}
       <span class="section-actions">
         {#if actions !== undefined}
           {@render actions()}
         {/if}
+        {#if resetLabel !== undefined && onreset !== undefined}
         <button type="button" class="btn-link" onclick={onreset}>{resetLabel}</button>
+        {/if}
       </span>
     {/if}
   </header>

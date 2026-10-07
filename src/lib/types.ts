@@ -76,7 +76,6 @@ export type { ManualStatus } from './types-generated/ManualStatus';
 export type { ManualStatusUpdated } from './types-generated/ManualStatusUpdated';
 export type { SpotifySecretConflict } from './types-generated/SpotifySecretConflict';
 export type { ConfigChanged } from './types-generated/ConfigChanged';
-export type { TeamsReconnectRequired } from './types-generated/TeamsReconnectRequired';
 export type { AuthPersistWarning } from './types-generated/AuthPersistWarning';
 
 /**
@@ -90,3 +89,6 @@ export interface LogPayload {
   level: number;
   message: string;
 }
+
+export type { PresenceProfile } from './types-generated/PresenceProfile';
+

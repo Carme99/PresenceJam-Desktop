@@ -2117,6 +2117,196 @@ describe('Settings CSS token contracts (#741, #904)', () => {
  * Reset path), Logging, Backup and Shortcuts — instead of only inside the
  * whole page. Fails pre-fix: the components do not exist.
  */
+describe('Settings extracted cards slice 2 (#750)', () => {
+  it('mounts PollingCard alone and resets to defaults', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: PollingCard } = await import('$lib/components/settings/PollingCard.svelte');
+    const polling = structuredClone(defaultConfig.polling);
+    polling.minimum_interval_seconds = 25;
+    polling.max_interval_seconds = 20;
+    let resetCalled = false;
+    const result = render(PollingCard, { polling, onreset: () => { resetCalled = true; } });
+    await tick();
+    expect(result.container.querySelector('#min-interval')).not.toBeNull();
+    expect(result.container.querySelector('#max-interval')).not.toBeNull();
+    // min > max surfaces the clamp hint…
+    expect(result.container.querySelector('.clamp-hint')).not.toBeNull();
+    // …and Reset delegates to the parent callback.
+    const reset = [...result.container.querySelectorAll('button.btn-link')].find(
+      (b) => b.textContent?.trim() === t('common.resetToDefault')
+    ) as HTMLButtonElement;
+    await fireEvent.click(reset);
+    expect(resetCalled).toBe(true);
+  });
+
+  it('mounts NotificationsCard alone and toggles a class', async () => {
+    const { notificationPreferences } = await import('$lib/stores/notifications');
+    const { default: NotificationsCard } =
+      await import('$lib/components/settings/NotificationsCard.svelte');
+    const result = render(NotificationsCard, {});
+    await tick();
+    const toggle = result.container.querySelector('#notifications-track_change') as HTMLInputElement;
+    expect(toggle).not.toBeNull();
+    const before = get(notificationPreferences).track_change;
+    await fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(get(notificationPreferences).track_change).toBe(!before);
+    });
+  });
+
+  it('mounts AppearanceCard alone and switches the theme', async () => {
+    const { default: AppearanceCard } =
+      await import('$lib/components/settings/AppearanceCard.svelte');
+    const cfg = structuredClone(defaultConfig);
+    let saveMsg = '';
+    let followSys = false;
+    const result = render(AppearanceCard, {
+      locale: cfg.locale,
+      autostart: cfg.autostart,
+      saveMessage: saveMsg,
+      followSystemChecked: followSys,
+      onreset: () => {},
+      onchange: () => {}
+    });
+    await tick();
+    const system = [...result.container.querySelectorAll('button.theme-card')].find(
+      (b) => b.textContent?.includes(t('settings.themeSystem'))
+    ) as HTMLButtonElement;
+    expect(system).not.toBeUndefined();
+    await fireEvent.click(system);
+    await tick();
+    expect(get(theme)).toBe('system');
+  });
+
+  it('mounts UpdatesCard alone and switches the channel', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: UpdatesCard } = await import('$lib/components/settings/UpdatesCard.svelte');
+    const updates = structuredClone(defaultConfig.updates);
+    const result = render(UpdatesCard, { updates });
+    await tick();
+    const select = result.container.querySelector('#update-channel') as HTMLSelectElement;
+    expect(select).not.toBeNull();
+    await fireEvent.change(select, { target: { value: 'beta' } });
+    await tick();
+    expect(updates.channel).toBe('beta');
+  });
+
+  it('mounts PresenceCard alone and resets to defaults', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: PresenceCard } = await import('$lib/components/settings/PresenceCard.svelte');
+    const teams = structuredClone(defaultConfig.teams);
+    let resetCalled = false;
+    const result = render(PresenceCard, { teams, onreset: () => { resetCalled = true; } });
+    await tick();
+    expect(result.container.querySelector('#availability-sync')).not.toBeNull();
+    expect(result.container.querySelector('#idle-away-after-seconds')).not.toBeNull();
+    const reset = [...result.container.querySelectorAll('button.btn-link')].find(
+      (b) => b.textContent?.trim() === t('common.resetToDefault')
+    ) as HTMLButtonElement;
+    await fireEvent.click(reset);
+    expect(resetCalled).toBe(true);
+  });
+
+  it('mounts StatusFormatCard alone and edits the template', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: StatusFormatCard } =
+      await import('$lib/components/settings/StatusFormatCard.svelte');
+    const teams = structuredClone(defaultConfig.teams);
+    teams.status_format = 'custom {artist}';
+    let resetCalled = false;
+    const result = render(StatusFormatCard, {
+      teams,
+      extraWordsText: '',
+      placeholderDisplay: 'custom {artist}',
+      previewText: 'preview',
+      previewProfaneSample: false,
+      onreset: () => { resetCalled = true; },
+      onExtraWordsInput: (_v: string) => {},
+      onProfaneSampleChange: (_v: boolean) => {}
+    });
+    await tick();
+    const input = result.container.querySelector('#status-format') as HTMLInputElement;
+    expect(input.value).toBe('custom {artist}');
+    await fireEvent.input(input, { target: { value: 'next {track}' } });
+    await tick();
+    expect(teams.status_format).toBe('next {track}');
+    const reset = [...result.container.querySelectorAll('button.btn-link')].find(
+      (b) => b.textContent?.trim() === t('common.resetToDefault')
+    ) as HTMLButtonElement;
+    await fireEvent.click(reset);
+    expect(resetCalled).toBe(true);
+  });
+
+  it('mounts ProfilesCard alone and adds a profile', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: ProfilesCard } = await import('$lib/components/settings/ProfilesCard.svelte');
+    const profiles: typeof defaultConfig.presence_profiles = [];
+    let active: string | null = null;
+    const cfg0 = structuredClone(defaultConfig);
+    const result = render(ProfilesCard, {
+      presenceProfiles: profiles,
+      activeProfile: active,
+      teams: cfg0.teams,
+      saveMessage: ''
+    });
+    await tick();
+    const add = [...result.container.querySelectorAll('button.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('profiles.addProfile')
+    ) as HTMLButtonElement;
+    await fireEvent.click(add);
+    await tick();
+    expect(profiles.length).toBe(1);
+    expect(profiles[0].name).toBe('Profile 1');
+  });
+
+  it('mounts SpotifyCard alone and reconnects', async () => {
+    const { defaultConfig } = await import('$lib/stores/config');
+    const { default: SpotifyCard } = await import('$lib/components/settings/SpotifyCard.svelte');
+    const spotify = structuredClone(defaultConfig.spotify);
+    spotify.client_id = 'test-client-id';
+    const result = render(SpotifyCard, {
+      spotify,
+      isConnected: true,
+      waiting: false,
+      playbackScopeMissing: false,
+      secretConflict: false,
+      detached: false,
+      onReconnect: () => {},
+      onGoToOnboarding: () => {},
+      onRestartSignIn: () => {},
+      onForwardToMain: () => {}
+    });
+    await tick();
+    expect(result.container.querySelector('#spotify-client-id')).not.toBeNull();
+    const btn = [...result.container.querySelectorAll('button.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('settings.reconnectSpotify')
+    ) as HTMLButtonElement;
+    expect(btn).not.toBeUndefined();
+  });
+
+  it('mounts TeamsCard alone and reconnects', async () => {
+    const { default: TeamsCard } = await import('$lib/components/settings/TeamsCard.svelte');
+    let reconnected = false;
+    const result = render(TeamsCard, {
+      teamsConnected: false,
+      waiting: false,
+      remainingMs: null,
+      codeExpired: false,
+      scopesMissing: false,
+      onReconnect: () => { reconnected = true; },
+      onReconnectSpotify: () => {},
+      onCheckNow: () => {}
+    });
+    await tick();
+    const btn = [...result.container.querySelectorAll('button.btn-secondary')].find(
+      (b) => b.textContent?.trim() === t('reconnect.reconnectTeams')
+    ) as HTMLButtonElement;
+    expect(btn).not.toBeUndefined();
+    await fireEvent.click(btn);
+    expect(reconnected).toBe(true);
+  });
+});
+
 describe('Settings extracted cards (#750)', () => {
   it('mounts RulesCard alone and resets to defaults', async () => {
     const { defaultConfig } = await import('$lib/stores/config');
