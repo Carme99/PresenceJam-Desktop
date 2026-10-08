@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use super::*;
-use crate::i18n::{self, Strings};
+use crate::i18n::Strings;
 use crate::menu::{ID_ABOUT, ID_OPEN_LOGS, ID_QUIT, ID_SETTINGS, ID_SHOW_DASHBOARD, ID_SHOW_LOGS};
 use std::time::{Duration, Instant};
 use tauri::{
@@ -119,8 +119,8 @@ pub fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Opt
 pub fn build_devices_submenu_from_devices(
     app: &AppHandle,
     devices: &[crate::spotify::DeviceInfo],
+    s: &Strings,
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let s = i18n::current();
     let submenu = Submenu::with_id(app, ID_DEVICES, s.devices, true).map_err(|e| e.to_string())?;
     if devices.is_empty() {
         let empty = MenuItemBuilder::with_id(format!("{}|none", ID_DEVICES), s.no_devices)
@@ -158,8 +158,8 @@ pub fn build_devices_submenu_from_devices(
 pub fn build_queue_submenu_from_queue(
     app: &AppHandle,
     queue: Option<&crate::spotify::QueueInfo>,
+    s: &Strings,
 ) -> Result<Submenu<tauri::Wry>, String> {
-    let s = i18n::current();
     let submenu = Submenu::with_id(app, ID_QUEUE, s.up_next, true).map_err(|e| e.to_string())?;
     let up_next: Vec<crate::spotify::TrackInfo> = queue
         .map(|q| q.up_next.iter().take(3).cloned().collect())

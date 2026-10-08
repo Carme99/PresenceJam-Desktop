@@ -8,7 +8,7 @@ use crate::AppState;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 #[cfg(unix)]
@@ -1011,7 +1011,10 @@ pub async fn import_config(
 /// throttled Spotify caches and re-fetches devices/queue; the language is what
 /// the cache does not hold, so no other save needs to pay for it.
 fn sync_native_locale(app: &AppHandle, persisted: &AppConfig) {
-    if !crate::i18n::install_from_config(persisted) {
+    let Some(state) = app.try_state::<Arc<AppState>>() else {
+        return;
+    };
+    if !state.locale.install_from_config(persisted) {
         return;
     }
     if let Err(e) = crate::menu::rebuild_app_menu(app) {
@@ -1213,8 +1216,8 @@ mod tests {
 
         let sync = body_of(prod, "fn sync_native_locale(");
         assert!(
-            sync.contains("i18n::install_from_config("),
-            "the sync helper must install the persisted locale"
+            sync.contains("state.locale.install_from_config("),
+            "the sync helper must install the persisted locale on the owned table"
         );
         assert!(
             sync.contains("menu::rebuild_app_menu("),

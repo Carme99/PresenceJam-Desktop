@@ -1,6 +1,5 @@
 //! System tray menu (mod.rs keeps the shell; #756 split the concerns out).
 use crate::events::PlaybackStateChanged;
-use crate::i18n;
 use crate::menu::{ID_ABOUT, ID_OPEN_LOGS, ID_QUIT, ID_SETTINGS, ID_SHOW_DASHBOARD, ID_SHOW_LOGS};
 use std::borrow::Cow;
 use std::sync::atomic::Ordering;
@@ -752,7 +751,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // immediately following `update_tray_menu`) already carry the right
     // labels; an unknown/absent value installs English.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    crate::i18n::install_from_app_state(state.inner());
+    state.locale.install_from_config_value(state.inner());
     // 4.7.0 (S9 / issue #677): the startup cleanup for a snooze deadline that
     // expired while the app was closed. Runs before the first menu build so the
     // tray never renders a state the config no longer holds, and only writes
@@ -1055,9 +1054,9 @@ pub(crate) fn rebuild_tray_menu(
     // Build menu items without holding the tray write lock. Only the final
     // tray.set_menu call needs serialising — everything above is pure data
     // preparation and menu-item construction.
-    // Issue #674: every label below comes from the installed i18n table, so a
+    // Issue #674: every label below comes from the owned i18n table, so a
     // language switch only has to rebuild the menu.
-    let s = i18n::current();
+    let s = state.locale.strings();
     // Determine Show/Hide label based on the precomputed visibility.
     let show_hide_label = if is_window_visible {
         s.hide_window
@@ -1278,14 +1277,14 @@ pub(crate) fn rebuild_tray_menu(
         e.to_string()
     })?;
 
-    let devices_submenu = build_devices_submenu_from_devices(app, &devices).map_err(|e| {
+    let devices_submenu = build_devices_submenu_from_devices(app, &devices, s).map_err(|e| {
         log::warn!(
             "[TRAY] update_tray_menu: failed to build devices submenu: {}",
             e
         );
         e
     })?;
-    let queue_submenu = build_queue_submenu_from_queue(app, queue.as_ref()).map_err(|e| {
+    let queue_submenu = build_queue_submenu_from_queue(app, queue.as_ref(), s).map_err(|e| {
         log::warn!(
             "[TRAY] update_tray_menu: failed to build queue submenu: {}",
             e

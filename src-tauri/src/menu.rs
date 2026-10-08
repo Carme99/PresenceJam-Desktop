@@ -94,13 +94,15 @@ pub fn request_graceful_shutdown(app: &AppHandle) {
 /// ([`setup_app_menu`], which holds a `&App`) and a live locale change
 /// ([`rebuild_app_menu`], which holds an `&AppHandle`) — issue #674.
 ///
-/// Every label comes from [`crate::i18n::current`]; the Edit menu's
-/// Undo/Redo/Cut/Copy/Paste/Select All entries are `PredefinedMenuItem`s built
-/// with no text, so the platform localizes those itself.
+/// Every label comes from the owned [`crate::i18n::LocaleState`] table passed
+/// in; the Edit menu's Undo/Redo/Cut/Copy/Paste/Select All entries are
+/// `PredefinedMenuItem`s built with no text, so the platform localizes those
+/// itself.
 pub fn build_app_menu<R: Runtime, M: Manager<R>>(
     manager: &M,
+    locale: &crate::i18n::LocaleState,
 ) -> Result<tauri::menu::Menu<R>, String> {
-    let s = crate::i18n::current();
+    let s = locale.strings();
 
     // The app's own Quit item, shared by both layouts (see the File menu below).
     let quit_item = MenuItemBuilder::with_id(ID_QUIT, s.menu_quit)
@@ -279,8 +281,8 @@ pub fn setup_app_menu(app: &tauri::App, _window: &WebviewWindow) -> Result<(), S
     // labels are read. `setup_tray` does the same, so the menu stays correct
     // even when the tray failed to initialise.
     let state = app.state::<std::sync::Arc<crate::AppState>>();
-    crate::i18n::install_from_app_state(state.inner());
-    let menu = build_app_menu(app)?;
+    state.locale.install_from_config_value(state.inner());
+    let menu = build_app_menu(app, &state.locale)?;
     apply_app_menu(app.handle(), menu)?;
     log::info!("[MENU] setup_app_menu: app menu bar created successfully");
     Ok(())
@@ -289,7 +291,8 @@ pub fn setup_app_menu(app: &tauri::App, _window: &WebviewWindow) -> Result<(), S
 /// Rebuilds the application menu bar for the newly installed locale (issue
 /// #674), so switching language relabels the native menu without a restart.
 pub fn rebuild_app_menu(app: &AppHandle) -> Result<(), String> {
-    let menu = build_app_menu(app)?;
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let menu = build_app_menu(app, &state.locale)?;
     apply_app_menu(app, menu)?;
     log::info!("[MENU] rebuild_app_menu: app menu bar relabelled for the new locale");
     Ok(())

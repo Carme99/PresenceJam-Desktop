@@ -739,23 +739,13 @@ fn apply_placeholder(template: &str, is_playing: bool) -> String {
 /// `extra_words` is the user's own lexicon (`teams.profanity_extra_words`,
 /// issue #538): it is matched with the same boundary/evasion rules as the
 /// built-in list (see [`contains_extra_word`]).
-pub fn filter_status(
-    text: &str,
-    placeholder: &str,
-    is_playing: bool,
-    extra_words: &[String],
-) -> String {
-    filter_status_for_locale(
-        text,
-        placeholder,
-        is_playing,
-        extra_words,
-        Some(crate::i18n::current_tag()),
-    )
-}
-
-/// Locale-explicit form used by the polling write path, whose config snapshot
-/// is authoritative even while another native surface is repainting.
+///
+/// The single locale-explicit form (issue #758 slice 3): every caller passes
+/// the locale its own config snapshot carries, so no process-wide table is
+/// consulted. Polling (`polling/write.rs`), the CLI (`cli.rs`), the status
+/// commands (`commands/status.rs`), and the Settings preview
+/// (`commands/misc.rs`) already pass theirs; the deleted `filter_status`
+/// wrapper (which read the global) had no production caller left.
 pub fn filter_status_for_locale(
     text: &str,
     placeholder: &str,
@@ -781,8 +771,8 @@ pub fn filter_status_for_locale(
 mod tests {
     use super::*;
 
-    /// Existing English behavior tests use an explicit locale so a parallel
-    /// native-locale test cannot change their result through process state.
+    /// Existing English behavior tests pin the explicit English locale (issue
+    /// #758 slice 3: there is no process-wide table left to race).
     fn filter_status(
         text: &str,
         placeholder: &str,
@@ -968,17 +958,12 @@ mod tests {
             "Eigener Status"
         );
 
-        let _serialised = crate::i18n::LOCALE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::i18n::set_current(Some("de"));
         assert_eq!(
-            super::filter_status("fuck", "", true, &[]),
+            filter_status_for_locale("fuck", "", true, &[], Some("de")),
             "Hört gerade Spotify"
         );
-        crate::i18n::set_current(None);
         assert_eq!(
-            super::filter_status("fuck", "", true, &[]),
+            filter_status_for_locale("fuck", "", true, &[], None),
             SAFE_PLACEHOLDER_DEFAULT
         );
     }

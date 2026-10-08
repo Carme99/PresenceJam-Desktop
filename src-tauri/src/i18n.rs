@@ -658,66 +658,83 @@ pub fn strings_for(tag: &str) -> &'static Strings {
     }
 }
 
-/// Canonical tag of the process-wide installed table.
-pub fn current_tag() -> &'static str {
-    let index = CURRENT.load(Ordering::Relaxed) as usize % LOCALES.len();
-    LOCALES[index]
+/// The installed locale table, owned by one [`crate::AppState`] (issue #758
+/// slice 3). Two states hold two indices, so two builders can install two
+/// languages and render two tables — a single process-wide static could
+/// never do that.
+pub struct LocaleState {
+    index: AtomicU8,
 }
 
-/// Index into [`LOCALES`] of the locale the native surfaces render in.
-/// `AppConfig::locale` remains the source of truth; this mirrors the resolved
-/// tag so the menu builders on paths without config access stay cheap.
-static CURRENT: AtomicU8 = AtomicU8::new(0);
+impl LocaleState {
+    pub fn new() -> Self {
+        Self {
+            index: AtomicU8::new(0),
+        }
+    }
 
-/// Installs `locale` process-wide and returns the canonical tag it resolved
-/// to. Callers persist that tag, so the stored value and the rendered tables
-/// cannot disagree.
-pub fn set_current(locale: Option<&str>) -> &'static str {
-    let tag = resolve_tag(locale);
-    let index = LOCALES.iter().position(|known| *known == tag).unwrap_or(0) as u8;
-    CURRENT.store(index, Ordering::Relaxed);
-    tag
+    /// Canonical tag of the installed table.
+    pub fn tag(&self) -> &'static str {
+        let index = self.index.load(Ordering::Relaxed) as usize % LOCALES.len();
+        LOCALES[index]
+    }
+
+    /// The installed table — what every tray/menu build renders from.
+    pub fn strings(&self) -> &'static Strings {
+        let index = self.index.load(Ordering::Relaxed) as usize % LOCALES.len();
+        strings_for(LOCALES[index])
+    }
+
+    /// Installs `locale` on this state and returns the canonical tag it
+    /// resolved to. Callers persist that tag, so the stored value and the
+    /// rendered tables cannot disagree.
+    pub fn install(&self, locale: Option<&str>) -> &'static str {
+        let tag = resolve_tag(locale);
+        let index = LOCALES.iter().position(|known| *known == tag).unwrap_or(0) as u8;
+        self.index.store(index, Ordering::Relaxed);
+        tag
+    }
+
+    /// Installs the locale stored in the `AppState` config that owns this
+    /// table. A missing config (before the startup load) or a pre-4.7 file
+    /// keeps English. Idempotent, so the tray and app-menu setup can both
+    /// call it.
+    pub fn install_from_config_value(&self, state: &crate::AppState) -> &'static str {
+        let locale = state
+            .config
+            .get()
+            .as_ref()
+            .and_then(|cfg| cfg.locale.clone());
+        self.install(locale.as_deref())
+    }
+
+    /// Installs the locale of a just-persisted config on this state and
+    /// reports whether that changed the installed table.
+    ///
+    /// `true` means the native surfaces render different labels from now on
+    /// and must be repainted; `false` means the config write did not touch
+    /// the language (the common case for every other field), so no rebuild
+    /// is warranted.
+    ///
+    /// Every config write path converges through this — the `set_locale`
+    /// command and `after_persist`, which the generic save/update/import
+    /// paths share — so a locale arriving through an imported config cannot
+    /// leave the tray and the app menu in the previous language (4.7.0,
+    /// issue #674).
+    pub fn install_from_config(&self, cfg: &crate::config::AppConfig) -> bool {
+        let previous = self.index.load(Ordering::Relaxed);
+        self.install(cfg.locale.as_deref());
+        self.index.load(Ordering::Relaxed) != previous
+    }
 }
 
-/// The installed table — what every tray/menu build renders from.
-pub fn current() -> &'static Strings {
-    let index = CURRENT.load(Ordering::Relaxed) as usize % LOCALES.len();
-    strings_for(LOCALES[index])
+impl Default for LocaleState {
+    /// Required by `clippy::new_without_default`. `Default::default()`
+    /// installs English, identical to `LocaleState::new()`.
+    fn default() -> Self {
+        Self::new()
+    }
 }
-
-/// Installs the locale stored in the mounted [`crate::AppState`] config.
-/// A missing config (before the startup load) or a pre-4.7 file keeps English.
-/// Idempotent, so the tray and app-menu setup can both call it.
-pub fn install_from_app_state(state: &crate::AppState) -> &'static str {
-    let locale = state
-        .config
-        .get()
-        .as_ref()
-        .and_then(|cfg| cfg.locale.clone());
-    set_current(locale.as_deref())
-}
-
-/// Installs the locale of a just-persisted config and reports whether that
-/// changed the installed table.
-///
-/// `true` means the native surfaces render different labels from now on and
-/// must be repainted; `false` means the config write did not touch the language
-/// (the common case for every other field), so no rebuild is warranted.
-///
-/// Every config write path converges through this — the `set_locale` command
-/// and `after_persist`, which the generic save/update/import paths share — so a
-/// locale arriving through an imported config cannot leave the tray and the app
-/// menu in the previous language (4.7.0, issue #674).
-pub fn install_from_config(cfg: &crate::config::AppConfig) -> bool {
-    let previous = CURRENT.load(Ordering::Relaxed);
-    set_current(cfg.locale.as_deref());
-    CURRENT.load(Ordering::Relaxed) != previous
-}
-
-/// Serialises the tests that install a process-wide table, so a test asserting
-/// `current()` cannot observe another test's locale.
-#[cfg(test)]
-pub(crate) static LOCALE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 impl Strings {
@@ -1227,20 +1244,18 @@ mod tests {
         );
     }
 
-    /// The tray/menu builders read [`current`], which is installed from the
-    /// mounted config — this is the startup path in one test.
+    /// The tray/menu builders render from the owned [`LocaleState`], which is
+    /// installed from the mounted config — this is the startup path in one
+    /// test.
     #[test]
-    fn install_from_app_state_selects_the_table() {
-        let _serialised = LOCALE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn install_from_config_value_selects_the_table() {
         let state = crate::AppState::new();
         assert_eq!(
-            install_from_app_state(&state),
+            state.locale.install_from_config_value(&state),
             "en",
             "before the config load there is no locale, so English"
         );
-        assert_eq!(current().show_window, EN.show_window);
+        assert_eq!(state.locale.strings().show_window, EN.show_window);
 
         {
             let mut guard = state.config.get_mut();
@@ -1249,11 +1264,11 @@ mod tests {
                 ..Default::default()
             }));
         }
-        assert_eq!(install_from_app_state(&state), "de");
+        assert_eq!(state.locale.install_from_config_value(&state), "de");
         assert_eq!(
-            current().show_window,
+            state.locale.strings().show_window,
             DE.show_window,
-            "the installed locale must reach the builders through `current()`"
+            "the installed locale must reach the builders through the owned table"
         );
 
         {
@@ -1263,11 +1278,8 @@ mod tests {
                 ..Default::default()
             }));
         }
-        assert_eq!(install_from_app_state(&state), "en");
-        assert_eq!(current().show_window, EN.show_window);
-
-        // Leave the process-wide table on English for the other tests.
-        set_current(None);
+        assert_eq!(state.locale.install_from_config_value(&state), "en");
+        assert_eq!(state.locale.strings().show_window, EN.show_window);
     }
 
     /// Every config write path converges on this helper (4.7.0, issue #674):
@@ -1275,33 +1287,57 @@ mod tests {
     /// visible surfaces actually need relabelling.
     #[test]
     fn install_from_config_reports_only_real_locale_changes() {
-        let _serialised = LOCALE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = crate::AppState::new();
         let cfg = |locale: Option<&str>| crate::config::AppConfig {
             locale: locale.map(str::to_string),
             ..Default::default()
         };
 
         assert!(
-            install_from_config(&cfg(Some("de"))),
+            state.locale.install_from_config(&cfg(Some("de"))),
             "switching to a new locale must ask for a repaint"
         );
-        assert_eq!(current().show_window, DE.show_window);
+        assert_eq!(state.locale.strings().show_window, DE.show_window);
         assert!(
-            !install_from_config(&cfg(Some("de"))),
+            !state.locale.install_from_config(&cfg(Some("de"))),
             "the same locale again must not rebuild the menus"
         );
-        assert!(install_from_config(&cfg(Some("fr"))));
+        assert!(state.locale.install_from_config(&cfg(Some("fr"))));
         assert!(
-            install_from_config(&cfg(None)),
+            state.locale.install_from_config(&cfg(None)),
             "clearing the field is a change back to the English default"
         );
         assert!(
-            !install_from_config(&cfg(None)),
+            !state.locale.install_from_config(&cfg(None)),
             "the English default is stable"
         );
-        assert_eq!(current().show_window, EN.show_window);
+        assert_eq!(state.locale.strings().show_window, EN.show_window);
+    }
+
+    /// Issue #758 slice 3 (final): two `AppState`s hold two locale tables.
+    /// Installing German on one and French on the other renders the German
+    /// table from the first and the French table from the second, with
+    /// neither observing the other. Fails pre-fix by construction: a single
+    /// process-wide `CURRENT` static cannot hold two locales at once, so the
+    /// second install would overwrite the first.
+    #[test]
+    fn two_app_states_do_not_share_the_locale_table() {
+        let first = crate::AppState::new();
+        let second = crate::AppState::new();
+        assert_eq!(first.locale.install(Some("de")), "de");
+        assert_eq!(second.locale.install(Some("fr")), "fr");
+        assert_eq!(
+            first.locale.strings().show_window,
+            DE.show_window,
+            "the first state must keep rendering German after the second installs French"
+        );
+        assert_eq!(
+            second.locale.strings().show_window,
+            FR.show_window,
+            "the second state must render French"
+        );
+        assert_eq!(first.locale.tag(), "de");
+        assert_eq!(second.locale.tag(), "fr");
     }
 
     /// Issue #843: scan forward, not only for table values reappearing in the
@@ -1337,7 +1373,7 @@ mod tests {
     #[test]
     fn native_literal_scanner_rejects_translated_copy_and_accepts_field_reference() {
         let source = r#"
-            let s = crate::i18n::current();
+            let s = state.locale.strings();
             MenuItemBuilder::with_id(ID_KNOWN_ACTION, s.next);
             MenuItemBuilder::with_id(ID_ENGLISH_ACTION, "Next");
             MenuItemBuilder::with_id(ID_FRENCH_ACTION, "Suivant");
@@ -1376,7 +1412,7 @@ mod tests {
             /* "Block-commented copy"
                /* nested "still commented" */
             */
-            let s = crate::i18n::current();
+            let s = state.locale.strings();
             MenuItemBuilder::with_id(ID_KNOWN_ACTION, s.next);
         "#;
 
