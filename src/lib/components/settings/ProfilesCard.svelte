@@ -12,13 +12,16 @@
     teams: AppConfig['teams'];
     /** Shared save-message channel (duplicate/missing-name feedback). */
     saveMessage: string;
+    /** Dirty-mark callback: the parent's `markDirty` (button edits bypass oninput). */
+    onchange: () => void;
   }
 
   let {
     presenceProfiles = $bindable(),
     activeProfile = $bindable(),
     teams,
-    saveMessage = $bindable()
+    saveMessage = $bindable(),
+    onchange
   }: Props = $props();
 
   // Issue #869: presence-profile bounds mirror `clamp_presence_profiles`.
@@ -100,6 +103,7 @@
             if (activeProfile === profile.name) {
               activeProfile = null;
             }
+            onchange();
           }}
         >{t('profiles.removeProfile')}</button>
       </div>
@@ -201,6 +205,7 @@
         n += 1;
       }
       presenceProfiles.push({ name: defaultProfileName(n) });
+      onchange();
     }}
   >{t('profiles.addProfile')}</button>
 </SettingsCard>

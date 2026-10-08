@@ -175,13 +175,5 @@
     word-break: break-word;
     min-height: 40px;
   }
-  .clamp-hint {
-    margin: 0;
-    padding: var(--sp-2) var(--sp-3);
-    background: var(--warning-soft);
-    color: var(--warning);
-    border-radius: var(--r-md);
-    font-size: var(--fs-xs);
-    line-height: var(--lh-normal);
-  }
+  /* #750 slice 2: `.clamp-hint` lives in app.css now — this copy deleted. */
 </style>

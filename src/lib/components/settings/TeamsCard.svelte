@@ -21,6 +21,8 @@
     onReconnect: () => void;
     /** Spotify reconnect: the #932 banner routes by provider discriminator. */
     onReconnectSpotify: () => void;
+    /** Whether the Spotify flow is waiting (routes the retry `disabled`). */
+    spotifyWaiting: boolean;
     /** Post-success poll owned by the parent (marks connected on success). */
     onCheckNow: () => void;
   }
@@ -33,6 +35,7 @@
     scopesMissing,
     onReconnect,
     onReconnectSpotify,
+    spotifyWaiting,
     onCheckNow
   }: Props = $props();
 
@@ -47,22 +50,25 @@
   function reconnectFor(provider: 'teams' | 'spotify' | string): {
     label: string;
     handler: () => void;
+    waiting: boolean;
   } {
     const target = pickReconnectProvider(provider);
     if (target === 'teams') {
-      return { label: t('settings.sectionTeams'), handler: onReconnect };
+      return { label: t('settings.sectionTeams'), handler: onReconnect, waiting };
     }
-    return { label: t('settings.sectionSpotify'), handler: onReconnectSpotify };
+    return { label: t('settings.sectionSpotify'), handler: onReconnectSpotify, waiting: spotifyWaiting };
   }
 </script>
 
 <SettingsCard title={t('settings.sectionTeams')}>
-  <span class="badge" class:success={teamsConnected && !waiting}
-        class:warning={waiting}
-        class:error={!teamsConnected && !waiting}>
-    <span class="dot"></span>
-    {#if waiting}{t('common.reconnecting')}{:else if teamsConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
-  </span>
+  {#snippet actions()}
+    <span class="badge" class:success={teamsConnected && !waiting}
+          class:warning={waiting}
+          class:error={!teamsConnected && !waiting}>
+      <span class="dot"></span>
+      {#if waiting}{t('common.reconnecting')}{:else if teamsConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
+    </span>
+  {/snippet}
   <p class="hint">{t('settings.teamsAuthHint')}</p>
   <div class="connection-row">
     {#if teamsConnected && !waiting}
@@ -116,7 +122,7 @@
         type="button"
         class="btn-link"
         onclick={reconnect.handler}
-        disabled={waiting}
+        disabled={reconnect.waiting}
       >{t('common.reconnect')}</button>
       <button type="button" class="btn-link dismiss" onclick={clearAuthPersistWarning}>{t('common.dismiss')}</button>
     </div>

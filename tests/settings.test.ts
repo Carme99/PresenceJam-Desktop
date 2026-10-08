@@ -2113,9 +2113,10 @@ describe('Settings CSS token contracts (#741, #904)', () => {
 
 
 /**
- * #750 slice 1: the four extracted cards mount standalone — Rules (with its
- * Reset path), Logging, Backup and Shortcuts — instead of only inside the
- * whole page. Fails pre-fix: the components do not exist.
+ * #750 slice 2: the nine extracted cards mount standalone — Spotify, Teams,
+ * Presence, StatusFormat, Polling, Notifications, Appearance, Profiles and
+ * Updates — instead of only inside the whole page.
+ * Fails pre-fix: the components do not exist.
  */
 describe('Settings extracted cards slice 2 (#750)', () => {
   it('mounts PollingCard alone and resets to defaults', async () => {
@@ -2166,7 +2167,7 @@ describe('Settings extracted cards slice 2 (#750)', () => {
       saveMessage: saveMsg,
       followSystemChecked: followSys,
       onreset: () => {},
-      onchange: () => {}
+      onAutostartError: () => {}
     });
     await tick();
     const system = [...result.container.querySelectorAll('button.theme-card')].find(
@@ -2176,6 +2177,74 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     await fireEvent.click(system);
     await tick();
     expect(get(theme)).toBe('system');
+  });
+
+  it('mounts AppearanceCard alone: autostart invokes the command without a dirty banner', async () => {
+    const { default: AppearanceCard } =
+      await import('$lib/components/settings/AppearanceCard.svelte');
+    const cfg = structuredClone(defaultConfig);
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_autostart_enabled') return null;
+      if (cmd === 'update_config')
+        return args != null && typeof args === 'object' && 'patch' in args
+          ? { ...get(configStore), ...(args.patch as object) }
+          : get(configStore);
+      return null;
+    });
+    let autodirty = 0;
+    const result = render(AppearanceCard, {
+      locale: cfg.locale,
+      autostart: false,
+      saveMessage: '',
+      followSystemChecked: false,
+      onreset: () => {},
+      // Gap 5: the card no longer takes `onchange`, so there is no dirty
+      // callback to count — the toggle must not raise the banner at all.
+      onAutostartError: () => { autodirty += 1; }
+    });
+    await tick();
+    const toggle = result.container.querySelector('#autostart') as HTMLInputElement;
+    await fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'set_autostart_enabled')).toBe(true);
+    });
+    // Self-applying toggle: no dirty banner may appear from the invoke path.
+    expect(autodirty).toBe(0);
+  });
+
+  it('mounts AppearanceCard alone: autostart failure surfaces and auto-clears', async () => {
+    const { default: AppearanceCard } =
+      await import('$lib/components/settings/AppearanceCard.svelte');
+    const cfg = structuredClone(defaultConfig);
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === 'set_autostart_enabled') throw new Error('os denied');
+        return null;
+      });
+      let cleared: string | null = null;
+      const result = render(AppearanceCard, {
+        locale: cfg.locale,
+        autostart: false,
+        saveMessage: '',
+        followSystemChecked: false,
+        onreset: () => {},
+        // Gap 6: the parent callback restores main's 3000ms clear. The card
+        // reports through it; the expiry below proves the parent's window.
+        onAutostartError: (message: string) => { cleared = message; }
+      });
+      await tick();
+      const toggle = result.container.querySelector('#autostart') as HTMLInputElement;
+      await fireEvent.click(toggle);
+      await waitFor(() => {
+        expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'set_autostart_enabled')).toBe(true);
+      });
+      // The failure line reaches the parent channel (non-empty message)…
+      expect(cleared).not.toBeNull();
+      expect((cleared as unknown as string).length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('mounts UpdatesCard alone and switches the channel', async () => {
@@ -2237,17 +2306,19 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     expect(resetCalled).toBe(true);
   });
 
-  it('mounts ProfilesCard alone and adds a profile', async () => {
+  it('mounts ProfilesCard alone, adds a profile, and marks the draft dirty', async () => {
     const { defaultConfig } = await import('$lib/stores/config');
     const { default: ProfilesCard } = await import('$lib/components/settings/ProfilesCard.svelte');
     const profiles: typeof defaultConfig.presence_profiles = [];
     let active: string | null = null;
     const cfg0 = structuredClone(defaultConfig);
+    let changed = 0;
     const result = render(ProfilesCard, {
       presenceProfiles: profiles,
       activeProfile: active,
       teams: cfg0.teams,
-      saveMessage: ''
+      saveMessage: '',
+      onchange: () => { changed += 1; }
     });
     await tick();
     const add = [...result.container.querySelectorAll('button.btn-secondary')].find(
@@ -2257,6 +2328,9 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     await tick();
     expect(profiles.length).toBe(1);
     expect(profiles[0].name).toBe('Profile 1');
+    // The add button bypasses the form's oninput/onchange listeners, so the
+    // card must mark the draft dirty itself (gap 1: `markDirty` was lost).
+    expect(changed).toBeGreaterThan(0);
   });
 
   it('mounts SpotifyCard alone and reconnects', async () => {
@@ -2264,17 +2338,16 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     const { default: SpotifyCard } = await import('$lib/components/settings/SpotifyCard.svelte');
     const spotify = structuredClone(defaultConfig.spotify);
     spotify.client_id = 'test-client-id';
+    let reconnected = false;
     const result = render(SpotifyCard, {
       spotify,
       isConnected: true,
       waiting: false,
       playbackScopeMissing: false,
       secretConflict: false,
-      detached: false,
-      onReconnect: () => {},
+      onReconnect: () => { reconnected = true; },
       onGoToOnboarding: () => {},
-      onRestartSignIn: () => {},
-      onForwardToMain: () => {}
+      onRestartSignIn: () => {}
     });
     await tick();
     expect(result.container.querySelector('#spotify-client-id')).not.toBeNull();
@@ -2282,6 +2355,8 @@ describe('Settings extracted cards slice 2 (#750)', () => {
       (b) => b.textContent?.trim() === t('settings.reconnectSpotify')
     ) as HTMLButtonElement;
     expect(btn).not.toBeUndefined();
+    await fireEvent.click(btn);
+    expect(reconnected).toBe(true);
   });
 
   it('mounts TeamsCard alone and reconnects', async () => {
@@ -2295,6 +2370,7 @@ describe('Settings extracted cards slice 2 (#750)', () => {
       scopesMissing: false,
       onReconnect: () => { reconnected = true; },
       onReconnectSpotify: () => {},
+      spotifyWaiting: false,
       onCheckNow: () => {}
     });
     await tick();

@@ -23,23 +23,16 @@
   import AppearanceCard from './settings/AppearanceCard.svelte';
   import ProfilesCard from './settings/ProfilesCard.svelte';
   import UpdatesCard from './settings/UpdatesCard.svelte';
-  import { shortcutReasonLabel, normalizeShortcutReason } from '$lib/utils/shortcuts';
-  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
+  import { shortcutReasonLabel } from '$lib/utils/shortcuts';
+  import { configStore, saveConfig, loadConfig, defaultConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
-  import DeviceCodeBox from './DeviceCodeBox.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
-  import { pickReconnectProvider } from '$lib/utils/routeReconnect';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
+  import { t, i18n } from '$lib/i18n';
   import { theme, density } from '$lib/stores/theme';
-  import {
-    NOTIFICATION_CLASSES,
-    notificationPreferences,
-    setNotificationPreference,
-    type NotificationClass
-  } from '$lib/stores/notifications';
-  import { presence, clearAuthPersistWarning } from '$lib/stores/presence';
+  import { NOTIFICATION_CLASSES } from '$lib/stores/notifications';
+  import { clearAuthPersistWarning } from '$lib/stores/presence';
   import { devLog } from '$lib/utils/dev';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
@@ -95,20 +88,6 @@
     markDirty();
   }
 
-  // C9: effective polling bounds, mirroring Rust `clamp_polling`
-  // (`config::clamp_polling`): minimum clamps to [5, 30] first, then
-  // maximum clamps to [effectiveMinimum, 300]. Consumed twice — the
-  // max-interval input's native `min` bound (issue #243) and the clamp
-  // hint below it. An entered max below min is silently raised on save;
-  // the hint surfaces that effective value immediately.
-  let pollingClamp = $derived.by(() => {
-    const rawMin = Number(localConfig.polling.minimum_interval_seconds);
-    const rawMax = Number(localConfig.polling.max_interval_seconds);
-    const effMin = Math.min(30, Math.max(5, rawMin));
-    const effMax = Math.min(300, Math.max(effMin, rawMax));
-    return { active: rawMin > rawMax, effMin, effMax };
-  });
-
   // C9: per-section "Reset to default" using the shared defaults source.
   function resetPresenceDefaults() {
     localConfig.teams.availability_sync = defaultConfig.teams.availability_sync;
@@ -158,14 +137,6 @@
     rulesCard?.clearRemoval();
     markDirty();
   }
-  // Issue #869: name for a freshly-added profile. The Rust side dedupes
-  // again on load, so a concurrent edit cannot wedge the form — this is
-  // only the prefix the new-row picker suggests. `Profile` is the prefix
-  // the user can rename, and the trailing number is just a uniqueness
-  // hint until they do.
-  function defaultProfileName(n: number): string {
-    return `Profile ${n}`;
-  }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
     markDirty();
@@ -178,15 +149,6 @@
   // `::clamp_teams`, `::clamp_polling`) instead of silently differing.
   const EXTRA_WORDS_MAX_ENTRIES = 64;
   const EXTRA_WORDS_MAX_CHARS = 32;
-  const PAUSE_BACKOFF_MIN_SECONDS = 60;
-  const PAUSE_BACKOFF_MAX_SECONDS = 3600;
-  // Issue #869: presence-profile bounds mirror `clamp_presence_profiles`.
-  // The Rust side is the source of truth, so these constants exist only to
-  // give the input its `maxlength` / `max` attribute. A user typing past
-  // either is still accepted by Rust, but the form lets them see the
-  // effective value the backend stored rather than the raw keystrokes.
-  const MAX_PROFILE_ID_CHARS = 32;
-  const MAX_PROFILE_IDLE_SECONDS = 86400;
   /**
    * Rust bounds the lexicon to 64 entries of 32 chars at the IPC boundary
    * (issue #538). Counted here so the hint can say what will actually be
@@ -209,15 +171,6 @@
     };
   });
 
-  /** The pause-backoff ceiling a typed value lands on after `clamp_polling`. */
-  let pauseBackoffClamp = $derived.by(() => {
-    const raw = Number(localConfig.polling.pause_backoff_max_seconds);
-    const effective = Math.min(
-      PAUSE_BACKOFF_MAX_SECONDS,
-      Math.max(PAUSE_BACKOFF_MIN_SECONDS, Number.isFinite(raw) ? raw : 300)
-    );
-    return { active: effective !== raw, effective };
-  });
   function resetAppearanceDefaults() {
     theme.set('system');
     density.set('comfortable');
@@ -227,50 +180,6 @@
     markDirty();
   }
 
-  // #552: a radiogroup must own `role="radio"`/`aria-checked` children with a
-  // roving tabindex and arrow-key navigation. The cards declared
-  // `aria-pressed`, which assistive tech ignores inside a radiogroup and
-  // which carries no single-selection contract at all.
-  let themeDarkButton: HTMLButtonElement | undefined = $state();
-  let themeLightButton: HTMLButtonElement | undefined = $state();
-  let themeSystemButton: HTMLButtonElement | undefined = $state();
-
-  // #680: `system` joins the radiogroup, so the arrow-key walk has to cycle
-  // through three cards instead of toggling two.
-  const THEME_OPTIONS = ['dark', 'light', 'system'] as const;
-  type ThemeOption = (typeof THEME_OPTIONS)[number];
-
-  function themeRadioKeydown(e: KeyboardEvent, current: ThemeOption) {
-    const isNext = e.key === 'ArrowRight' || e.key === 'ArrowDown';
-    const isPrev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
-    if (!isNext && !isPrev) return;
-    e.preventDefault();
-    const step = isNext ? 1 : THEME_OPTIONS.length - 1;
-    const next = THEME_OPTIONS[(THEME_OPTIONS.indexOf(current) + step) % THEME_OPTIONS.length];
-    theme.set(next);
-    // Selection follows focus, and the roving tabindex moves with it.
-    const buttons: Record<ThemeOption, HTMLButtonElement | undefined> = {
-      dark: themeDarkButton,
-      light: themeLightButton,
-      system: themeSystemButton
-    };
-    buttons[next]?.focus();
-  }
-
-  // #675: one toggle per desktop-notification class. The store is the shared
-  // state (persisted to `config.json` through `saveConfig`), so a toggle here
-  // reaches the always-mounted main window. #549 still holds: the OS prompt's
-  // answer decides whether a class may notify, and a denied permission must
-  // not leave a checked toggle behind.
-  let notificationsMessage = $state('');
-  // Keys are `TKey`, so a class added on the Rust side cannot be rendered
-  // with a missing dictionary entry.
-  const NOTIFICATION_LABELS: Record<NotificationClass, TKey> = {
-    track_change: 'settings.notificationsTrackChange',
-    sync_stopped: 'settings.notificationsSyncStopped',
-    auth_required: 'settings.notificationsAuthRequired',
-    update_staged: 'settings.notificationsUpdateStaged'
-  };
   // #675: the form's `localConfig` is snapshotted once, but the notification
   // classes are immediate-apply and shared, so a toggle made in the *other*
   // Settings view (a popped-out pane runs beside this one) — or in the main
@@ -332,11 +241,6 @@
   // not have Settings mounted — and the shared `presence` store is what this
   // pane renders from. Settings only displays the fault and offers the retry.
 
-  // #560: the OS keychain's answer about the stored client_secret —
-  // `present` / `absent` / `unavailable`. The credential row must branch on
-  // this rather than on `client_secret_set`, which cannot tell "the user never
-  // configured a secret" from "the keychain would not answer".
-  let spotifySecretState = $derived(clientSecretStateOf(localConfig));
 
   async function refreshGrantedScopes() {
     try {
@@ -587,6 +491,18 @@
     // happened; both save paths (Save and "Save & leave") go through here.
     shortcutsCard?.refreshAfterSave();
   }
+  /**
+   * #750 slice 2: the Appearance autostart toggle is self-applying
+   * (`data-no-draft`), so its failure line arrives outside the save path —
+   * but it shares the `saveMessage` channel the footer renders. Main owned
+   * this through the same `saveTimeout` with a 3000ms clear; the callback
+   * restores that window so a stuck line cannot outlive it.
+   */
+  function handleAutostartError(message: string) {
+    saveMessage = message;
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => saveMessage = '', 3000);
+  }
   // #750: BackupCard owns the dialogs and the status line; the parent only
   // re-snapshots the draft from what is now on disk (the #297 invariant).
   async function handleBackupImported() {
@@ -635,61 +551,6 @@
     }
   }
 
-  // ── #964: the waiting-state escape hatch ────────────────────────────────
-  //
-  // The poller's `spotify-reconnect-required` event lands the user on this
-  // pane with the flow already waiting, so this card is where a lost browser
-  // tab strands them. Reconnect has offered the two ways out since #558; this
-  // is the same pair, reusing its copy.
-  let spotifyManualUrl = $state('');
-  let manualSubmitBusy = $state(false);
-  let manualUrlError = $state('');
-
-  // `reconnectSpotify` refuses a restart while the phase is `waiting`, so the
-  // phase is cleared first and this is not a nested call for its own sake.
-  async function restartSpotifySignIn() {
-    resetSpotifyAuthFlow();
-    await reconnectSpotify();
-  }
-
-  /** Extract `code`/`state` from a pasted Spotify redirect URL. */
-  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
-    try {
-      const parsed = new URL(url);
-      const code = parsed.searchParams.get('code');
-      if (!code) return null;
-      // A missing `state` still passes (empty string) — the backend rejects it,
-      // mirroring the deep-link CSRF check (#162).
-      return { code, state: parsed.searchParams.get('state') ?? '' };
-    } catch {
-      return null;
-    }
-  }
-
-  /** Complete the flow from a pasted redirect URL (the #385 fallback). */
-  async function submitManualUrl() {
-    if (manualSubmitBusy) return;
-    const extracted = extractCodeFromUrl(spotifyManualUrl);
-    if (!extracted) {
-      manualUrlError = t('validation.noCodeInUrl');
-      return;
-    }
-    manualSubmitBusy = true;
-    manualUrlError = '';
-    try {
-      await invoke('complete_spotify_auth_manual', {
-        code: extracted.code,
-        oauthState: extracted.state
-      });
-      setSpotifyPhase('done');
-    } catch (e) {
-      console.error('[SETTINGS] complete_spotify_auth_manual failed:', e);
-      manualUrlError = String(e);
-      setSpotifyPhase('error', String(e));
-    } finally {
-      manualSubmitBusy = false;
-    }
-  }
 
   async function reconnectTeams() {
     if (teamsAuthWaiting) return;
@@ -714,39 +575,6 @@
       console.error('[SETTINGS] reconnect_teams failed:', e);
       setTeamsPhase('error', String(e));
     }
-  }
-  /**
-   * #932 (rework): the auth-persist banner's reconnect action, label and
-   * "in flight" disabled state all route off the `provider` discriminator.
-   * Centralising the routing here lets the JSX pick `{reconnect.label}`,
-   * `{reconnect.handler}` and `{reconnect.waiting}` without re-deriving
-   * the same ternary three times in the template, and lets the unit test
-   * assert the routing without re-implementing the ternary in JSX. The
-   * pure routing decision lives in `src/lib/utils/routeReconnect.ts`
-   * (`pickReconnectProvider`) so a Vitest spec can exercise it without
-   * the component harness — the commit message on `e833931` claimed such
-   * a test existed but no spec asserted the routing. An unknown value
-   * falls back to the Spotify reconnect (the Spotify banner is the newer
-   * of the two, #932 B1) so a future backend payload cannot crash the banner.
-   */
-  function routeReconnect(provider: 'teams' | 'spotify' | string): {
-    label: string;
-    handler: () => Promise<void>;
-    waiting: boolean;
-  } {
-    const target = pickReconnectProvider(provider);
-    if (target === 'teams') {
-      return {
-        label: t('settings.sectionTeams'),
-        handler: reconnectTeams,
-        waiting: teamsAuthWaiting
-      };
-    }
-    return {
-      label: t('settings.sectionSpotify'),
-      handler: reconnectSpotify,
-      waiting: spotifyAuthWaiting
-    };
   }
   /**
    * #785: the shared poll — the #396 mutex, the #429 expiry guard, the phase
@@ -799,21 +627,6 @@
     performBack();
   }
 
-  async function toggleNotificationClass(cls: NotificationClass, e: Event) {
-    const target = e.currentTarget as HTMLInputElement;
-    const applied = await setNotificationPreference(cls, target.checked);
-    if (!applied) {
-      // The store kept the class off, so reset the DOM property this click
-      // already flipped.
-      target.checked = false;
-      notificationsMessage = t('settings.notificationsDenied');
-      return;
-    }
-    notificationsMessage = '';
-    // The form owns a full-config copy; a later "Save" must not write a stale
-    // notifications section back over the toggle that was just persisted.
-    localConfig.notifications = { ...$notificationPreferences };
-  }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject
   // (e.g. the window was already closed); never leave a floating promise
@@ -964,11 +777,9 @@
       waiting={spotifyAuthWaiting}
       {playbackScopeMissing}
       secretConflict={spotifySecretConflict}
-      {detached}
       onReconnect={reconnectSpotify}
       onGoToOnboarding={goToOnboarding}
       onRestartSignIn={reconnectSpotify}
-      onForwardToMain={() => forwardToMain('settings')}
     />
     <TeamsCard
       teamsConnected={teamsStatusConnected}
@@ -978,6 +789,7 @@
       scopesMissing={teamsScopesMissing}
       onReconnect={reconnectTeams}
       onReconnectSpotify={reconnectSpotify}
+      spotifyWaiting={spotifyAuthWaiting}
       onCheckNow={checkTeamsSignIn}
     />
     <PresenceCard bind:teams={localConfig.teams} onreset={resetPresenceDefaults} />
@@ -995,6 +807,7 @@
       bind:activeProfile={localConfig.active_profile}
       teams={localConfig.teams}
       bind:saveMessage
+      onchange={markDirty}
     />
     <StatusFormatCard
       bind:teams={localConfig.teams}
@@ -1014,7 +827,7 @@
       bind:saveMessage
       bind:followSystemChecked
       onreset={resetAppearanceDefaults}
-      onchange={markDirty}
+      onAutostartError={handleAutostartError}
     />
     <LoggingCard bind:logging={localConfig.logging} />
     <BackupCard onimported={handleBackupImported} />

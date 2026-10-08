@@ -3,7 +3,7 @@
   import { t, i18n, type Locale } from '$lib/i18n';
   import type { AppConfig } from '$lib/types';
   import { theme, density } from '$lib/stores/theme';
-  import { defaultConfig, updateConfig } from '$lib/stores/config';
+  import { updateConfig } from '$lib/stores/config';
   import { shortcutReasonLabel, normalizeShortcutReason } from '$lib/utils/shortcuts';
   import SettingsCard from './SettingsCard.svelte';
 
@@ -18,8 +18,8 @@
     followSystemChecked: boolean;
     /** Reset callback: restore shipped defaults (system/comfortable/en). */
     onreset: () => void;
-    /** Dirty-mark callback: the parent's `markDirty` (autostart changes need it). */
-    onchange: () => void;
+    /** Parent's auto-clear for the self-applying autostart failure line. */
+    onAutostartError: (message: string) => void;
   }
 
   let {
@@ -28,7 +28,7 @@
     saveMessage = $bindable(),
     followSystemChecked = $bindable(),
     onreset,
-    onchange
+    onAutostartError
   }: Props = $props();
 
   // #552: a radiogroup must own `role="radio"`/`aria-checked` children with a
@@ -68,12 +68,11 @@
       await invoke('set_autostart_enabled', { enabled });
       // Issue #811: the command now owns the `config.autostart` flag
       // too, so converge the store immediately. `updateConfig` merges just
-      // this field backend-side and adopts the persisted document.
+      // this field backend-side and adopts the persisted document. The
+      // input carries `data-no-draft` (like the notification toggles): the
+      // toggle applies itself, so it must not mark the form dirty.
       const converged = await updateConfig({ autostart: enabled });
       autostart = converged.autostart;
-      void locale;
-      void defaultConfig;
-      onchange();
     } catch (err) {
       console.warn('[SETTINGS] set_autostart_enabled failed:', err);
       autostart = previous;
@@ -81,6 +80,9 @@
       saveMessage = t('settings.shortcutRejected', {
         reason: shortcutReasonLabel(normalizeShortcutReason(err) ?? { kind: 'Unknown', message: String(err).slice(0, 120) })
       });
+      // #750 slice 2: the parent owns the 3000ms auto-clear (main's
+      // `saveTimeout`), so a stuck failure line cannot outlive its window.
+      onAutostartError(saveMessage);
     }
   }
 </script>

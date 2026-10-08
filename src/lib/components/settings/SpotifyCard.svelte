@@ -17,13 +17,10 @@
     playbackScopeMissing: boolean;
     /** Legacy-plaintext secret conflict (issues #376/#813). */
     secretConflict: boolean;
-    /** Detached pane: reconnect navigates home instead of invoking. */
-    detached: boolean;
     /** Reconnect entry points owned by the parent (client_id + guards). */
     onReconnect: () => void;
     onGoToOnboarding: () => void;
     onRestartSignIn: () => void;
-    onForwardToMain: () => void;
   }
 
   let {
@@ -32,11 +29,9 @@
     waiting,
     playbackScopeMissing,
     secretConflict,
-    detached,
     onReconnect,
     onGoToOnboarding,
-    onRestartSignIn,
-    onForwardToMain
+    onRestartSignIn
   }: Props = $props();
 
   // #560: the OS keychain's answer about the stored client_secret —
@@ -102,12 +97,14 @@
 </script>
 
 <SettingsCard title={t('settings.sectionSpotify')}>
-  <span class="badge" class:success={isConnected && !waiting}
-        class:warning={waiting}
-        class:error={!isConnected && !waiting}>
-    <span class="dot"></span>
-    {#if waiting}{t('common.reconnecting')}{:else if isConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
-  </span>
+  {#snippet actions()}
+    <span class="badge" class:success={isConnected && !waiting}
+          class:warning={waiting}
+          class:error={!isConnected && !waiting}>
+      <span class="dot"></span>
+      {#if waiting}{t('common.reconnecting')}{:else if isConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
+    </span>
+  {/snippet}
   <div class="form-group">
     <label for="spotify-client-id">{t('settings.clientId')}</label>
     <input
