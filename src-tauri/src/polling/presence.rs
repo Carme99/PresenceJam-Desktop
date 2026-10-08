@@ -948,6 +948,8 @@ mod tests {
     /// `sources/spotify.rs`. The pre-fix drift ("arms ≥ 2 in
     /// `poll_once.rs`") no longer applies because there is exactly one
     /// 304 arm in the source.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the skip-to-`sync_availability` reach plus the 304-to-cached-track arm in their homes; the arms live in the live poll path, so the placement is pinned at the source.
     #[test]
     fn test_identical_write_skip_and_304_arms_rearm_availability() {
         let body = prod_fn_body(prod_source(), "pub(crate) fn process_track(");
@@ -1478,6 +1480,8 @@ mod tests {
     }
 
     /// Finding D7 (issue #690): a pause is not a stop.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is `presence-paused` on the pause path and never on it from the stop path; the POSTs need live Graph, so the payload wiring is pinned at the source.
     #[test]
     fn test_presence_paused_is_distinct_from_presence_cleared() {
         let prod = prod_source();
@@ -1503,6 +1507,8 @@ mod tests {
     /// `observe_presence_sample` call left a gated track + a user-typed status
     /// with a stale exit snapshot — and quitting then replaced the user's own
     /// Teams message with our placeholder.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is an `observe_presence_sample(` recording at every presence read; the reads need live Graph presence, so the recording is pinned at the source.
     #[test]
     fn test_every_presence_read_records_the_manual_status_verdict() {
         let prod = prod_source();

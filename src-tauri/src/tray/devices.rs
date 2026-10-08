@@ -355,6 +355,8 @@ mod tests {
     /// re-fetch fallback instead of `devices.get(i)`. Issue #586: that
     /// re-fetch must resolve its token through the shared refresh-aware
     /// policy, so an expired token does not strand a transfer.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the resolve-by-id plus live re-fetch through the refresh-aware policy; the click needs a live `AppHandle` for HTTP, so the resolution wiring is pinned at the source.
     #[test]
     fn device_click_resolves_by_id_with_live_fallback() {
         let src = tray_prod_source();

@@ -475,6 +475,8 @@ mod tests {
     /// `presencejam://` URL) and passes post-fix. Brace-counted body
     /// isolation via the shared `body_of` helper (order-independent, never
     /// anchored on the following fn).
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of `handle_deep_link` and argv URL scans in the forward-launch fn; the fn runs inside the single-instance plugin wiring, so the absence is pinned at the source.
     #[test]
     fn test_forward_launch_does_not_redispatch_deep_links() {
         let source = include_str!("app.rs");
@@ -501,6 +503,8 @@ mod tests {
     /// single-flight gate before spawning the token exchange, so the two
     /// delivery paths for one URL (`get_current` start URL + `on_open_url`
     /// event, or any plugin re-emit) collapse to exactly one exchange.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the hash-then-claim-then-spawn ordering; the dispatch spawns a real token exchange, so the ordering is pinned at the source.
     #[test]
     fn test_handle_deep_link_claims_single_flight_before_dispatch() {
         let source = include_str!("deep_link.rs");

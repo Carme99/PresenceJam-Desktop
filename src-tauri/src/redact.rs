@@ -75,6 +75,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the `[REDACTED len ` literal is built in exactly one module; literal placement across modules is structural, so the sweep is pinned at the source.
     #[test]
     fn redaction_literal_is_built_only_in_redact_rs() {
         // Issue #910 acceptance: every length-marker must come from

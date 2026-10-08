@@ -705,6 +705,8 @@ mod tests {
 
     /// A synchronous call left in the command body is the pre-#878
     /// regression: it runs the HTTPS round-trip on the IPC thread.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the take-request-then-`offload_blocking`-await shape; the command performs a live HTTPS round-trip, so the offload wiring is pinned at the source.
     #[test]
     fn device_code_command_offloads_its_request() {
         let body = device_code_command_source();
@@ -771,6 +773,8 @@ mod tests {
     /// placed after `commit_teams` would already have overwritten the newer
     /// flow's tokens. Structural because reaching those lines needs a live
     /// `AppHandle` and the blocking poll loop.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `may_commit(` gate BEFORE the `commit_teams(` write; reaching those lines needs a live `AppHandle` and the blocking poll loop, so the ordering is pinned at the source.
     #[test]
     fn the_commit_gate_precedes_the_token_slot_write() {
         let src = include_str!("teams_auth.rs");

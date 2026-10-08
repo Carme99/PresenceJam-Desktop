@@ -1116,6 +1116,8 @@ mod tests {
     /// increment order differing between the main arm and the 401-retry
     /// arm. We assert the no-track paths share a helper, not that
     /// every increment lives in one place.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the exact call-site COUNT (3 sites + definition); a new no-track path outside the helper is a structural property, so the count is pinned at the source.
     #[test]
     fn test_no_track_paths_share_record_helper() {
         let source = include_str!("iteration.rs");
@@ -1147,6 +1149,8 @@ mod tests {
     /// (issue #574): the canonical "Failed to get currently playing" emit is
     /// pinned at EXACTLY one site — the old `>= 1` passed even when the emit
     /// was deleted or duplicated by a new failure path.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is exactly ONE canonical emit site; emit placement across failure paths is structural, so the count is pinned at the source.
     #[test]
     fn test_error_event_emitted_in_exactly_one_place_per_failed_poll() {
         let source = include_str!("iteration.rs");
@@ -1169,6 +1173,8 @@ mod tests {
 
     /// Regression guard for issue #79/#117: poll_once.rs must NOT emit raw
     /// "error" events directly.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of raw `emit("error",` plus the helper call count; emit placement is structural, so the absence is pinned at the source.
     #[test]
     fn test_no_raw_error_emit_in_poll_once() {
         let source = include_str!("iteration.rs");
@@ -1281,6 +1287,8 @@ mod tests {
     /// `SpotifySource::poll` returns `SourceError::Auth(_)` for expired /
     /// invalid-grant tokens and the poll loop counts those toward the
     /// existing 5-strikes exit. The guard now greps for the new pattern.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is both reconnect emits sitting INSIDE the auth-gated exit block; the exit needs the live poll loop, so the placement is pinned at the source.
     #[test]
     fn test_five_strikes_exit_emits_spotify_reconnect() {
         let source = include_str!("iteration.rs");
@@ -1383,6 +1391,8 @@ mod tests {
 
     /// Finding PollCore#4 (issue #572) structural guard: the one-shot entry
     /// must run against the shared clocks rather than fresh per-call locals.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the shared-clocks load plus publish-back with no fresh locals; the one-shot runs a real iteration, so the clock routing is pinned at the source.
     #[test]
     fn test_run_oneshot_uses_shared_write_clocks() {
         let prod = prod_source();
@@ -1407,6 +1417,8 @@ mod tests {
     /// catch-up and the CLI's `--sync-once` all route through it, so a gate that
     /// only the loop consulted left three silent bypasses of the feature's
     /// "no Spotify or Graph work while snoozed" promise.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the snooze-gate-before-clocks-before-inner ORDER; the one-shot runs a real iteration, so the ordering is pinned at the source.
     #[test]
     fn run_oneshot_honours_the_snooze_gate() {
         let prod = prod_source();
@@ -1462,6 +1474,8 @@ mod tests {
     /// There is deliberately NO `--sync-once` override flag: a documented
     /// cron/headless path that silently ignored the pause would break that
     /// promise, so all three entry points honour it.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the snooze-then-pause-then-clocks-then-inner ORDER; the one-shot runs a real iteration needing live state, so the ordering is pinned at the source.
     #[test]
     fn run_oneshot_honours_the_quiet_pause() {
         let prod = prod_source();

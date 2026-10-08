@@ -268,6 +268,11 @@ mod tests {
 
     /// The plugin config path is duplicated as three string constants; this
     /// pins them against the manifest that actually ships.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the shipped manifest still declares the
+    /// scheme; manifest-to-code agreement is not runtime behaviour, so the
+    /// match is pinned at the source.
     #[test]
     fn test_configured_schemes_matches_shipped_tauri_conf() {
         let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json"))

@@ -280,6 +280,8 @@ mod tests {
 
     /// Both readers open the same file; a rename in one module must fail
     /// here rather than silently pointing the pane at a file nobody writes.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that both modules name the same log file; the constant lives in another module's source, so the agreement is pinned at the source.
     #[test]
     fn test_log_file_name_matches_diagnostics() {
         let expected = format!("const LOG_FILE_NAME: &str = \"{LOG_FILE_NAME}\";");

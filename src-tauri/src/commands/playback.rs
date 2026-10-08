@@ -293,6 +293,8 @@ mod tests {
     /// their refresh-policy coverage now lives in the policy tests below and
     /// in the tray/shortcut callers, which invoke `player_with_refresh_typed` /
     /// `player_with_refresh` directly with no IPC hop.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of the seven deleted commands here and in the handler registry; an absence is not runtime behaviour, so the deletion is pinned at the source.
     #[test]
     fn test_callerless_playback_commands_stay_deleted() {
         let source = include_str!("playback.rs");
@@ -342,6 +344,8 @@ mod tests {
     /// `try_refresh_spotify_token`, so the policy lives in one place.
     /// Issue #586: the policy is the typed core the tray also calls —
     /// `player_with_refresh` is only its friendly-message wrapper.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the shared policy owns both the proactive and reactive refresh calls; the policy body needs live HTTPS, so the ownership is pinned at the source (the refresh behaviour IS covered by the policy tests below).
     #[test]
     fn test_player_with_refresh_owns_both_refresh_paths() {
         let source = include_str!("playback.rs");

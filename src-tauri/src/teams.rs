@@ -1664,6 +1664,8 @@ mod tests {
     };
     use crate::polling::{ErrorEventPayload, ErrorRecovery, ErrorSeverity};
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that `SECURITY.md` names the borrowed identity and exact scope set; doc-to-code agreement is not runtime behaviour, so the match is pinned at the source.
     #[test]
     fn security_disclosure_matches_borrowed_graph_identity_and_scopes() {
         const OWNER: &str = "Microsoft Graph Command Line Tools";
@@ -2415,6 +2417,8 @@ mod tests {
     /// asserted here is that Teams still *routes* every throttled response
     /// through it, so a hardcoded `None` cannot silently disable the
     /// server-directed wait.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the exact `parse_retry_after(&response)` call-site COUNT; call-site routing is structural, so the count is pinned at the source.
     #[test]
     fn every_throttled_teams_response_consults_the_shared_retry_after() {
         // Scanned against the production half of the file, so this test's own
@@ -2470,6 +2474,8 @@ mod tests {
     // by the caller — so its log/error surface must never carry the
     // response body. Lengths and expiry/interval only. Brace-counted
     // body isolation (order-independent): do not anchor on the next fn.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is lengths-and-expiry-only logging with no response body; the flow performs a live credential-bearing HTTPS exchange, so the log surface is pinned at the source.
     #[test]
     fn device_code_flow_logs_no_response_body() {
         let src = include_str!("teams.rs");
@@ -2584,6 +2590,8 @@ mod tests {
     /// opener. The needles are assembled with `concat!` so this test's own
     /// source never contains the literal it searches for — otherwise the
     /// `include_str!` scan would match the test itself and pass vacuously.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `[TEAMS]` tag on every log macro region; log-tag spelling is not observable behaviour a hermetic test can assert on, so the sweep is pinned at the source.
     #[test]
     fn teams_log_tags_use_teams_prefix() {
         assert_eq!(super::TAG, "[TEAMS]", "the module tag constant drifted");
@@ -2639,6 +2647,8 @@ mod tests {
     /// `set_teams_status_message` must be the byte-count helper's output, so
     /// re-inlining the posted text into an info-or-above macro fails here even
     /// if someone deletes the content test above.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the info line logs the byte-count helper's output; the POST needs live Graph, so the line wiring is pinned at the source (the no-leak content IS covered behaviourally above).
     #[test]
     fn set_teams_status_message_info_line_uses_the_byte_count_helper() {
         let src = include_str!("teams.rs");
@@ -2667,6 +2677,8 @@ mod tests {
     /// `/me/presence/setUserPreferredPresence` and
     /// `/me/presence/clearUserPreferredPresence`. The clear endpoint also
     /// accepts an empty body — a typed struct would diverge from the docs.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the documented `/me/presence/` URL paths; endpoint paths only matter against live Graph, so the paths are pinned at the source.
     #[test]
     fn preferred_presence_endpoints_use_documented_paths() {
         let src = include_str!("teams.rs");
@@ -3005,6 +3017,8 @@ mod tests {
     /// asserted behaviourally in `http::tests`; what is pinned here is that
     /// this module contributes no builder of its own and that the quit path
     /// keeps its bounded budget at all three call sites.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of `Client::builder()` in this module; builder placement is structural (the reuse IS covered in `http::tests`), so the absence is pinned at the source.
     #[test]
     fn teams_contributes_no_client_builder_of_its_own() {
         // Scanned against the production half of the file only, so this test's

@@ -1377,6 +1377,8 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the both-guards-before-either-clone ORDER; the persist touches the real token slots, so the ordering is pinned at the source.
     #[test]
     fn persist_holds_both_token_guards_before_cloning() {
         let body = test_scan::fn_body(
@@ -1771,6 +1773,8 @@ mod tests {
     // isolated with the shared literal-aware scanner (`test_scan`), not a
     // next-function boundary anchor: the dispatch arms contain `b"{"`,
     // whose brace would corrupt a naive byte counter.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the legacy-branch delegation to the parse-before-keychain decoder; `tokens_from_bytes` touches the real OS keychain, so the delegation is pinned at the source.
     #[test]
     fn legacy_branch_delegates_to_ordered_decoder() {
         let src = include_str!("token_io.rs");
@@ -2039,6 +2043,8 @@ mod tests {
     /// root plus the bundle identifier in `tauri.conf.json`. Pinned against the
     /// conf file itself so a renamed identifier cannot silently send the CLI
     /// looking in a folder the app never writes to.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that `BUNDLE_IDENTIFIER` matches the shipped manifest's identifier; manifest-to-code agreement is not runtime behaviour, so the match is pinned at the source.
     #[test]
     fn headless_path_uses_the_configured_bundle_identifier() {
         let conf: serde_json::Value =
@@ -2134,6 +2140,8 @@ mod tests {
     // with no key to recover from. Keychain-touching behavior itself is not
     // exercised here — the suite never touches the OS keychain — so the
     // ordering is pinned by a source scan of the isolated body.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the drop-key-BEFORE-clear-file ORDER; the suite never touches the OS keychain, so the ordering is pinned at the source.
     #[test]
     fn reset_deletes_the_key_before_the_file() {
         let src = include_str!("token_io.rs");

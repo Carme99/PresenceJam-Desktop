@@ -1901,6 +1901,11 @@ mod tests {
     /// force through the quit-time confirmation surface).
     /// Issue #924: the packaged webview CSP must also keep `base-uri 'self'`
     /// and explicitly block form submissions with `form-action 'none'`.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the shipped manifest's downgrade flag and CSP
+    /// strings; manifest contents are not runtime behaviour, so the match is
+    /// pinned at the source.
     #[test]
     fn test_tauri_conf_disallows_downgrades() {
         let conf = include_str!("../tauri.conf.json");

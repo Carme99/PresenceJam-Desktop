@@ -1311,6 +1311,8 @@ mod tests {
     /// `macos_deeplink` inside the call site's error arm (see
     /// `test_macos_deeplink_reclaim_is_wired`) — do NOT reintroduce the
     /// Windows-only gate.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the absence of a `#[cfg(windows)]` gate around the `register_all()` call site; the setup closure needs a live Tauri `App` no hermetic test can build, so the gate is pinned at the source.
     #[test]
     fn test_register_all_not_gated_to_windows_only() {
         let source = include_str!("app.rs");
@@ -1366,6 +1368,8 @@ mod tests {
     /// state where `presencejam://` could be intercepted by whichever app
     /// registered it first, and running it unconditionally would mean
     /// linking CoreServices on Windows/Linux.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `macos_deeplink::claim(` call sitting in `register_all()`'s failure arm under `#[cfg(target_os = "macos")]`; the setup closure needs a live Tauri `App` plus CoreServices linking, so the wiring is pinned at the source.
     #[test]
     fn test_macos_deeplink_reclaim_is_wired() {
         let lib_src = include_str!("lib.rs");
@@ -1407,6 +1411,8 @@ mod tests {
     /// production — a build failure must log and exit non-zero instead of
     /// panicking the release binary. Brace-counted body isolation
     /// (order-independent): do not anchor on the next fn.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that `run()`'s build-failure arm logs and exits instead of `.expect`ing; driving `run()` builds a real Tauri app, so the arm is pinned at the source.
     #[test]
     fn test_run_build_failure_logs_and_exits() {
         let source = include_str!("app.rs");
@@ -1453,6 +1459,8 @@ mod tests {
     /// clear their `$detachedPanes` badge on `tauri://destroyed`, so hiding
     /// one strands a live-but-invisible window that no `setFocus()` can
     /// bring back.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the guard-then-hide-then-prevent ordering inside the `CloseRequested` arm; the arm needs a live window event no hermetic test can deliver (the pure `close_hides_window` predicate IS covered behaviourally above), so the arm wiring is pinned at the source.
     #[test]
     fn test_close_hides_window_label_guard() {
         assert!(
@@ -1496,6 +1504,8 @@ mod tests {
     /// host missing libayatana-appindicator3) leaves no way back to a hidden
     /// window, so the main window must close for real — and the arm plus the
     /// setup hook must actually consult/record it, not just define it.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the arm and the setup hook consult the tray-availability mirror; the arm needs a live window event and the hook a live Tauri `App` (the pure `should_hide_on_close` predicate IS covered behaviourally above), so the consultation is pinned at the source.
     #[test]
     fn test_should_hide_on_close_gates_on_tray() {
         // Pure predicate: main + tray hides; main without a tray closes for
@@ -1709,6 +1719,8 @@ mod tests {
     /// running after rotation — not just exist as a dead helper. Guards the
     /// `setup` call site and the watchdog spawn against a future refactor
     /// dropping either.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that `setup` calls `setup_log_permissions` and the helper both tightens and spawns the watchdog; the setup closure needs a live Tauri `App` (the tighten itself IS covered behaviourally above), so the call-site wiring is pinned at the source.
     #[test]
     fn test_setup_tightens_log_permissions_and_watches_rotation() {
         let source = include_str!("app.rs");
@@ -1733,6 +1745,8 @@ mod tests {
     /// GUI, and `--sync-once` must reach its one-shot before any GUI surface is
     /// set up. That ordering is what keeps a bare launch on the old path
     /// (asserted by the parser tests above) and a CLI run windowless.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the CLI-dispatch-before-GUI-surfaces ordering inside `run()`; driving `run()` builds a real Tauri app, so the ordering is pinned at the source.
     #[test]
     fn test_cli_flags_short_circuit_before_the_gui_is_built() {
         let source = include_str!("app.rs");
@@ -1825,6 +1839,8 @@ mod tests {
     /// pipes keep working). The `Cargo.toml` feature assertion keeps the
     /// `Win32_System_Console` / `Win32_Storage_FileSystem` / `Win32_Security`
     /// features from being pruned as unused.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the attach-before-first-output ordering plus the `AttachConsole`/`CONOUT$` shape; the helper runs only on Windows GUI-subsystem binaries, so the ordering is pinned at the source.
     #[test]
     fn test_windows_cli_attaches_parent_console_before_output() {
         let source = include_str!("app.rs");
@@ -1945,6 +1961,12 @@ mod tests {
     /// label, the in-app URL and the size cannot be steered from the webview —
     /// which is what lets the main window drop the unscoped
     /// `core:webview:allow-create-webview-window` grant.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the frontend store routing through `detach_pane`
+    /// plus the ABSENCE of `new WebviewWindow`; the store is another language's
+    /// source, so the agreement is pinned at the source (the table itself IS
+    /// covered behaviourally above).
     #[test]
     fn test_detached_pane_spec_is_a_closed_table() {
         let logs = detached_pane_spec("logs", None).expect("logs is a configured pane");

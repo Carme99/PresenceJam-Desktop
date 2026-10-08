@@ -1128,6 +1128,11 @@ mod tests {
 
     /// Mirrors the frontend's `Dict` parity test: the eight tables describe
     /// exactly the fields `Strings` declares, in the same order.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the declared-field list parsed from this
+    /// module's own source; the struct declaration is not runtime behaviour,
+    /// so the field set is pinned at the source.
     #[test]
     fn tables_carry_an_identical_field_set() {
         let declared = declared_field_names(include_str!("i18n.rs"));
@@ -1343,6 +1348,11 @@ mod tests {
     /// Issue #843: scan forward, not only for table values reappearing in the
     /// two modules that build native surfaces. A new English-only label must
     /// enter all eight tables before it can live there.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is zero copy-like literals outside the tables
+    /// and allowlist; literal placement across modules is structural, so the
+    /// sweep is pinned at the source.
     #[test]
     fn no_user_visible_literal_stays_hard_coded() {
         let mut offenders = Vec::new();

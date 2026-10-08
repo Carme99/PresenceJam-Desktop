@@ -249,6 +249,8 @@ mod tests {
 
     /// Finding D1 (issue #684) structural guard: the cleanup reads the
     /// snapshot, and the loop's exit tail never resets it.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the snapshot read plus the ABSENCE of clock reads in the exit cleanup; the cleanup runs on the real quit path, so the read choice is pinned at the source.
     #[test]
     fn test_clear_presence_on_exit_reads_the_snapshot_not_the_clocks() {
         let prod = prod_source();
@@ -294,6 +296,12 @@ mod tests {
     /// Review round 2, item 7: quitting must not replace a Teams status the user
     /// typed with our "Paused" placeholder — while our own armed availability
     /// session is still cleared.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `observe_presence_sample(` recording on the
+    /// live write path; the verdict the plan reads comes from a Graph sample
+    /// no hermetic test can take, so the recording is pinned at the source
+    /// (the plan itself IS covered behaviourally above).
     #[test]
     fn test_exit_plan_respects_a_manual_teams_status() {
         let snapshot = crate::polling::state::ExitSnapshot {
