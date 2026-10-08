@@ -345,7 +345,7 @@ mod tests {
     /// Issue #586: the policy is the typed core the tray also calls —
     /// `player_with_refresh` is only its friendly-message wrapper.
     /// Why a source scan survives here (issue #778 allows exactly this
-    /// shape): the invariant is that the shared policy owns both the proactive and reactive refresh calls; the policy body needs live HTTPS, so the ownership is pinned at the source (the refresh behaviour IS covered by the policy tests below).
+    /// shape): the invariant is that the shared policy owns both the proactive and reactive refresh calls; the policy body needs live HTTPS, so the ownership is pinned at the source (the concurrent-refresh token predicate IS covered behaviourally below).
     #[test]
     fn test_player_with_refresh_owns_both_refresh_paths() {
         let source = include_str!("playback.rs");

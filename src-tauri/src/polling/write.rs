@@ -2326,6 +2326,14 @@ mod tests {
         &after_anchor[..end.unwrap_or_else(|| panic!("`{}` body never closed", anchor))]
     }
 
+    /// The seven-field `spotify-track-changed` wire contract, pinned both
+    /// behaviourally (serialize a `TrackInfo` above) and at the emit site.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tail invariant is the exact `app.emit` call-site string
+    /// inside `process_track` — driving the emit needs a live `AppHandle`
+    /// plus a full poll body, and the serialization half IS covered
+    /// behaviourally above.
     #[test]
     fn track_changed_event_serializes_exactly_the_seven_field_contract() {
         let track = crate::spotify::TrackInfo {
@@ -2494,7 +2502,7 @@ mod tests {
     /// first and only the track key was restored, duplicating the
     /// `spotify-track-changed` event and the Graph presence read on retry.
     /// Why a source scan survives here (issue #778 allows exactly this
-    /// shape): the invariant is the debounce-guard-before-every-side-effect ORDER plus the short-retry return; the branch lives in the live `process_track`, so the ordering is pinned at the source (the debounce predicate IS covered behaviourally below).
+    /// shape): the invariant is the debounce-guard-before-every-side-effect ORDER plus the short-retry return; the branch lives in the live `process_track`, so the ordering is pinned at the source (the debounce predicate IS covered behaviourally above).
     #[test]
     fn test_debounce_branch_restores_previous_key_and_sleeps_short() {
         let source = include_str!("write.rs");
@@ -3289,7 +3297,7 @@ mod tests {
     /// `PlaceholderWrite::Post` arm must route through
     /// [`teams_write_with_optional_refresh`].
     ///
-    /// Why a source guard survives here (issue #778 allows exactly this
+    /// Why a source scan survives here (issue #778 allows exactly this
     /// shape): the invariant is *which function the arm calls*. Driving the
     /// helper behaviourally cannot observe it — the arm lives inside
     /// `process_track`, whose other inputs are a real `AppHandle`, real
@@ -3506,6 +3514,13 @@ mod tests {
     }
 
     /// Finding D6 (issue #689): pausing the SAME track is a state change.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tail invariant is the `let playing_changed` derivation
+    /// plus its `} else if playing_changed {` arm shape inside
+    /// `process_track` — the predicate itself IS covered behaviourally
+    /// above, but the arm wiring needs a live `AppHandle` and a Graph
+    /// read no hermetic test may reach.
     #[test]
     fn test_playback_state_change_is_detected_for_the_same_track() {
         assert!(
@@ -4016,7 +4031,12 @@ mod tests {
     }
 
     /// Finding #635: the read-before-write policy, as a truth table.
-
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tail invariant is emit-site routing — `process_track`
+    /// must call the pinned `*_payload(` builders with no inline `json!`
+    /// bypass. The wire shapes themselves ARE asserted behaviourally above;
+    /// reaching the emit needs a live `AppHandle` no hermetic test may hold.
     #[test]
     fn test_event_payload_shapes_are_pinned() {
         // Issue #762: the builders now return ts-rs-typed structs, so the
