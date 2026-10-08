@@ -108,7 +108,7 @@ pub fn preferred_presence_expiry_duration(teams: &TeamsConfig) -> String {
 }
 
 /// Issue #870: borrow the user's lexicon (`teams.profanity_extra_words`,
-/// issue #538) into the slice shape `profanity::filter_status` expects. The
+/// issue #538) into the slice shape `profanity::filter_status_for_locale` expects. The
 /// function is `None`-aware — a hand-edited config that lacks the section
 /// reads as the empty slice, reproducing the pre-#538 behaviour exactly.
 pub fn profanity_extra_words_for_filter(config: Option<&std::sync::Arc<AppConfig>>) -> &[String] {
