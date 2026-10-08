@@ -838,7 +838,8 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // before `process_track` returns and before the rebuild that paints it.
     // A spawn would race the rebuild and could paint a stale Play/Pause
     // mark on a same-track pause (#758 slice-2 review). `try_state` is a
-    // lock-free map lookup, so there is no blocking cost to staying inline.
+    // short map lookup under one uncontended mutex, so there is no
+    // blocking cost worth a thread hop.
     let listen_handle = app.handle().clone();
     app.listen("playback-state-changed", move |event| {
         let Some(state) = listen_handle.try_state::<std::sync::Arc<crate::AppState>>() else {
