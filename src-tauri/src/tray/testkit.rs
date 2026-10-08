@@ -1,8 +1,6 @@
 //! tray/testkit.rs — shared helpers for source-scan tests (#756).
 #![allow(dead_code)]
 use std::sync::OnceLock;
-#[cfg(test)]
-pub static MODE_ATOM_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 static TRAY_PROD: OnceLock<String> = OnceLock::new();
 /// Production half of `src` — everything before the inline test module,
 /// so a scan can never match the assertions themselves.

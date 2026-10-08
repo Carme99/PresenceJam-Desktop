@@ -27,9 +27,10 @@ const CMD: &str = "[CMD.CONFIG]";
 /// D-Bus timeout, so simply launching the app froze the window, the tray
 /// menu and window events for seconds. Both halves now run on the blocking
 /// pool (the same seam `get_recent_logs` uses).
-pub async fn load_config() -> Result<AppConfig, String> {
+pub async fn load_config(state: tauri::State<'_, Arc<AppState>>) -> Result<AppConfig, String> {
     log::debug!("{CMD} load_config: ENTRY");
-    match load_config_offloaded(config::load_config).await {
+    let caches = Arc::clone(state.inner());
+    match load_config_offloaded(move || config::load_config(&caches.caches)).await {
         Ok(cfg) => {
             log::info!(
                 "{CMD} load_config: SUCCESS - spotify.client_id.len={}",
@@ -48,7 +49,8 @@ pub async fn load_config() -> Result<AppConfig, String> {
 ///
 /// The loader is injected so the unit test can observe *which thread the
 /// read ran on* — an assertion no source inspection can make. Production
-/// passes [`config::load_config`]; a join failure is folded into the same
+/// passes a closure over [`config::load_config`] bound to the caller's
+/// `AppCaches` (issue #758 slice 2); a join failure is folded into the same
 /// `String` error channel the command already reports.
 async fn load_config_offloaded<F>(load: F) -> Result<AppConfig, String>
 where
@@ -146,7 +148,7 @@ pub async fn update_config(
         let mut config_guard = state_clone.config.get_mut();
         let base = match config_guard.as_ref() {
             Some(current) => (**current).clone(),
-            None => config::load_config()?,
+            None => config::load_config(&state_clone.caches)?,
         };
 
         let mut merged = base;
@@ -602,7 +604,7 @@ pub async fn export_config(
         let guard = state.config.get();
         match guard.as_ref() {
             Some(cfg) => (**cfg).clone(),
-            None => config::load_config()?,
+            None => config::load_config(&state.caches)?,
         }
     };
     let json = config::export_document(&current)?;
@@ -979,7 +981,7 @@ pub async fn import_config(
             &destination,
             &prepared.document,
             || {},
-            config::load_config,
+            || config::load_config(&state_clone.caches),
         )
     })
     .await
@@ -1056,7 +1058,7 @@ pub async fn set_locale(
         let mut config_guard = state_clone.config.get_mut();
         let mut merged = match config_guard.as_ref() {
             Some(current) => (**current).clone(),
-            None => config::load_config()?,
+            None => config::load_config(&state_clone.caches)?,
         };
         merged.locale = Some(tag.to_string());
 

@@ -312,7 +312,7 @@ pub fn store_snooze(
     let mut guard = state.config.get_mut();
     let base = match guard.as_ref() {
         Some(current) => (**current).clone(),
-        None => crate::config::load_config()?,
+        None => crate::config::load_config(&state.caches)?,
     };
     let mut next = base;
     next.snooze_until = until.map(crate::config::snooze_store_form);
@@ -373,7 +373,7 @@ pub fn store_active_profile(app: &AppHandle, name: Option<String>) -> Result<(),
     let mut guard = state.config.get_mut();
     let base = match guard.as_ref() {
         Some(current) => (**current).clone(),
-        None => crate::config::load_config()?,
+        None => crate::config::load_config(&state.caches)?,
     };
     let mut next = base;
     next.active_profile = name;
@@ -446,7 +446,6 @@ pub fn snooze_status_line(strings: &Strings, snooze: &TraySnooze) -> String {
 mod tests {
     use super::*;
     use crate::i18n::{DE, EN, FR};
-    use crate::tray::testkit::MODE_ATOM_LOCK;
     use crate::tray::testkit::{body_of, tray_prod_source};
     /// A config carrying `snooze_until` as stored.
     fn snoozed_config(stored: &str) -> std::sync::Arc<crate::config::AppConfig> {
@@ -559,8 +558,8 @@ mod tests {
     /// (the countdown would otherwise freeze at the minute the menu was built).
     #[test]
     fn snooze_change_forces_a_tray_rebuild() {
-        let _guard = MODE_ATOM_LOCK.lock();
-        note_playback_modes(false, RepeatState::Off);
+        let caches = crate::state::AppCaches::new();
+        note_playback_modes(&caches, false, RepeatState::Off);
         let track = crate::spotify::TrackInfo {
             title: "Title".to_string(),
             artist: "Artist".to_string(),
@@ -574,7 +573,17 @@ mod tests {
             actions: None,
         };
         let at = |snooze: Option<String>| {
-            tray_snapshot_for(true, true, Some(&track), snooze, 0, 0, None)
+            tray_snapshot_for(
+                true,
+                true,
+                Some(&track),
+                snooze,
+                0,
+                0,
+                None,
+                caches.shuffle_flag().load(Ordering::Acquire),
+                last_repeat_state(&caches),
+            )
         };
 
         let none = at(None);
@@ -639,8 +648,8 @@ mod tests {
             "an ordinary rebuild must take its fetch mode from the snooze (issue #677)"
         );
         for call in [
-            "devices_for_menu(access_token.as_deref(), fetch)",
-            "queue_for_menu(access_token.as_deref(), fetch)",
+            "devices_for_menu(caches, access_token.as_deref(), fetch)",
+            "queue_for_menu(caches, access_token.as_deref(), fetch)",
         ] {
             assert!(
                 body.contains(call),
@@ -649,7 +658,7 @@ mod tests {
             );
         }
         assert!(
-            !body.contains("cached_devices(") && !body.contains("cached_queue("),
+            !body.contains("cached_devices(caches,") && !body.contains("cached_queue(caches,"),
             "the rebuild must go through the fetch-mode helpers, not the raw fetchers"
         );
     }

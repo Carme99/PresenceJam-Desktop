@@ -316,11 +316,11 @@ pub struct ConfigQuarantine {
 }
 
 impl ConfigQuarantine {
-    /// Production read of the process flag plus an existence probe on the
-    /// `.bak` sibling of the real config path.
-    fn observe() -> Self {
+    /// Production read of the per-`AppState` flag plus an existence probe on
+    /// the `.bak` sibling of the real config path (issue #758 slice 2).
+    fn observe(caches: &crate::state::AppCaches) -> Self {
         Self {
-            quarantined: crate::config::config_was_quarantined(),
+            quarantined: crate::config::config_was_quarantined(caches),
             backup_name: crate::config::config_quarantine_backup_name(),
         }
     }
@@ -1277,7 +1277,7 @@ pub async fn get_diagnostics_snapshot(app: AppHandle) -> Result<DiagnosticsSnaps
         // plus sanitization boundary that tests can drive with a planted
         // marker record (#603) or a planted quarantine (#537).
         let failed_update_install = crate::updater_bg::read_failed_install_marker();
-        let quarantine = ConfigQuarantine::observe();
+        let quarantine = ConfigQuarantine::observe(&state.caches);
         build_snapshot(
             &state,
             log_dir,
@@ -1659,7 +1659,7 @@ pub async fn save_diagnostics_snapshot(app: AppHandle) -> Result<String, String>
             log_dir,
             probe_keychain(),
             crate::updater_bg::read_failed_install_marker(),
-            ConfigQuarantine::observe(),
+            ConfigQuarantine::observe(&state.caches),
         );
         let bytes = serialize_snapshot(&snapshot)?;
         let dir = app_clone.path().download_dir().map_err(|e| {

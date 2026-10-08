@@ -577,7 +577,11 @@ fn run_inner(
             // extra request, no cache. System sources do not surface
             // shuffle/repeat (the spec leaves them unset); the helper
             // is a no-op in that case.
-            crate::tray::note_playback_modes(now.context.shuffle, now.context.repeat);
+            crate::tray::note_playback_modes(
+                &state.caches,
+                now.context.shuffle,
+                now.context.repeat,
+            );
             // Issue #344: debug, not info — title/artist at info
             // level land verbatim in the diagnostics `recent_logs`
             // tail (a paste-able support artifact). No raw track
@@ -770,6 +774,7 @@ fn run_inner(
                                             return iteration;
                                         }
                                         crate::tray::note_playback_modes(
+                                            &state.caches,
                                             now.context.shuffle,
                                             now.context.repeat,
                                         );

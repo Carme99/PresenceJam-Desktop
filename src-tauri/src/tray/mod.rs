@@ -20,20 +20,17 @@ pub(crate) mod testkit;
 pub use actions::{
     await_sync_toggle, force_tray_refresh, force_tray_refresh_from_app, refresh_tray_for_locale,
     refresh_tray_from_state, repaint_tray_from_state, run_player_action, tray_write_lock,
-    DELAYED_REFRESH_IN_FLIGHT, TOGGLE_SETTLE_POLL, TOGGLE_SETTLE_TIMEOUT,
+    TOGGLE_SETTLE_POLL, TOGGLE_SETTLE_TIMEOUT,
 };
 pub use cache::{
     action_fetch_due, cache_buckets, cached_devices, cached_queue, devices_for_menu,
     paint_fetch_mode, queue_for_menu, tray_fetch_mode, DeviceCacheSlot, TrayFetch, TrayPaint,
-    DEVICES_CACHE, LAST_ACTION_FETCH, LAST_TRAY_ACTION, QUEUE_CACHE, TRAY_POST_ACTION_FETCH_MIN,
-    TRAY_SPOTIFY_FETCH_THROTTLE,
+    TRAY_POST_ACTION_FETCH_MIN, TRAY_SPOTIFY_FETCH_THROTTLE,
 };
 pub use dedup::{
-    consume_playback_state_changed, last_repeat_state, last_tray_state, live_window_visible,
-    note_playback_modes, note_playing_state, note_window_visibility, repeat_menu_label,
-    shuffle_toggle_target, sync_status_line, tray_snapshot_for, tray_state_changed, window_visible,
-    TrayStateSnapshot, LAST_PLAYING_STATE, LAST_REPEAT_STATE, LAST_SHUFFLE_STATE, LAST_TRAY_STATE,
-    WINDOW_VISIBLE,
+    consume_playback_state_changed, last_repeat_state, live_window_visible, note_playback_modes,
+    note_playing_state, note_window_visibility, repeat_menu_label, shuffle_toggle_target,
+    sync_status_line, tray_snapshot_for, tray_state_changed, window_visible, TrayStateSnapshot,
 };
 pub use devices::{
     build_devices_submenu_from_devices, build_queue_submenu_from_queue, build_seek_submenu,
@@ -273,10 +270,14 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
                     let _ = window.hide();
                     // Issue #886: the dedup key reads the visibility mirror,
                     // so the tray's own window changes must report it.
-                    note_window_visibility(false);
+                    if let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() {
+                        note_window_visibility(&state.caches, false);
+                    }
                 } else {
                     let _ = window.show();
-                    note_window_visibility(true);
+                    if let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() {
+                        note_window_visibility(&state.caches, true);
+                    }
                     // Issue #483: a minimized window stays minimized
                     // after show() -- unminimize first (mirrors the
                     // single-instance raise in lib.rs and show_window).
@@ -331,7 +332,9 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             let _ = app.emit("navigate", "settings");
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
-                note_window_visibility(true);
+                if let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() {
+                    note_window_visibility(&state.caches, true);
+                }
                 // Issue #483: mirror the unminimize in the Show arm.
                 let _ = window.unminimize();
                 let _ = window.set_focus();
@@ -429,8 +432,19 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             // nothing is recorded and the item keeps showing the truth.
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                let target = shuffle_toggle_target(LAST_SHUFFLE_STATE.load(Ordering::Acquire));
-                let repeat = last_repeat_state();
+                let (target, repeat) = if let Some(state) =
+                    app_handle.try_state::<std::sync::Arc<crate::AppState>>()
+                {
+                    (
+                        shuffle_toggle_target(state.caches.shuffle_flag().load(Ordering::Acquire)),
+                        last_repeat_state(&state.caches),
+                    )
+                } else {
+                    (
+                        shuffle_toggle_target(false),
+                        crate::spotify::RepeatState::Off,
+                    )
+                };
                 run_player_action(
                     &app_handle,
                     "shuffle",
@@ -447,8 +461,16 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             // record-on-success discipline as Shuffle above.
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                let target = last_repeat_state().next();
-                let shuffle = LAST_SHUFFLE_STATE.load(Ordering::Acquire);
+                let (target, shuffle) = if let Some(state) =
+                    app_handle.try_state::<std::sync::Arc<crate::AppState>>()
+                {
+                    (
+                        last_repeat_state(&state.caches).next(),
+                        state.caches.shuffle_flag().load(Ordering::Acquire),
+                    )
+                } else {
+                    (crate::spotify::RepeatState::Off.next(), false)
+                };
                 run_player_action(
                     &app_handle,
                     "repeat",
@@ -806,13 +828,23 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
 
     // Issue #689 (D6): the polling loop emits `playback-state-changed` when
     // a track's playing state changes without the track itself changing.
-    // The Play/Pause mark and the status line read `LAST_PLAYING_STATE`,
+    // The Play/Pause mark and the status line read the playing mirror,
     // which a rebuild only re-seeds on a new track key — so a same-track
     // pause would leave the mark claiming "playing" until the next track.
     // Consuming the event here keeps the tray's belief truthful; the
     // poller's own re-store then drives the rebuild that paints it.
-    app.listen("playback-state-changed", |event| {
-        consume_playback_state_changed(event.payload());
+    // The consume is inline (not spawned): tauri invokes `listen` callbacks
+    // synchronously on the emitter thread, so `note_playing_state` lands
+    // before `process_track` returns and before the rebuild that paints it.
+    // A spawn would race the rebuild and could paint a stale Play/Pause
+    // mark on a same-track pause (#758 slice-2 review). `try_state` is a
+    // lock-free map lookup, so there is no blocking cost to staying inline.
+    let listen_handle = app.handle().clone();
+    app.listen("playback-state-changed", move |event| {
+        let Some(state) = listen_handle.try_state::<std::sync::Arc<crate::AppState>>() else {
+            return;
+        };
+        consume_playback_state_changed(&state.caches, event.payload());
     });
 
     // Immediately set the real menu to reflect actual state (Bug 11 fix).
@@ -902,22 +934,23 @@ pub(crate) fn rebuild_tray_menu(
     // Issue #886: the key reads the visibility mirror, so this path performs no
     // event-loop hop — `live_window_visible` below re-reads the real window on
     // the way to a paint, which is where the label is built.
-    let key_visible = window_visible();
+    let state = app.state::<std::sync::Arc<crate::AppState>>();
+    let caches = &state.caches;
+    let key_visible = window_visible(caches);
     // 4.7.0 (S9 / issue #677): the snooze is resolved once, up front, because it
     // feeds three separate decisions below — the dedup key, the fetch mode and
     // the rendered status line. Issue #886: it comes from a scoped read of the
     // mounted config, so no whole-`AppConfig` clone is allocated per poll and no
     // read guard survives into the blocking Spotify HTTP below. `state` is the
     // same handle the rest of the rebuild uses.
-    let state = app.state::<std::sync::Arc<crate::AppState>>();
     let snooze = snooze_from_app_state(state.inner());
     let snooze_key = snooze.as_ref().map(|sn| snooze_dedup_key(&sn.status));
     // Issue #883: a player action asks for fresh Devices/Up Next lists, but only
     // when it is not already covered by a fetch in flight (`action_fetch_due`),
     // and never while snoozed (`paint_fetch_mode`).
     let action_refresh_due = action_fetch_due(
-        *LAST_TRAY_ACTION.lock(),
-        *LAST_ACTION_FETCH.lock(),
+        *caches.last_tray_action_slot().lock(),
+        *caches.last_action_fetch_slot().lock(),
         Instant::now(),
         TRAY_POST_ACTION_FETCH_MIN,
     );
@@ -925,7 +958,7 @@ pub(crate) fn rebuild_tray_menu(
     // Issue #805: the two cache buckets are part of the key, so a session where
     // nothing else moves still repaints — and therefore re-fetches — once per
     // throttle window instead of keeping whatever the last rebuild rendered.
-    let (devices_bucket, queue_bucket) = cache_buckets();
+    let (devices_bucket, queue_bucket) = cache_buckets(caches);
     // Issue #869: the active profile id rides the dedup key so a switch —
     // tray click, CLI, or Settings card — repaints the submenu's check
     // mark. Cloned out of the short-lived read guard because the snapshot
@@ -943,9 +976,11 @@ pub(crate) fn rebuild_tray_menu(
         devices_bucket,
         queue_bucket,
         active_profile_key,
+        caches.shuffle_flag().load(Ordering::Acquire),
+        last_repeat_state(caches),
     );
     {
-        let last = last_tray_state().lock();
+        let last = caches.last_tray_state_slot().lock();
         if !tray_state_changed(last.as_ref(), &snapshot) {
             // No-op: menu state hasn't changed.
             return Ok(());
@@ -954,7 +989,7 @@ pub(crate) fn rebuild_tray_menu(
         // loop observed a genuinely new track (or a stop): its stored
         // `is_playing` is only fresh at track-change time. Tray-initiated
         // actions and the poller's `playback-state-changed` event update
-        // LAST_PLAYING_STATE themselves, and a forced rebuild keeps the
+        // the playing mirror themselves, and a forced rebuild keeps the
         // same track_key, so neither path re-seeds here.
         let track_changed = match last.as_ref() {
             Some(prev) => prev.track_key != snapshot.track_key,
@@ -965,7 +1000,7 @@ pub(crate) fn rebuild_tray_menu(
                 .as_ref()
                 .map(|t| t.is_playing)
                 .unwrap_or(false);
-            note_playing_state(fresh_playing);
+            note_playing_state(caches, fresh_playing);
         }
         // Do NOT update the snapshot yet. If the rebuild below fails
         // (e.g., set_menu returns Err), we want the next call with the
@@ -978,7 +1013,7 @@ pub(crate) fn rebuild_tray_menu(
     // therefore cannot leave the Show/Hide label wrong, and the mirror self-heals
     // for the polls that follow.
     let is_window_visible = live_window_visible(app);
-    note_window_visibility(is_window_visible);
+    note_window_visibility(caches, is_window_visible);
 
     // Fetch Spotify data OUTSIDE the tray write lock, and only when the fetch
     // mode allows it. The throttled caches are snapshotted and fetched without
@@ -994,10 +1029,12 @@ pub(crate) fn rebuild_tray_menu(
     if fetch == TrayFetch::RefreshNow {
         // Recorded BEFORE the requests run: a click that lands while they are in
         // flight must reuse them, not start a pair of its own (issue #883).
-        *LAST_ACTION_FETCH.lock() = Some(Instant::now());
+        *caches.last_action_fetch_slot().lock() = Some(Instant::now());
     }
-    let devices: Vec<crate::spotify::DeviceInfo> = devices_for_menu(access_token.as_deref(), fetch);
-    let queue: Option<crate::spotify::QueueInfo> = queue_for_menu(access_token.as_deref(), fetch);
+    let devices: Vec<crate::spotify::DeviceInfo> =
+        devices_for_menu(caches, access_token.as_deref(), fetch);
+    let queue: Option<crate::spotify::QueueInfo> =
+        queue_for_menu(caches, access_token.as_deref(), fetch);
     // Issue #871: the active device's capability flags gate the playback
     // submenu — Volume disabled when `actions.setting_volume` is false,
     // Seek disabled when `actions.seeking` is false, Shuffle disabled when
@@ -1099,15 +1136,15 @@ pub(crate) fn rebuild_tray_menu(
         })?;
 
     // Spotify playback controls (issue #3.0-P3). Play/Pause is a single
-    // check-item whose native checked state comes from LAST_PLAYING_STATE
-    // (see the static's docs — the polling loop's stored track goes stale
-    // on a same-track pause); the Devices/Up Next submenus are built from
+    // check-item whose native checked state comes from `playing_flag`
+    // (the polling loop's stored track goes stale on a same-track pause);
+    // the Devices/Up Next submenus are built from
     // the pre-fetched throttled caches so the polling loop's per-iteration
     // rebuilds don't hammer the Spotify API. The checkmark is derived from
-    // (track_id, is_playing) via the track_key dedup and LAST_PLAYING_STATE,
+    // (track_id, is_playing) via the track_key dedup and `playing_flag`,
     // so a same-track pause flips without waiting for the next poll. See
     // issues #229 and #217.
-    let is_playing = LAST_PLAYING_STATE.load(Ordering::Acquire);
+    let is_playing = caches.playing_flag().load(Ordering::Acquire);
     // Issue #591: a disabled head-of-menu status line stating what the app
     // is actually doing (syncing / paused / not syncing). Everything below
     // is derived from state already in scope for this rebuild, so the line
@@ -1177,7 +1214,7 @@ pub(crate) fn rebuild_tray_menu(
     // documents both as sources of truth for "can I do this?"; the
     // capability flag wins when the device reports it).
     let shuffle = CheckMenuItemBuilder::with_id(ID_SHUFFLE, s.shuffle)
-        .checked(LAST_SHUFFLE_STATE.load(Ordering::Acquire))
+        .checked(caches.shuffle_flag().load(Ordering::Acquire))
         .enabled(!active_is_restricted && active_actions.toggling_shuffle)
         .build(app)
         .map_err(|e| {
@@ -1187,7 +1224,7 @@ pub(crate) fn rebuild_tray_menu(
             );
             e.to_string()
         })?;
-    let repeat_state = last_repeat_state();
+    let repeat_state = last_repeat_state(caches);
     let repeat = CheckMenuItemBuilder::with_id(ID_REPEAT, repeat_menu_label(s, repeat_state))
         .checked(repeat_state.is_on())
         .enabled(
@@ -1419,7 +1456,7 @@ pub(crate) fn rebuild_tray_menu(
     // Issue #882: the startup paint never commits — it renders the caches
     // only, so recording it would dedup away the first real rebuild.
     if paint == TrayPaint::Deduped {
-        *last_tray_state().lock() = Some(snapshot);
+        *caches.last_tray_state_slot().lock() = Some(snapshot);
     }
 
     log::info!(
@@ -1947,9 +1984,15 @@ mod tests {
             body.contains("app.listen(\"playback-state-changed\""),
             "setup_tray must subscribe to the poller's playback-state-changed event (issue #689)"
         );
+        // The consume is inline on the listener thread (not spawned): a spawn
+        // would race the rebuild and could paint a stale Play/Pause mark.
         assert!(
-            body.contains("consume_playback_state_changed(event.payload())"),
-            "the subscription must hand the payload to the tray's consumer"
+            body.contains("consume_playback_state_changed(&state.caches, event.payload())"),
+            "the subscription must hand the payload to the tray's consumer inline"
+        );
+        assert!(
+            !body.contains("std::thread::spawn"),
+            "the playback-state consume must not hop threads (issue #689 ordering)"
         );
     }
     /// Issue #882: `setup_tray` runs on the main thread inside Tauri's
@@ -2118,10 +2161,14 @@ mod tests {
     #[test]
     fn discarded_rebuilds_query_neither_the_window_nor_a_config_clone() {
         // The mirror is the key's source and round-trips.
-        note_window_visibility(true);
-        assert!(window_visible(), "the mirror must report what was recorded");
-        note_window_visibility(false);
-        assert!(!window_visible());
+        let caches = crate::state::AppCaches::new();
+        note_window_visibility(&caches, true);
+        assert!(
+            window_visible(&caches),
+            "the mirror must report what was recorded"
+        );
+        note_window_visibility(&caches, false);
+        assert!(!window_visible(&caches));
 
         let prod = tray_prod_source();
         let body = body_of(prod, "fn rebuild_tray_menu(");
@@ -2129,7 +2176,7 @@ mod tests {
             .find("tray_state_changed(")
             .expect("the rebuild must keep the dedup guard");
         let mirror = body
-            .find("window_visible()")
+            .find("window_visible(caches)")
             .expect("the dedup key must read the visibility mirror (issue #886)");
         assert!(
             mirror < guard,

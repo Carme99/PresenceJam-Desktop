@@ -198,8 +198,8 @@ matrix builds **aarch64 macOS only** — Intel Macs never receive updates
 `tray/mod.rs` builds the menu natively, from in-process state:
 
 - **Shuffle / Repeat are real toggles (#582).** Both are
-  `CheckMenuItemBuilder` items; Shuffle's mark reads `LAST_SHUFFLE_STATE` and
-  Repeat's reads `LAST_REPEAT_STATE` plus a mode-spelling label
+  `CheckMenuItemBuilder` items; Shuffle's mark reads `shuffle_flag` and
+  Repeat's reads `repeat_flag` plus a mode-spelling label
   (`Repeat: Off` / `Repeat: Context` / `Repeat: Track` — a check mark alone cannot
   tell the last two apart). Those atoms are written by `note_playback_modes` from
   the poll body itself (no extra request, no new scope) and optimistically by a

@@ -443,9 +443,8 @@ fn teams_session_verdict(
 /// from `is_onboarding_complete` so the async runtime can keep serving other
 /// commands while the refresh round-trips complete.
 fn is_onboarding_complete_impl(state: &Arc<AppState>, app: &AppHandle) -> Result<bool, String> {
-    let config = config::load_config()?;
+    let config = config::load_config(&state.caches)?;
     let spotify_configured = !config.spotify.client_id.is_empty();
-
     // Clone out of the token locks BEFORE any network call: a read guard held
     // across a 10 s HTTPS round-trip would block the polling thread's write to
     // the same slot for that whole window.

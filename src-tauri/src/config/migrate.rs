@@ -2,7 +2,7 @@ use super::io::{atomic_write_json, get_config_path};
 use super::schema::AppConfig;
 use super::transfer::{legacy_client_secret, strip_client_secret_keys};
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tauri::Emitter;
 /// The config schema version THIS binary writes (CfgDiag#1, issue #536).
 /// Bump whenever the persisted shape gains or changes a field that needs a
@@ -96,10 +96,13 @@ pub fn migrate_legacy_client_secret() {
 /// one-time [`SPOTIFY_SECRET_CONFLICT_EVENT`] so Settings can prompt
 /// Settings → Reconnect Spotify (payload carries the manual step).
 /// All other outcomes are silent apart from the usual `[CFG]` logs.
-pub fn migrate_legacy_client_secret_with_app(app: &tauri::AppHandle) -> LegacySecretOutcome {
+pub fn migrate_legacy_client_secret_with_app(
+    caches: &crate::state::AppCaches,
+    app: &tauri::AppHandle,
+) -> LegacySecretOutcome {
     let outcome = run_legacy_secret_migration();
     if outcome == LegacySecretOutcome::ConflictKeychainDiffers {
-        emit_spotify_secret_conflict_once(app);
+        emit_spotify_secret_conflict_once(caches, app);
     }
     outcome
 }
@@ -136,15 +139,14 @@ pub(crate) fn decide_legacy_secret_outcome(
         Err(_) => LegacySecretOutcome::Migrated,
     }
 }
-/// Process-wide guard so the conflict event fires at most once per launch,
-/// no matter how often the migration entry points are called.
-static CONFLICT_EVENT_SENT: AtomicBool = AtomicBool::new(false);
-/// Emit [`SPOTIFY_SECRET_CONFLICT_EVENT`] unless already sent this process.
-/// Follows the `let _ = app.emit(...)` pattern used in `poll_once.rs`;
-/// the payload tells Settings to prompt Reconnect Spotify. Returns true
-/// when this call performed the (single) emit.
-fn emit_spotify_secret_conflict_once(app: &tauri::AppHandle) -> bool {
-    if CONFLICT_EVENT_SENT.swap(true, Ordering::AcqRel) {
+/// Per-`AppState` guard so the conflict event fires at most once per launch,
+/// no matter how often the migration entry points are called (issue #758
+/// slice 2: owned by `AppCaches`, not a process static).
+fn emit_spotify_secret_conflict_once(
+    caches: &crate::state::AppCaches,
+    app: &tauri::AppHandle,
+) -> bool {
+    if caches.conflict_sent_flag().swap(true, Ordering::AcqRel) {
         return false;
     }
     log::warn!(

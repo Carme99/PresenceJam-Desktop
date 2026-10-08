@@ -14,7 +14,7 @@ use crate::polling::{
     track_rule_conditions_match, track_rule_hit, track_rule_schedule_matches, TrackRuleContext,
 };
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 /// Log tag prefix for this submodule (issue #79 item 3).
 const CMD: &str = "[CMD.RULES]";
@@ -92,7 +92,7 @@ pub struct RulesExplanation {
 /// verdict matches what a real poll would have done.
 #[tauri::command]
 pub fn explain_rules(
-    _app: AppHandle,
+    app: AppHandle,
     now_minutes: u16,
     weekday: u8,
     synthetic_track: SyntheticTrack,
@@ -103,7 +103,14 @@ pub fn explain_rules(
         synthetic_track.artist,
         synthetic_track.track,
     );
-    let config = crate::config::load_config().ok().map(std::sync::Arc::new);
+    let config = app
+        .try_state::<std::sync::Arc<crate::AppState>>()
+        .map(|s| {
+            crate::config::load_config(&s.caches)
+                .ok()
+                .map(std::sync::Arc::new)
+        })
+        .unwrap_or(None);
     explain_rules_with_config(&config, now_minutes, weekday, &synthetic_track)
 }
 

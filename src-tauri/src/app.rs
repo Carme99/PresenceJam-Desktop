@@ -329,7 +329,9 @@ pub(crate) fn forward_launch_to_running_instance(app: &AppHandle, argv: Vec<Stri
             // Issue #886: the tray's dedup key reads a visibility mirror, so every
             // path that shows the window has to report it — otherwise the raise
             // would be deduped away and the Show/Hide label would keep "Show Window".
-            crate::tray::note_window_visibility(true);
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                crate::tray::note_window_visibility(&state.caches, true);
+            }
             let _ = window.unminimize();
             let _ = window.set_focus();
         }
@@ -528,7 +530,7 @@ fn setup_keychain_cache() {
 /// Load config into `AppState`, honour start-minimized.
 fn setup_config(app: &mut tauri::App, state: &Arc<AppState>, cli_mode: bool) {
     // Load config into AppState
-    match config::load_config() {
+    match config::load_config(&state.caches) {
         Ok(cfg) => {
             // #226: wire logging.enabled / log_level into the logger after
             // config load. The mapping lives in `config::apply_log_level`
@@ -567,7 +569,7 @@ fn setup_config(app: &mut tauri::App, state: &Arc<AppState>, cli_mode: bool) {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                     // Issue #886: report the hide to the tray's mirror.
-                    crate::tray::note_window_visibility(false);
+                    crate::tray::note_window_visibility(&state.caches, false);
                 }
                 #[cfg(target_os = "macos")]
                 {
@@ -597,7 +599,7 @@ fn setup_secret_migration(app: &tauri::App, state: &Arc<AppState>) {
     // the setup hook runs before any webview has mounted, so the event
     // can never reach Settings' `onMount` listener — `get_sync_status`
     // replays the flag for late mounters instead.
-    if config::migrate_legacy_client_secret_with_app(app.handle())
+    if config::migrate_legacy_client_secret_with_app(&state.caches, app.handle())
         == config::LegacySecretOutcome::ConflictKeychainDiffers
     {
         state
@@ -1242,7 +1244,9 @@ pub fn run() {
                 let _ = window.hide();
                 // Issue #886: the hide has to reach the tray's visibility mirror,
                 // which is what the dedup key is built from.
-                crate::tray::note_window_visibility(false);
+                if let Some(state) = window.app_handle().try_state::<Arc<AppState>>() {
+                    crate::tray::note_window_visibility(&state.caches, false);
+                }
                 api.prevent_close();
             }
         })
