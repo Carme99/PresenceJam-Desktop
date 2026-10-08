@@ -487,6 +487,19 @@ input[type='radio'] {
   color: var(--fg-subtle);
   line-height: var(--lh-normal);
 }
+/* Clamp feedback (#750 slice 2): promoted from Rules/StatusFormat — one
+ * definition, like `.hint` above. PollingCard never carried its own copy,
+ * so its hint renders styled for the first time here; Onboarding's
+ * poll-interval hint picks it up too. */
+.clamp-hint {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--warning-soft);
+  color: var(--warning);
+  border-radius: var(--r-md);
+  font-size: var(--fs-xs);
+  line-height: var(--lh-normal);
+}
 .error-message {
   color: var(--danger);
   font-size: var(--fs-sm);

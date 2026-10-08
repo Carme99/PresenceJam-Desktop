@@ -296,7 +296,7 @@ describe('fixed control and artwork sizes are tokens (#960)', () => {
       ['src/lib/components/Dashboard.svelte', '.not-playing-icon', ['width', 'height']],
       ['src/lib/components/LogViewer.svelte', '.log-entry', ['grid-template-columns']],
       ['src/lib/components/LogViewer.svelte', '.level-badge', ['font-size']],
-      ['src/lib/components/Settings.svelte', '.swatch', ['height']],
+      ['src/lib/components/settings/AppearanceCard.svelte', '.swatch', ['height']],
       ['src/lib/components/UpdatePrompt.svelte', '.dismiss-btn', ['width', 'height']],
       ['src/lib/components/Reconnect.svelte', '.info-icon', ['width', 'height']],
     ];

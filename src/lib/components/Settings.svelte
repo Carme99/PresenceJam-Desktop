@@ -14,23 +14,25 @@
   import LoggingCard from './settings/LoggingCard.svelte';
   import BackupCard from './settings/BackupCard.svelte';
   import ShortcutsCard from './settings/ShortcutsCard.svelte';
-  import { shortcutReasonLabel, normalizeShortcutReason } from '$lib/utils/shortcuts';
-  import { configStore, saveConfig, loadConfig, updateConfig, defaultConfig, clientSecretStateOf, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
+  import SpotifyCard from './settings/SpotifyCard.svelte';
+  import TeamsCard from './settings/TeamsCard.svelte';
+  import PresenceCard from './settings/PresenceCard.svelte';
+  import StatusFormatCard from './settings/StatusFormatCard.svelte';
+  import PollingCard from './settings/PollingCard.svelte';
+  import NotificationsCard from './settings/NotificationsCard.svelte';
+  import AppearanceCard from './settings/AppearanceCard.svelte';
+  import ProfilesCard from './settings/ProfilesCard.svelte';
+  import UpdatesCard from './settings/UpdatesCard.svelte';
+  import { shortcutReasonLabel } from '$lib/utils/shortcuts';
+  import { configStore, saveConfig, loadConfig, defaultConfig, DEFAULT_PROFANITY_PLACEHOLDER } from '$lib/stores/config';
   import type { AppConfig, SyncStatus } from '$lib/types';
-  import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, teamsPollMutex, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
-  import DeviceCodeBox from './DeviceCodeBox.svelte';
+  import { authFlow, setSpotifyPhase, setTeamsPhase, resetSpotifyAuthFlow, resetTeamsAuthFlow, pollTeamsAuth } from '$lib/stores/authFlow.svelte';
   import { useAuthListeners } from '$lib/utils/useAuthListeners';
-  import { pickReconnectProvider } from '$lib/utils/routeReconnect';
   import PageHeader from './PageHeader.svelte';
-  import { t, i18n, type Locale, type TKey } from '$lib/i18n';
+  import { t, i18n } from '$lib/i18n';
   import { theme, density } from '$lib/stores/theme';
-  import {
-    NOTIFICATION_CLASSES,
-    notificationPreferences,
-    setNotificationPreference,
-    type NotificationClass
-  } from '$lib/stores/notifications';
-  import { presence, clearAuthPersistWarning } from '$lib/stores/presence';
+  import { NOTIFICATION_CLASSES } from '$lib/stores/notifications';
+  import { clearAuthPersistWarning } from '$lib/stores/presence';
   import { devLog } from '$lib/utils/dev';
 
   let localConfig = $state<AppConfig>(structuredClone($configStore));
@@ -86,20 +88,6 @@
     markDirty();
   }
 
-  // C9: effective polling bounds, mirroring Rust `clamp_polling`
-  // (`config::clamp_polling`): minimum clamps to [5, 30] first, then
-  // maximum clamps to [effectiveMinimum, 300]. Consumed twice — the
-  // max-interval input's native `min` bound (issue #243) and the clamp
-  // hint below it. An entered max below min is silently raised on save;
-  // the hint surfaces that effective value immediately.
-  let pollingClamp = $derived.by(() => {
-    const rawMin = Number(localConfig.polling.minimum_interval_seconds);
-    const rawMax = Number(localConfig.polling.max_interval_seconds);
-    const effMin = Math.min(30, Math.max(5, rawMin));
-    const effMax = Math.min(300, Math.max(effMin, rawMax));
-    return { active: rawMin > rawMax, effMin, effMax };
-  });
-
   // C9: per-section "Reset to default" using the shared defaults source.
   function resetPresenceDefaults() {
     localConfig.teams.availability_sync = defaultConfig.teams.availability_sync;
@@ -149,14 +137,6 @@
     rulesCard?.clearRemoval();
     markDirty();
   }
-  // Issue #869: name for a freshly-added profile. The Rust side dedupes
-  // again on load, so a concurrent edit cannot wedge the form — this is
-  // only the prefix the new-row picker suggests. `Profile` is the prefix
-  // the user can rename, and the trailing number is just a uniqueness
-  // hint until they do.
-  function defaultProfileName(n: number): string {
-    return `Profile ${n}`;
-  }
   function resetPollingDefaults() {
     localConfig.polling = structuredClone(defaultConfig.polling);
     markDirty();
@@ -169,15 +149,6 @@
   // `::clamp_teams`, `::clamp_polling`) instead of silently differing.
   const EXTRA_WORDS_MAX_ENTRIES = 64;
   const EXTRA_WORDS_MAX_CHARS = 32;
-  const PAUSE_BACKOFF_MIN_SECONDS = 60;
-  const PAUSE_BACKOFF_MAX_SECONDS = 3600;
-  // Issue #869: presence-profile bounds mirror `clamp_presence_profiles`.
-  // The Rust side is the source of truth, so these constants exist only to
-  // give the input its `maxlength` / `max` attribute. A user typing past
-  // either is still accepted by Rust, but the form lets them see the
-  // effective value the backend stored rather than the raw keystrokes.
-  const MAX_PROFILE_ID_CHARS = 32;
-  const MAX_PROFILE_IDLE_SECONDS = 86400;
   /**
    * Rust bounds the lexicon to 64 entries of 32 chars at the IPC boundary
    * (issue #538). Counted here so the hint can say what will actually be
@@ -200,15 +171,6 @@
     };
   });
 
-  /** The pause-backoff ceiling a typed value lands on after `clamp_polling`. */
-  let pauseBackoffClamp = $derived.by(() => {
-    const raw = Number(localConfig.polling.pause_backoff_max_seconds);
-    const effective = Math.min(
-      PAUSE_BACKOFF_MAX_SECONDS,
-      Math.max(PAUSE_BACKOFF_MIN_SECONDS, Number.isFinite(raw) ? raw : 300)
-    );
-    return { active: effective !== raw, effective };
-  });
   function resetAppearanceDefaults() {
     theme.set('system');
     density.set('comfortable');
@@ -218,50 +180,6 @@
     markDirty();
   }
 
-  // #552: a radiogroup must own `role="radio"`/`aria-checked` children with a
-  // roving tabindex and arrow-key navigation. The cards declared
-  // `aria-pressed`, which assistive tech ignores inside a radiogroup and
-  // which carries no single-selection contract at all.
-  let themeDarkButton: HTMLButtonElement | undefined = $state();
-  let themeLightButton: HTMLButtonElement | undefined = $state();
-  let themeSystemButton: HTMLButtonElement | undefined = $state();
-
-  // #680: `system` joins the radiogroup, so the arrow-key walk has to cycle
-  // through three cards instead of toggling two.
-  const THEME_OPTIONS = ['dark', 'light', 'system'] as const;
-  type ThemeOption = (typeof THEME_OPTIONS)[number];
-
-  function themeRadioKeydown(e: KeyboardEvent, current: ThemeOption) {
-    const isNext = e.key === 'ArrowRight' || e.key === 'ArrowDown';
-    const isPrev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
-    if (!isNext && !isPrev) return;
-    e.preventDefault();
-    const step = isNext ? 1 : THEME_OPTIONS.length - 1;
-    const next = THEME_OPTIONS[(THEME_OPTIONS.indexOf(current) + step) % THEME_OPTIONS.length];
-    theme.set(next);
-    // Selection follows focus, and the roving tabindex moves with it.
-    const buttons: Record<ThemeOption, HTMLButtonElement | undefined> = {
-      dark: themeDarkButton,
-      light: themeLightButton,
-      system: themeSystemButton
-    };
-    buttons[next]?.focus();
-  }
-
-  // #675: one toggle per desktop-notification class. The store is the shared
-  // state (persisted to `config.json` through `saveConfig`), so a toggle here
-  // reaches the always-mounted main window. #549 still holds: the OS prompt's
-  // answer decides whether a class may notify, and a denied permission must
-  // not leave a checked toggle behind.
-  let notificationsMessage = $state('');
-  // Keys are `TKey`, so a class added on the Rust side cannot be rendered
-  // with a missing dictionary entry.
-  const NOTIFICATION_LABELS: Record<NotificationClass, TKey> = {
-    track_change: 'settings.notificationsTrackChange',
-    sync_stopped: 'settings.notificationsSyncStopped',
-    auth_required: 'settings.notificationsAuthRequired',
-    update_staged: 'settings.notificationsUpdateStaged'
-  };
   // #675: the form's `localConfig` is snapshotted once, but the notification
   // classes are immediate-apply and shared, so a toggle made in the *other*
   // Settings view (a popped-out pane runs beside this one) — or in the main
@@ -323,11 +241,6 @@
   // not have Settings mounted — and the shared `presence` store is what this
   // pane renders from. Settings only displays the fault and offers the retry.
 
-  // #560: the OS keychain's answer about the stored client_secret —
-  // `present` / `absent` / `unavailable`. The credential row must branch on
-  // this rather than on `client_secret_set`, which cannot tell "the user never
-  // configured a secret" from "the keychain would not answer".
-  let spotifySecretState = $derived(clientSecretStateOf(localConfig));
 
   async function refreshGrantedScopes() {
     try {
@@ -578,6 +491,18 @@
     // happened; both save paths (Save and "Save & leave") go through here.
     shortcutsCard?.refreshAfterSave();
   }
+  /**
+   * #750 slice 2: the Appearance autostart toggle is self-applying
+   * (`data-no-draft`), so its failure line arrives outside the save path —
+   * but it shares the `saveMessage` channel the footer renders. Main owned
+   * this through the same `saveTimeout` with a 3000ms clear; the callback
+   * restores that window so a stuck line cannot outlive it.
+   */
+  function handleAutostartError(message: string) {
+    saveMessage = message;
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(() => saveMessage = '', 3000);
+  }
   // #750: BackupCard owns the dialogs and the status line; the parent only
   // re-snapshots the draft from what is now on disk (the #297 invariant).
   async function handleBackupImported() {
@@ -626,61 +551,6 @@
     }
   }
 
-  // ── #964: the waiting-state escape hatch ────────────────────────────────
-  //
-  // The poller's `spotify-reconnect-required` event lands the user on this
-  // pane with the flow already waiting, so this card is where a lost browser
-  // tab strands them. Reconnect has offered the two ways out since #558; this
-  // is the same pair, reusing its copy.
-  let spotifyManualUrl = $state('');
-  let manualSubmitBusy = $state(false);
-  let manualUrlError = $state('');
-
-  // `reconnectSpotify` refuses a restart while the phase is `waiting`, so the
-  // phase is cleared first and this is not a nested call for its own sake.
-  async function restartSpotifySignIn() {
-    resetSpotifyAuthFlow();
-    await reconnectSpotify();
-  }
-
-  /** Extract `code`/`state` from a pasted Spotify redirect URL. */
-  function extractCodeFromUrl(url: string): { code: string; state: string } | null {
-    try {
-      const parsed = new URL(url);
-      const code = parsed.searchParams.get('code');
-      if (!code) return null;
-      // A missing `state` still passes (empty string) — the backend rejects it,
-      // mirroring the deep-link CSRF check (#162).
-      return { code, state: parsed.searchParams.get('state') ?? '' };
-    } catch {
-      return null;
-    }
-  }
-
-  /** Complete the flow from a pasted redirect URL (the #385 fallback). */
-  async function submitManualUrl() {
-    if (manualSubmitBusy) return;
-    const extracted = extractCodeFromUrl(spotifyManualUrl);
-    if (!extracted) {
-      manualUrlError = t('validation.noCodeInUrl');
-      return;
-    }
-    manualSubmitBusy = true;
-    manualUrlError = '';
-    try {
-      await invoke('complete_spotify_auth_manual', {
-        code: extracted.code,
-        oauthState: extracted.state
-      });
-      setSpotifyPhase('done');
-    } catch (e) {
-      console.error('[SETTINGS] complete_spotify_auth_manual failed:', e);
-      manualUrlError = String(e);
-      setSpotifyPhase('error', String(e));
-    } finally {
-      manualSubmitBusy = false;
-    }
-  }
 
   async function reconnectTeams() {
     if (teamsAuthWaiting) return;
@@ -705,39 +575,6 @@
       console.error('[SETTINGS] reconnect_teams failed:', e);
       setTeamsPhase('error', String(e));
     }
-  }
-  /**
-   * #932 (rework): the auth-persist banner's reconnect action, label and
-   * "in flight" disabled state all route off the `provider` discriminator.
-   * Centralising the routing here lets the JSX pick `{reconnect.label}`,
-   * `{reconnect.handler}` and `{reconnect.waiting}` without re-deriving
-   * the same ternary three times in the template, and lets the unit test
-   * assert the routing without re-implementing the ternary in JSX. The
-   * pure routing decision lives in `src/lib/utils/routeReconnect.ts`
-   * (`pickReconnectProvider`) so a Vitest spec can exercise it without
-   * the component harness — the commit message on `e833931` claimed such
-   * a test existed but no spec asserted the routing. An unknown value
-   * falls back to the Spotify reconnect (the Spotify banner is the newer
-   * of the two, #932 B1) so a future backend payload cannot crash the banner.
-   */
-  function routeReconnect(provider: 'teams' | 'spotify' | string): {
-    label: string;
-    handler: () => Promise<void>;
-    waiting: boolean;
-  } {
-    const target = pickReconnectProvider(provider);
-    if (target === 'teams') {
-      return {
-        label: t('settings.sectionTeams'),
-        handler: reconnectTeams,
-        waiting: teamsAuthWaiting
-      };
-    }
-    return {
-      label: t('settings.sectionSpotify'),
-      handler: reconnectSpotify,
-      waiting: spotifyAuthWaiting
-    };
   }
   /**
    * #785: the shared poll — the #396 mutex, the #429 expiry guard, the phase
@@ -790,21 +627,6 @@
     performBack();
   }
 
-  async function toggleNotificationClass(cls: NotificationClass, e: Event) {
-    const target = e.currentTarget as HTMLInputElement;
-    const applied = await setNotificationPreference(cls, target.checked);
-    if (!applied) {
-      // The store kept the class off, so reset the DOM property this click
-      // already flipped.
-      target.checked = false;
-      notificationsMessage = t('settings.notificationsDenied');
-      return;
-    }
-    notificationsMessage = '';
-    // The form owns a full-config copy; a later "Save" must not write a stale
-    // notifications section back over the toggle that was just persisted.
-    localConfig.notifications = { ...$notificationPreferences };
-  }
 
   // #403: catch-and-surface — WebviewWindow creation/focus can reject
   // (e.g. the window was already closed); never leave a floating promise
@@ -949,258 +771,28 @@
        carrying it here too would duplicate the id in that document. Only one
        view is mounted at a time, so the id stays unique per document. -->
   <div class="sections" id={detached ? undefined : 'main-content'} tabindex="-1">
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionSpotify')}</h2>
-        <span class="badge" class:success={isConnected && !spotifyAuthWaiting}
-              class:warning={spotifyAuthWaiting}
-              class:error={!isConnected && !spotifyAuthWaiting}>
-          <span class="dot"></span>
-          {#if spotifyAuthWaiting}{t('common.reconnecting')}{:else if isConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
-        </span>
-      </header>
-      <div class="form-group">
-        <label for="spotify-client-id">{t('settings.clientId')}</label>
-        <input
-          id="spotify-client-id"
-          type="text"
-          bind:value={localConfig.spotify.client_id}
-          readonly={isConnected}
-          placeholder={t('settings.clientIdPlaceholder')}
-        />
-      </div>
-      <div class="form-group">
-        <span class="form-label">{t('settings.clientSecret')}</span>
-        <p class="hint">
-          <!-- #560: three states, not two. `client_secret_set` is the
-               `Present`-only projection, so branching on it alone told a user
-               whose keyring was locked that nothing was configured and
-               pointed them at onboarding to re-enter a secret that is still
-               stored. -->
-          {#if spotifySecretState === 'present'}
-            {t('settings.secretStoredHint')}
-          {:else if spotifySecretState === 'unavailable'}
-            {t('settings.secretKeychainUnavailable')}
-          {:else}
-            {t('settings.secretNotConfigured')} <button type="button" class="btn-link" onclick={goToOnboarding}>{t('settings.runOnboarding')}</button> {t('settings.toSetUpSpotify')}
-          {/if}
-        </p>
-      </div>
-      <div class="connection-row">
-        {#if isConnected && !spotifyAuthWaiting}
-          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
-        {:else if spotifyAuthWaiting}
-          <div class="spotify-waiting">
-            <span class="hint">{t('settings.completeAuthInBrowser')}</span>
-            <!-- #964: both escapes Reconnect offers for a stuck flow — the
-                 browser tab may be gone, or the sign-in may have finished
-                 after the `presencejam://` deep link was lost. -->
-            <button type="button" class="btn-secondary" onclick={restartSpotifySignIn}>{t('reconnect.restartSignIn')}</button>
-            <p class="hint" id="spotify-manual-url-hint">{t('onboarding.manualUrlHint')}</p>
-            <input
-              id="spotify-manual-url"
-              data-no-draft
-              type="text"
-              bind:value={spotifyManualUrl}
-              aria-label={t('onboarding.manualUrlLabel')}
-              placeholder={t('onboarding.manualUrlPlaceholder')}
-              aria-describedby="spotify-manual-url-hint"
-              onkeydown={(e) => e.key === 'Enter' && submitManualUrl()}
-            />
-            <button type="button" class="btn-secondary" onclick={submitManualUrl} disabled={manualSubmitBusy}>
-              {t('onboarding.submitCode')}
-            </button>
-            {#if manualUrlError}
-              <p class="error-message" role="alert">{manualUrlError}</p>
-            {/if}
-          </div>
-        {:else if spotifySecretState === 'absent'}
-          <!-- #965: a reconnect cannot succeed without a stored client secret
-               (the flow starts from the one in the keychain), so the card
-               points at onboarding instead of a button that cannot work. -->
-          <button class="btn-secondary" onclick={goToOnboarding}>{t('settings.runOnboarding')}</button>
-        {:else}
-          <!-- #965: disconnected with no flow running had no action at all —
-               the card said "Not connected" and offered nothing, while the
-               Teams row beside it falls through to its own reconnect. -->
-          <button class="btn-secondary" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('settings.reconnectSpotify')}</button>
-        {/if}
-      </div>
-      {#if authFlow.spotify.error}
-        <p class="error-message" role="alert">{authFlow.spotify.error}</p>
-      {/if}
-      {#if playbackScopeMissing}
-        <div class="scope-banner">
-          <span class="hint">{t('settings.playbackScopeBanner')}</span>
-          <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('common.reconnect')}</button>
-        </div>
-      {/if}
-      {#if spotifySecretConflict}
-        <div class="scope-banner">
-          <span class="hint">{t('settings.spotifySecretConflict')}</span>
-          <button type="button" class="btn-link" onclick={reconnectSpotify} disabled={spotifyAuthWaiting}>{t('common.reconnect')}</button>
-        </div>
-      {/if}
-    </section>
-
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionTeams')}</h2>
-        <span class="badge" class:success={teamsStatusConnected && !teamsAuthWaiting}
-              class:warning={teamsAuthWaiting}
-              class:error={!teamsStatusConnected && !teamsAuthWaiting}>
-          <span class="dot"></span>
-          {#if teamsAuthWaiting}{t('common.reconnecting')}{:else if teamsStatusConnected}{t('common.connected')}{:else}{t('common.notConnected')}{/if}
-        </span>
-      </header>
-      <p class="hint">{t('settings.teamsAuthHint')}</p>
-      <div class="connection-row">
-        {#if teamsStatusConnected && !teamsAuthWaiting}
-          <button class="btn-secondary" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('reconnect.reconnectTeams')}</button>
-        {:else if teamsAuthWaiting}
-          <!-- #952: the same device-code block Onboarding and Reconnect render
-               — accent URL pill, monospace select-all code, one countdown.
-               #735: that countdown is deliberately not a live region; the code
-               arrives under `aria-live` and the expiry under `role="alert"`. -->
-          <DeviceCodeBox
-            userCode={authFlow.teams.userCode}
-            verificationUrl={authFlow.teams.verificationUrl}
-            remainingMs={teamsRemainingMs}
-            expired={teamsCodeExpired}
-            busy={teamsPollMutex.inFlight}
-            onCheckNow={checkTeamsSignIn}
-            onNewCode={reconnectTeams}
-          />
-        {:else}
-          <button class="btn-secondary" onclick={reconnectTeams}>{t('reconnect.reconnectTeams')}</button>
-        {/if}
-      </div>
-      <!-- #816: the failure belongs to the card, not to the waiting branch.
-           `setTeamsPhase('error', …)` is what clears `teamsAuthWaiting`, so a
-           block nested inside that branch unmounted the moment the error
-           arrived and the card fell back to a green Connected badge with the
-           same button and no reason shown. `reconnectTeams` calls
-           `resetTeamsAuthFlow()` on entry, so the next attempt clears it. -->
-      {#if authFlow.teams.error}
-        <p class="error-message" role="alert">{authFlow.teams.error}</p>
-      {/if}
-      {#if teamsScopesMissing}
-        <div class="scope-banner">
-          <span class="hint">{t('settings.presenceScopeBanner')}</span>
-          <button type="button" class="btn-link" onclick={reconnectTeams} disabled={teamsAuthWaiting}>{t('common.reconnect')}</button>
-        </div>
-      {/if}
-      {#if $presence.authPersistWarning}
-        <!-- Issue #932: the banner is now provider-aware. Both Teams
-             (#562) and Spotify (#932) sign-in flows feed this banner with
-             a `provider` discriminator; the copy and the reconnect action
-             follow. The Teams banner used to hard-code
-             `settings.teamsPersistWarning` and `reconnectTeams`; the new
-             `settings.authPersistWarning` template takes the provider
-             display name so the same component covers both providers.
-             #693: dismissible as well as retryable — the cause can be one
-             the user cannot fix in-session (a permanently locked keychain,
-             a read-only disk), and a banner that only clears after a
-             *successful* reconnect would be undismissable there. -->
-        {@const warning = $presence.authPersistWarning}
-        {@const reconnect = routeReconnect(warning.provider)}
-        <div class="persist-banner" role="alert">
-          <span class="hint">{t('settings.authPersistWarning', { provider: reconnect.label })}</span>
-          <button
-            type="button"
-            class="btn-link"
-            onclick={reconnect.handler}
-            disabled={reconnect.waiting}
-          >{t('common.reconnect')}</button>
-          <button type="button" class="btn-link dismiss" onclick={clearAuthPersistWarning}>{t('common.dismiss')}</button>
-        </div>
-      {/if}
-    </section>
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionPresence')}</h2>
-        <button type="button" class="btn-link" onclick={resetPresenceDefaults}>{t('common.resetToDefault')}</button>
-      </header>
-      <div class="toggle-row">
-        <label for="availability-sync">{t('settings.availabilitySyncLabel')}</label>
-        <input
-          id="availability-sync"
-          type="checkbox"
-          bind:checked={localConfig.teams.availability_sync}
-        />
-      </div>
-      <p class="hint">
-        {t('settings.availabilitySyncHint')}
-      </p>
-      <div class="toggle-row">
-        <label for="presence-gate">{t('settings.presenceGateLabel')}</label>
-        <input
-          id="presence-gate"
-          type="checkbox"
-          bind:checked={localConfig.teams.presence_gate}
-        />
-      </div>
-      <p class="hint">
-        {t('settings.presenceGateHint')}
-      </p>
-      <!-- Findings #635/#637: the manual-status policy (ON by default) and the
-           opt-in out-of-office gate, in the card the meeting/call gate lives in. -->
-      <div class="toggle-row">
-        <label for="respect-manual-status">{t('settings.respectManualStatusLabel')}</label>
-        <input
-          id="respect-manual-status"
-          type="checkbox"
-          bind:checked={localConfig.teams.respect_manual_status}
-        />
-      </div>
-      <p class="hint">
-        {t('settings.respectManualStatusHint')}
-      </p>
-      <div class="toggle-row">
-        <label for="gate-out-of-office">{t('settings.gateOutOfOfficeLabel')}</label>
-        <input
-          id="gate-out-of-office"
-          type="checkbox"
-          bind:checked={localConfig.teams.gate_when_out_of_office}
-        />
-      </div>
-      <p class="hint">
-        {t('settings.gateOutOfOfficeHint')}
-      </p>
-      <!-- Issue #872: OS-level presentation gate (full-screen app, slide
-           deck, Windows Focus Assist Quiet Time). OFF by default; the
-           toggle is a no-op on Linux/macOS where the probe always
-           returns `Unknown`. -->
-      <div class="toggle-row">
-        <label for="gate-when-presenting">{t('settings.gateWhenPresentingLabel')}</label>
-        <input
-          id="gate-when-presenting"
-          type="checkbox"
-          bind:checked={localConfig.teams.gate_when_presenting}
-        />
-      </div>
-      <p class="hint">
-        {t('settings.gateWhenPresentingHint')}
-      </p>
-      <!-- Issue #873: desktop-idle gate. `0` (the default) keeps 4.7
-           behaviour; non-zero values are clamped to 60–3600 by the
-           Rust loader. The number field sits next to the toggle so the
-           reason the gate fires is clear from the form. -->
-      <div class="toggle-row">
-        <label for="idle-away-after-seconds">{t('settings.idleAwayLabel')}</label>
-        <input
-          id="idle-away-after-seconds"
-          type="number"
-          min="0"
-          max="3600"
-          step="60"
-          bind:value={localConfig.teams.idle_away_after_seconds}
-        />
-      </div>
-      <p class="hint">
-        {t('settings.idleAwayHint')}
-      </p>
-    </section>
+    <SpotifyCard
+      bind:spotify={localConfig.spotify}
+      {isConnected}
+      waiting={spotifyAuthWaiting}
+      {playbackScopeMissing}
+      secretConflict={spotifySecretConflict}
+      onReconnect={reconnectSpotify}
+      onGoToOnboarding={goToOnboarding}
+      onRestartSignIn={reconnectSpotify}
+    />
+    <TeamsCard
+      teamsConnected={teamsStatusConnected}
+      waiting={teamsAuthWaiting}
+      remainingMs={teamsRemainingMs}
+      codeExpired={teamsCodeExpired}
+      scopesMissing={teamsScopesMissing}
+      onReconnect={reconnectTeams}
+      onReconnectSpotify={reconnectSpotify}
+      spotifyWaiting={spotifyAuthWaiting}
+      onCheckNow={checkTeamsSignIn}
+    />
+    <PresenceCard bind:teams={localConfig.teams} onreset={resetPresenceDefaults} />
     <RulesCard
       bind:statusRules={localConfig.status_rules}
       bind:pausedStatusFormat={localConfig.teams.paused_status_format}
@@ -1210,547 +802,38 @@
       onchange={markDirty}
       bind:this={rulesCard}
     />
-    <!-- Issue #869: presence-profile card. The Settings UI is the canonical
-         place to author profiles; the tray / hotkey / CLI only flip the
-         active id. Mirrors `clamp_presence_profiles`: names are deduped +
-         trimmed to 32 chars and the active pointer clears on a missing id. -->
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('profiles.sectionTitle')}</h2>
-      </header>
-      <p class="hint">{t('profiles.sectionHint')}</p>
-      <div class="form-group">
-        <label for="active-profile">{t('profiles.activeProfileLabel')}</label>
-        <select
-          id="active-profile"
-          value={localConfig.active_profile ?? ''}
-          onchange={(e) => {
-            const value = (e.currentTarget as HTMLSelectElement).value;
-            localConfig.active_profile = value === '' ? null : value;
-            markDirty();
-          }}
-        >
-          <option value="">{t('profiles.activeProfileNone')}</option>
-          {#each localConfig.presence_profiles as profile}
-            <option value={profile.name}>{profile.name}</option>
-          {/each}
-        </select>
-        <!-- Issue #869: the picker's options are derived from
-             `localConfig.presence_profiles`, so a name the user just deleted
-             cannot appear; the spec's "unknown id clears to base" safety net
-             is the Rust-side `clamp_presence_profiles`. -->
-      </div>
-      {#if localConfig.presence_profiles.length === 0}
-        <p class="hint">{t('profiles.empty')}</p>
-      {/if}
-      {#each localConfig.presence_profiles as profile, i}
-        <div class="rule-row rule-col" role="group" aria-label={`${t('profiles.sectionTitle')} ${i + 1}`}>
-          <div class="rule-row">
-            <input
-              type="text"
-              value={profile.name}
-              placeholder={t('profiles.profileNamePlaceholder')}
-              aria-label={t('profiles.profileNameLabel')}
-              oninput={(e) => {
-                const next = (e.currentTarget as HTMLInputElement).value;
-                const trimmed = next.slice(0, MAX_PROFILE_ID_CHARS);
-                // Reject duplicates (case-sensitive, ignores self).
-                const clash = localConfig.presence_profiles.some(
-                  (other, idx) => idx !== i && other.name === trimmed
-                );
-                if (clash) {
-                  saveMessage = t('profiles.profileNameDuplicate');
-                  return;
-                }
-                if (trimmed.length === 0) {
-                  saveMessage = t('profiles.profileNameMissing');
-                  return;
-                }
-                saveMessage = '';
-                profile.name = trimmed;
-                markDirty();
-              }}
-            />
-            <button
-              type="button"
-              class="btn-link"
-              onclick={() => {
-                localConfig.presence_profiles.splice(i, 1);
-                // If the active profile was the deleted one, reset to base.
-                if (localConfig.active_profile === profile.name) {
-                  localConfig.active_profile = null;
-                }
-                markDirty();
-              }}
-            >{t('profiles.removeProfile')}</button>
-          </div>
-          <div class="form-group">
-            <label for={`profile-status-${i}`}>{t('profiles.overlayStatusFormatLabel')}</label>
-            <input
-              id={`profile-status-${i}`}
-              type="text"
-              value={profile.status_format ?? ''}
-              placeholder={localConfig.teams.status_format}
-              oninput={(e) => {
-                const v = (e.currentTarget as HTMLInputElement).value;
-                profile.status_format = v.length === 0 ? null : v;
-                markDirty();
-              }}
-            />
-          </div>
-          <div class="form-group">
-            <label class="rule-check">
-              <input
-                type="checkbox"
-                checked={profile.clear_on_pause ?? localConfig.teams.clear_on_pause}
-                onchange={(e) => {
-                  profile.clear_on_pause = (e.currentTarget as HTMLInputElement).checked;
-                  markDirty();
-                }}
-              />
-              <span>{t('profiles.overlayClearOnPauseLabel')}</span>
-            </label>
-          </div>
-          <div class="form-group">
-            <label class="rule-check">
-              <input
-                type="checkbox"
-                checked={profile.availability_sync ?? localConfig.teams.availability_sync}
-                onchange={(e) => {
-                  profile.availability_sync = (e.currentTarget as HTMLInputElement).checked;
-                  markDirty();
-                }}
-              />
-              <span>{t('profiles.overlayAvailabilitySyncLabel')}</span>
-            </label>
-          </div>
-          <div class="form-group">
-            <label class="rule-check">
-              <input
-                type="checkbox"
-                checked={profile.gate_when_out_of_office ?? localConfig.teams.gate_when_out_of_office}
-                onchange={(e) => {
-                  profile.gate_when_out_of_office = (e.currentTarget as HTMLInputElement).checked;
-                  markDirty();
-                }}
-              />
-              <span>{t('profiles.overlayGateOutOfOfficeLabel')}</span>
-            </label>
-          </div>
-          <div class="form-group">
-            <label class="rule-check">
-              <input
-                type="checkbox"
-                checked={profile.gate_when_presenting ?? localConfig.teams.gate_when_presenting}
-                onchange={(e) => {
-                  profile.gate_when_presenting = (e.currentTarget as HTMLInputElement).checked;
-                  markDirty();
-                }}
-              />
-              <span>{t('profiles.overlayGatePresentingLabel')}</span>
-            </label>
-          </div>
-          <div class="form-group">
-            <label for={`profile-idle-${i}`}>{t('profiles.overlayIdleAwayLabel')}</label>
-            <input
-              id={`profile-idle-${i}`}
-              type="number"
-              min="0"
-              max={MAX_PROFILE_IDLE_SECONDS}
-              value={profile.idle_away_after_seconds === null || profile.idle_away_after_seconds === undefined
-                ? ''
-                : Number(profile.idle_away_after_seconds)}
-              placeholder={String(Number(localConfig.teams.idle_away_after_seconds))}
-              oninput={(e) => {
-                const raw = (e.currentTarget as HTMLInputElement).value;
-                if (raw === '') {
-                  profile.idle_away_after_seconds = null;
-                } else {
-                  const n = Math.min(MAX_PROFILE_IDLE_SECONDS, Math.max(0, Number(raw)));
-                  profile.idle_away_after_seconds = n;
-                }
-                markDirty();
-              }}
-            />
-          </div>
-        </div>
-      {/each}
-      <button
-        type="button"
-        class="btn-secondary"
-        onclick={() => {
-          // Generate a unique default name like "Profile 1", "Profile 2", ...
-          // by finding the lowest positive integer suffix that does not
-          // collide with an existing name. The Rust side will dedupe again
-          // on load, so a concurrent edit cannot wedge the form.
-          let n = 1;
-          while (localConfig.presence_profiles.some((p) => p.name === defaultProfileName(n))) {
-            n += 1;
-          }
-          localConfig.presence_profiles.push({ name: defaultProfileName(n) });
-          markDirty();
-        }}
-      >{t('profiles.addProfile')}</button>
-    </section>
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionStatusFormat')}</h2>
-        <button type="button" class="btn-link" onclick={resetStatusFormatDefaults}>{t('common.resetToDefault')}</button>
-      </header>
-      <div class="form-group">
-        <label for="status-format">{t('settings.formatTemplate')}</label>
-        <input
-          id="status-format"
-          type="text"
-          bind:value={localConfig.teams.status_format}
-          placeholder={t('settings.formatTemplatePlaceholder')}
-        />
-      </div>
-      <div class="form-group">
-        <!-- #748: the sample is a reading-order element, not a live region.
-             Announcing it re-read the whole sample after every typing pause,
-             layered on top of the field's own echo, which made the template
-             unusable with a screen reader. -->
-        <span class="form-label">{t('settings.livePreview')}</span>
-        <div class="preview-box">{previewText}</div>
-      </div>
-      <p class="hint">
-        {t('settings.placeholdersHint')}
-      </p>
-      <!-- Issue #581: episodes use their own template, so a user editing the
-           music template must know it does not apply to podcasts. -->
-      <p class="hint">{t('settings.episodeFormatHint')}</p>
-      <div class="toggle-row">
-        <label for="profanity-filter">{t('settings.profanityFilterLabel')}</label>
-        <input
-          id="profanity-filter"
-          type="checkbox"
-          bind:checked={localConfig.teams.profanity_filter}
-        />
-      </div>
-      {#if localConfig.teams.profanity_filter}
-        <div class="form-group">
-          <label for="profanity-placeholder">{t('settings.placeholderTextLabel')}</label>
-          <p class="hint">
-            {t('settings.placeholderTextHint')}
-          </p>
-          <input
-            id="profanity-placeholder"
-            type="text"
-            value={profanityPlaceholderDisplay}
-            oninput={(e) => {
-              localConfig.teams.profanity_placeholder = (e.currentTarget as HTMLInputElement).value;
-            }}
-            placeholder={t('settings.placeholderTextPlaceholder')}
-          />
-        </div>
-        <div class="toggle-row">
-          <label for="profanity-preview-sample">{t('settings.profaneSampleToggle')}</label>
-          <input
-            id="profanity-preview-sample"
-            data-no-draft
-            type="checkbox"
-            bind:checked={previewProfaneSample}
-          />
-        </div>
-        <!-- Issue #538: `teams.profanity_extra_words` was config-only until
-             4.6. The counter mirrors Rust's `clamp_teams` (64 entries × 32
-             chars) so the truncation is never silent. -->
-        <div class="form-group">
-          <label for="profanity-extra-words">{t('settings.extraWordsLabel')}</label>
-          <p class="hint">{t('settings.extraWordsHint')}</p>
-          <textarea
-            id="profanity-extra-words"
-            rows="3"
-            bind:value={extraWordsText}
-            placeholder={t('settings.extraWordsPlaceholder')}
-          ></textarea>
-          {#if extraWordsClamp.active}
-            <p class="clamp-hint" role="status">
-              {t('settings.extraWordsClampHint', {
-                max: extraWordsClamp.maxEntries,
-                chars: extraWordsClamp.maxChars,
-                kept: extraWordsClamp.kept
-              })}
-            </p>
-          {/if}
-        </div>
-      {/if}
-    </section>
-
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionPolling')}</h2>
-        <button type="button" class="btn-link" onclick={resetPollingDefaults}>{t('common.resetToDefault')}</button>
-      </header>
-      <div class="form-group">
-        <label for="default-interval">{t('settings.defaultIntervalLabel', { seconds: Number(localConfig.polling.default_interval_seconds) })}</label>
-        <input
-          id="default-interval"
-          type="range"
-          min="10"
-          max="60"
-          step="5"
-          bind:value={localConfig.polling.default_interval_seconds}
-        />
-      </div>
-      <div class="row-2">
-        <div class="form-group">
-          <label for="min-interval">{t('settings.minIntervalLabel')}</label>
-          <input
-            id="min-interval"
-            type="number"
-            min="5"
-            max="30"
-            bind:value={localConfig.polling.minimum_interval_seconds}
-          />
-        </div>
-        <div class="form-group">
-          <label for="max-interval">{t('settings.maxIntervalLabel')}</label>
-          <!-- `min` tracks clamp_polling's effective minimum; `max` is the
-               backend's fixed upper bound (config.rs) — `pollingClamp.effMax`
-               depends on the entered max, so using it here would be
-               self-referential. -->
-          <input
-            id="max-interval"
-            type="number"
-            min={pollingClamp.effMin}
-            max="300"
-            bind:value={localConfig.polling.max_interval_seconds}
-          />
-        </div>
-      </div>
-      <!-- Issue #538: `polling.pause_backoff_max_seconds` was config-only
-           until 4.6. `min`/`max` mirror Rust's `clamp_polling` (60..=3600) and
-           the hint reports the effective value a typed value would land on. -->
-      <div class="form-group">
-        <label for="pause-backoff-max">
-          {t('settings.pauseBackoffMaxLabel')}
-        </label>
-        <input
-          id="pause-backoff-max"
-          type="number"
-          min={PAUSE_BACKOFF_MIN_SECONDS}
-          max={PAUSE_BACKOFF_MAX_SECONDS}
-          bind:value={localConfig.polling.pause_backoff_max_seconds}
-        />
-        {#if pauseBackoffClamp.active}
-          <p class="clamp-hint" role="status">
-            {t('settings.pauseBackoffClampHint', {
-              min: PAUSE_BACKOFF_MIN_SECONDS,
-              max: PAUSE_BACKOFF_MAX_SECONDS,
-              effective: pauseBackoffClamp.effective
-            })}
-          </p>
-        {/if}
-      </div>
-      {#if pollingClamp.active}
-        <p class="clamp-hint" role="status">
-          {t('settings.clampHint', { max: pollingClamp.effMax })}
-        </p>
-      {/if}
-    </section>
-
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionNotifications')}</h2>
-      </header>
-      {#each NOTIFICATION_CLASSES as cls (cls)}
-        <div class="toggle-row">
-          <label for={`notifications-${cls}`}>{t(NOTIFICATION_LABELS[cls])}</label>
-          <input
-            id={`notifications-${cls}`}
-            data-no-draft
-            type="checkbox"
-            checked={$notificationPreferences[cls]}
-            onchange={(e) => toggleNotificationClass(cls, e)}
-          />
-        </div>
-      {/each}
-      <p class="hint">{t('settings.notificationsHint')}</p>
-      {#if notificationsMessage}
-        <p class="error-message" role="alert">{notificationsMessage}</p>
-      {/if}
-    </section>
-
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionAppearance')}</h2>
-        <button type="button" class="btn-link" onclick={resetAppearanceDefaults}>{t('common.resetToDefault')}</button>
-      </header>
-      <div class="form-group">
-        <span class="form-label">{t('settings.themeLabel')}</span>
-        <div class="theme-grid" role="radiogroup" aria-label={t('settings.themeLabel')}>
-          <button type="button" class="theme-card" role="radio" bind:this={themeDarkButton}
-            aria-checked={$theme === 'dark'} tabindex={$theme === 'dark' ? 0 : -1}
-            class:is-active={$theme === 'dark'}
-            onclick={() => theme.set('dark')}
-            onkeydown={(e) => themeRadioKeydown(e, 'dark')}>
-            <span class="swatch swatch-dark"></span>
-            <span class="theme-name">{t('settings.themeDark')}</span>
-          </button>
-          <button type="button" class="theme-card" role="radio" bind:this={themeLightButton}
-            aria-checked={$theme === 'light'} tabindex={$theme === 'light' ? 0 : -1}
-            class:is-active={$theme === 'light'}
-            onclick={() => theme.set('light')}
-            onkeydown={(e) => themeRadioKeydown(e, 'light')}>
-            <span class="swatch swatch-light"></span>
-            <span class="theme-name">{t('settings.themeLight')}</span>
-          </button>
-          <button type="button" class="theme-card" role="radio" bind:this={themeSystemButton}
-            aria-checked={$theme === 'system'} tabindex={$theme === 'system' ? 0 : -1}
-            class:is-active={$theme === 'system'}
-            onclick={() => theme.set('system')}
-            onkeydown={(e) => themeRadioKeydown(e, 'system')}>
-            <span class="swatch swatch-system"></span>
-            <span class="theme-name">{t('settings.themeSystem')}</span>
-          </button>
-        </div>
-        <p class="hint">{t('settings.themeHint')}</p>
-      </div>
-      <!-- #680: spacing/type density. Token-scale override only (app.css
-        `[data-density="compact"]`), independent of the theme picker. -->
-      <div class="toggle-row">
-        <label for="compact-density">{t('settings.densityCompactLabel')}</label>
-        <input
-          id="compact-density"
-          data-no-draft
-          type="checkbox"
-          checked={$density === 'compact'}
-          onchange={(e) =>
-            density.set((e.currentTarget as HTMLInputElement).checked ? 'compact' : 'comfortable')}
-        />
-      </div>
-      <p class="hint">{t('settings.densityHint')}</p>
-      <div class="form-group">
-        <label for="language">{t('settings.languageLabel')}</label>
-        <!-- Language names are endonyms: shown in their own language by convention. -->
-        <select
-          id="language"
-          data-no-draft
-          value={i18n.locale}
-          disabled={followSystemChecked}
-          onchange={(e) => {
-            const next = (e.currentTarget as HTMLSelectElement).value as Locale;
-            // 4.7.0 (issue #674): `config.locale` is the single source of
-            // truth. The store applies the locale to this webview, persists
-            // it and relabels the tray + native application menu; the draft is
-            // kept in step so a language change alone never marks the form
-            // dirty.
-            localConfig.locale = next;
-            void i18n.set(next);
-          }}
-        >
-          <option value="en">English</option>
-          <option value="de">Deutsch</option>
-          <option value="fr">Français</option>
-          <option value="es">Español</option>
-          <option value="it">Italiano</option>
-          <option value="pl">Polski</option>
-          <option value="pt">Português (BR)</option>
-          <option value="nl">Nederlands</option>
-        </select>
-        <p class="hint">{t('settings.languageHint')}</p>
-      </div>
-      <div class="toggle-row">
-        <label for="follow-system-language">{t('settings.languageFollowSystemLabel')}</label>
-        <input
-          id="follow-system-language"
-          data-no-draft
-          type="checkbox"
-          checked={followSystemChecked}
-          onchange={(e) => {
-            // #984: follow-system is a resolution policy, not a language — it
-            // lives in the i18n store's own mirror, never in `config.locale`.
-            // Checking re-resolves from the OS language and persists the
-            // resolution; unchecking pins the current resolution as the
-            // explicit choice, so the draft's tag is exactly what the user
-            // keeps. Either way the language select stays in step.
-            const on = (e.currentTarget as HTMLInputElement).checked;
-            if (on) {
-              void i18n.followSystemLanguage().then(() => {
-                localConfig.locale = i18n.locale;
-                followSystemChecked = i18n.followSystem;
-              });
-            } else {
-              const pinned = i18n.locale;
-              localConfig.locale = pinned;
-              void i18n.set(pinned).then(() => {
-                followSystemChecked = i18n.followSystem;
-              });
-            }
-          }}
-        />
-      </div>
-      <p class="hint">{t('settings.languageFollowSystemHint')}</p>
-      <div class="toggle-row">
-        <label for="autostart">{t('common.launchAtLogin')}</label>
-        <input
-          id="autostart"
-          type="checkbox"
-          data-no-draft
-          checked={localConfig.autostart}
-          onchange={async (e) => {
-            const target = e.currentTarget as HTMLInputElement;
-            const enabled = target.checked;
-            const previous = !enabled;
-            localConfig.autostart = enabled;
-            try {
-              await invoke('set_autostart_enabled', { enabled });
-              // Issue #811: the command now owns the `config.autostart` flag
-              // too, so converge the store immediately — a later whole-document
-              // save (even a bare language change) carries the toggled value
-              // instead of silently reverting the OS entry. `updateConfig`
-              // merges just this field backend-side and adopts the persisted
-              // document, so unsaved edits elsewhere in the draft survive
-              // (a `loadConfig()` reload here would clobber them). The draft
-              // is kept in step with the converged value. The input carries
-              // `data-no-draft` (like the notification toggles): the toggle
-              // applies itself, so it must not mark the form dirty.
-              const converged = await updateConfig({ autostart: enabled });
-              localConfig.autostart = converged.autostart;
-            } catch (err) {
-              console.warn('[SETTINGS] set_autostart_enabled failed:', err);
-              localConfig.autostart = previous;
-              target.checked = previous;
-              saveMessage = t('settings.shortcutRejected', {
-                reason: shortcutReasonLabel(normalizeShortcutReason(err) ?? { kind: 'Unknown', message: String(err).slice(0, 120) })
-              });
-              if (saveTimeout) clearTimeout(saveTimeout);
-              saveTimeout = setTimeout(() => saveMessage = '', 3000);
-            }
-          }}
-        />
-      </div>
-    </section>
-
+    <ProfilesCard
+      bind:presenceProfiles={localConfig.presence_profiles}
+      bind:activeProfile={localConfig.active_profile}
+      teams={localConfig.teams}
+      bind:saveMessage
+      onchange={markDirty}
+    />
+    <StatusFormatCard
+      bind:teams={localConfig.teams}
+      {extraWordsText}
+      placeholderDisplay={profanityPlaceholderDisplay}
+      {previewText}
+      {previewProfaneSample}
+      onreset={resetStatusFormatDefaults}
+      onExtraWordsInput={(v) => { extraWordsText = v; markDirty(); }}
+      onProfaneSampleChange={(v) => { previewProfaneSample = v; }}
+    />
+    <PollingCard bind:polling={localConfig.polling} onreset={resetPollingDefaults} />
+    <NotificationsCard />
+    <AppearanceCard
+      bind:locale={localConfig.locale}
+      bind:autostart={localConfig.autostart}
+      bind:saveMessage
+      bind:followSystemChecked
+      onreset={resetAppearanceDefaults}
+      onAutostartError={handleAutostartError}
+    />
     <LoggingCard bind:logging={localConfig.logging} />
     <BackupCard onimported={handleBackupImported} />
     <ShortcutsCard bind:shortcuts={localConfig.shortcuts} onchange={markDirty} bind:this={shortcutsCard} />
 
-    <!-- 4.7.0 (issue #678): release channel the updater reads. The saved
-         value is the backend's single source of truth — the banner and the
-         deferred staging path both resolve it on every check. -->
-    <section class="card pane-card">
-      <header class="section-header">
-        <h2>{t('settings.sectionUpdates')}</h2>
-      </header>
-      <div class="form-group">
-        <label for="update-channel">{t('settings.updateChannelLabel')}</label>
-        <select
-          id="update-channel"
-          value={localConfig.updates.channel}
-          onchange={(e) => {
-            const value = (e.currentTarget as HTMLSelectElement).value;
-            localConfig.updates.channel = value === 'beta' ? 'beta' : 'stable';
-          }}
-        >
-          <option value="stable">{t('settings.updateChannelStable')}</option>
-          <option value="beta">{t('settings.updateChannelBeta')}</option>
-        </select>
-      </div>
-      <p class="hint">{t('settings.updateChannelHint')}</p>
-    </section>
+    <UpdatesCard bind:updates={localConfig.updates} />
 
     <section class="actions">
       <button class="btn-full" onclick={handleSave} disabled={isSaving}>
@@ -1780,68 +863,8 @@
     gap: var(--sp-4);
   }
 
-
-  .form-group { display: flex; flex-direction: column; gap: var(--sp-2); }
-  .form-group label,
-  .form-group .form-label {
-    font-size: var(--fs-sm);
-    font-weight: 600;
-    color: var(--fg);
-  }
-  .connection-row {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-3);
-    flex-wrap: wrap;
-  }
-
-  /* #693: the Teams session could not be persisted (locked keychain, full
-     disk). Amber, like the dirty banner: the sign-in itself succeeded, so
-     this is a warning the user can still act on by reconnecting. */
-  .persist-banner {
-    margin-top: var(--sp-3);
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    padding: var(--sp-2) var(--sp-3);
-    background: var(--warning-soft);
-    color: var(--warning);
-    border-radius: var(--r-md);
-  }
-  .persist-banner .hint { margin: 0; color: inherit; }
-  .connection-row .btn-secondary {
-    width: auto;
-    padding: var(--sp-2) var(--sp-4);
-    font-size: var(--fs-sm);
-  }
-  /* #964: the waiting state is the only Spotify state with more than one
-     control, so it stacks instead of sharing the row's baseline. */
-  .connection-row .spotify-waiting {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--sp-2);
-    width: 100%;
-  }
-  .connection-row .spotify-waiting .hint { margin: 0; }
-  .connection-row .spotify-waiting input { width: 100%; }
-
-  /* One-time-reconnect banner for the missing tray-playback scope
-     (issue #3.0-P3). */
-  .scope-banner {
-    margin-top: var(--sp-3);
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    padding: var(--sp-2) var(--sp-3);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-  }
-  .scope-banner .hint { margin: 0; }
-
-  /* C9: unsaved-changes banner shown when localConfig drifts from the
-     saved store; and the polling min>max clamp feedback hint. */
+/* C9: unsaved-changes banner shown when the explicit #890 dirty flag is
+     set; per-card clamp feedback is styled by `.clamp-hint` in app.css. */
   .dirty-banner {
     display: flex;
     flex-direction: column;
@@ -1863,123 +886,6 @@
     justify-content: center;
     gap: var(--sp-3);
   }
-  .clamp-hint {
-    margin: 0;
-    padding: var(--sp-2) var(--sp-3);
-    background: var(--warning-soft);
-    color: var(--warning);
-    border-radius: var(--r-md);
-    font-size: var(--fs-xs);
-    line-height: var(--lh-normal);
-  }
-
-
-  .preview-box {
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    padding: var(--sp-3) var(--sp-4);
-    font-size: var(--fs-base);
-    color: var(--fg);
-    word-break: break-word;
-    min-height: 40px;
-  }
-
-
-  .row-2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--sp-3);
-  }
-  @media (max-width: 480px) {
-    .row-2 { grid-template-columns: 1fr; }
-  }
-
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--sp-3);
-    padding: var(--sp-2) 0;
-  }
-  .toggle-row label {
-    font-size: var(--fs-base);
-    color: var(--fg);
-  }
-  /* Issue #432: status-rule rows reuse the card's form rhythm — a
-  wrapping flex row for quiet-hours entries, column variant for the
-  four-field track rules. */
-  .rule-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: var(--sp-2);
-  }
-  .rule-row input[type='text'] {
-    flex: 1 1 120px;
-    min-width: 0;
-  }
-  .rule-col {
-    flex-direction: column;
-    align-items: stretch;
-  }
-  .rule-check {
-    display: flex;
-    align-items: center;
-    gap: var(--sp-2);
-    font-size: var(--fs-sm);
-    color: var(--fg);
-  }
-
-
-  .theme-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--sp-3);
-  }
-  .theme-card {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: var(--sp-2);
-    padding: var(--sp-3);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
-    border-radius: var(--r-md);
-    cursor: pointer;
-    width: auto;
-    transition: border-color var(--dur-fast) var(--ease-out),
-                background-color var(--dur-fast) var(--ease-out);
-  }
-  .theme-card:hover {
-    background: var(--bg-surface);
-    border-color: var(--border-strong);
-  }
-  .theme-card.is-active {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-soft);
-  }
-  /* #904: the swatches paint through app.css tokens, not hex literals. The
-     light swatch is on screen while the dark theme is live, so these cannot
-     be the theme-scoped surface tokens — `--preview-*` is the preview-only
-     pair app.css declares for exactly this, and `--swatch-h` is what compact
-     density scales. Changing the palette moves the swatch from here alone. */
-  .swatch {
-    display: block;
-    height: var(--swatch-h);
-    border-radius: var(--r-sm);
-    border: 1px solid var(--border);
-  }
-  .swatch-dark { background: linear-gradient(135deg, var(--preview-dark-1) 0%, var(--preview-dark-2) 100%); }
-  .swatch-light { background: linear-gradient(135deg, var(--preview-light-1) 0%, var(--preview-light-2) 100%); }
-  .swatch-system { background: linear-gradient(100deg, var(--preview-dark-1) 0 48%, var(--preview-light-1) 48% 100%); }
-  .theme-name {
-    font-size: var(--fs-sm);
-    font-weight: 600;
-    color: var(--fg);
-    text-align: left;
-  }
-
   .actions {
     display: flex;
     flex-direction: column;
