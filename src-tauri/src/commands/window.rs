@@ -154,7 +154,7 @@ pub async fn set_autostart_enabled(
         let mut config_guard = state_clone.config.get_mut();
         let mut merged = match config_guard.as_ref() {
             Some(current) => (**current).clone(),
-            None => config::load_config().map_err(|e| {
+            None => config::load_config(&state_clone.caches).map_err(|e| {
                 log::error!("{CMD} set_autostart_enabled: config load FAILED - {}", e);
                 ShortcutReason::autostart(&e)
             })?,

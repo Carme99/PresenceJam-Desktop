@@ -27,7 +27,8 @@ settings:
 - **Corrupt-file quarantine (#379):** a `config.json` that fails
   `serde_json::from_str` is renamed beside itself to `config.json.bak` (fixed
   name, never timestamped), a `[CFG] corrupt config … quarantined to …` warning is
-  logged, `CONFIG_QUARANTINED` is raised, and the app boots on
+  logged, the per-`AppState` quarantine flag (`AppCaches`, issue #758 slice 2)
+  is raised, and the app boots on
   `AppConfig::default()`. The rename is best-effort: a failure is logged and
   swallowed, and the flag is raised either way, so the original file is never
   truncated. A *schema-version* mismatch is **not** a quarantine — it goes through

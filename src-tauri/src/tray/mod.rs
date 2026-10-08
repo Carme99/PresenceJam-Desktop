@@ -432,18 +432,19 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             // nothing is recorded and the item keeps showing the truth.
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                let (target, repeat) =
-                    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>()
-                    {
-                        (
-                            shuffle_toggle_target(
-                                state.caches.shuffle_flag().load(Ordering::Acquire),
-                            ),
-                            last_repeat_state(&state.caches),
-                        )
-                    } else {
-                        (shuffle_toggle_target(false), crate::spotify::RepeatState::Off)
-                    };
+                let (target, repeat) = if let Some(state) =
+                    app_handle.try_state::<std::sync::Arc<crate::AppState>>()
+                {
+                    (
+                        shuffle_toggle_target(state.caches.shuffle_flag().load(Ordering::Acquire)),
+                        last_repeat_state(&state.caches),
+                    )
+                } else {
+                    (
+                        shuffle_toggle_target(false),
+                        crate::spotify::RepeatState::Off,
+                    )
+                };
                 run_player_action(
                     &app_handle,
                     "shuffle",
@@ -460,16 +461,16 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             // record-on-success discipline as Shuffle above.
             let app_handle = app.clone();
             std::thread::spawn(move || {
-                let (target, shuffle) =
-                    if let Some(state) = app_handle.try_state::<std::sync::Arc<crate::AppState>>()
-                    {
-                        (
-                            last_repeat_state(&state.caches).next(),
-                            state.caches.shuffle_flag().load(Ordering::Acquire),
-                        )
-                    } else {
-                        (crate::spotify::RepeatState::Off.next(), false)
-                    };
+                let (target, shuffle) = if let Some(state) =
+                    app_handle.try_state::<std::sync::Arc<crate::AppState>>()
+                {
+                    (
+                        last_repeat_state(&state.caches).next(),
+                        state.caches.shuffle_flag().load(Ordering::Acquire),
+                    )
+                } else {
+                    (crate::spotify::RepeatState::Off.next(), false)
+                };
                 run_player_action(
                     &app_handle,
                     "repeat",
@@ -832,9 +833,10 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // pause would leave the mark claiming "playing" until the next track.
     // Consuming the event here keeps the tray's belief truthful; the
     // poller's own re-store then drives the rebuild that paints it.
-    app.listen("playback-state-changed", |event| {
+    let listen_handle = app.handle().clone();
+    app.listen("playback-state-changed", move |event| {
         let payload = event.payload().to_string();
-        let app = event.app_handle().clone();
+        let app = listen_handle.clone();
         std::thread::spawn(move || {
             let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() else {
                 return;
@@ -2153,7 +2155,10 @@ mod tests {
         // The mirror is the key's source and round-trips.
         let caches = crate::state::AppCaches::new();
         note_window_visibility(&caches, true);
-        assert!(window_visible(&caches), "the mirror must report what was recorded");
+        assert!(
+            window_visible(&caches),
+            "the mirror must report what was recorded"
+        );
         note_window_visibility(&caches, false);
         assert!(!window_visible(&caches));
 

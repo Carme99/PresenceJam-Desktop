@@ -69,12 +69,16 @@ pub fn resolve_device_id(app: &AppHandle, selected: &DeviceMenuSelection) -> Opt
     match selected {
         DeviceMenuSelection::DeviceId(id) => {
             // Fast path: still in the cached list and transferable.
-            let cached = caches.devices_slot().lock().as_ref().and_then(|(_, devices)| {
-                devices
-                    .iter()
-                    .find(|d| d.id.as_deref() == Some(id.as_str()))
-                    .and_then(|d| d.id.clone())
-            });
+            let cached = caches
+                .devices_slot()
+                .lock()
+                .as_ref()
+                .and_then(|(_, devices)| {
+                    devices
+                        .iter()
+                        .find(|d| d.id.as_deref() == Some(id.as_str()))
+                        .and_then(|d| d.id.clone())
+                });
             if cached.is_some() {
                 return cached;
             }

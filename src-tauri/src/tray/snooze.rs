@@ -312,7 +312,7 @@ pub fn store_snooze(
     let mut guard = state.config.get_mut();
     let base = match guard.as_ref() {
         Some(current) => (**current).clone(),
-        None => crate::config::load_config()?,
+        None => crate::config::load_config(&state.caches)?,
     };
     let mut next = base;
     next.snooze_until = until.map(crate::config::snooze_store_form);
@@ -373,7 +373,7 @@ pub fn store_active_profile(app: &AppHandle, name: Option<String>) -> Result<(),
     let mut guard = state.config.get_mut();
     let base = match guard.as_ref() {
         Some(current) => (**current).clone(),
-        None => crate::config::load_config()?,
+        None => crate::config::load_config(&state.caches)?,
     };
     let mut next = base;
     next.active_profile = name;

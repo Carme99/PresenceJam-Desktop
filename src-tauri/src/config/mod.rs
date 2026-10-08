@@ -57,8 +57,7 @@ mod tests {
     };
     use super::io::{
         load_config_from, quarantine_backup_name_for, quarantine_corrupt_config, save_config_to,
-        staged_import_path, stamp_keychain_flags, with_keychain_flags, CONFIG_QUARANTINED,
-        TYPED_CONFIG_KEYS,
+        staged_import_path, stamp_keychain_flags, with_keychain_flags, TYPED_CONFIG_KEYS,
     };
     use super::migrate::{
         decide_legacy_secret_outcome, default_schema_version, migrate_config,
@@ -71,8 +70,15 @@ mod tests {
     use crate::profanity;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::atomic::Ordering;
-    static QUARANTINE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    /// Serialises the tests that assert on captured log output (issue #758
+    /// slice 2). This is NOT a state-isolation lock: the quarantine flag and
+    /// the config caches it used to guard are per-`AppCaches` now, so those
+    /// tests construct their own and run in parallel. What remains genuinely
+    /// process-wide is `log::set_boxed_logger` — one logger per process, whose
+    /// sink is the shared `LOG_LINES` buffer below — so a test that clears and
+    /// reads that buffer has to exclude the other tests that do the same.
+    static LOG_CAPTURE_TEST_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
     fn test_default_config() {
@@ -143,7 +149,8 @@ mod tests {
         let path = dir.join("config.json");
         std::fs::write(&path, "{}\n").expect("the config seam fixture must be writable");
 
-        let loaded = load_config_from(&path).expect("the real config file seam must load");
+        let caches = crate::state::AppCaches::new();
+        let loaded = load_config_from(&caches, &path).expect("the real config file seam must load");
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let config = with_keychain_flags(loaded, || {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -459,10 +466,9 @@ mod tests {
     /// alongside the original and the diagnostics-visible flag is raised.
     #[test]
     fn test_corrupt_config_quarantined_to_bak() {
-        // Process-wide CONFIG_QUARANTINED is global: serialize the two
-        // quarantine tests so parallel save/restore cannot interleave.
-        let _guard = QUARANTINE_TEST_LOCK.lock();
-        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        // Issue #758 slice 2: the quarantine flag is per-`AppCaches`, so this
+        // test owns its flag and needs no process-wide lock or save/restore.
+        let caches = crate::state::AppCaches::new();
         let dir = std::env::temp_dir().join(format!(
             "pj-test-quarantine-{}-{}",
             std::process::id(),
@@ -476,7 +482,7 @@ mod tests {
             serde_json::from_str::<AppConfig>(&std::fs::read_to_string(&path).unwrap()).is_err()
         );
 
-        let backup = quarantine_corrupt_config(&path, "test corrupt sentinel");
+        let backup = quarantine_corrupt_config(&caches, &path, "test corrupt sentinel");
         assert_eq!(backup, dir.join("config.json.bak"));
         assert!(!path.exists(), "corrupt original must be renamed away");
         assert_eq!(
@@ -485,14 +491,13 @@ mod tests {
             "quarantined copy must preserve the corrupt bytes"
         );
         assert!(
-            config_was_quarantined(),
+            config_was_quarantined(&caches),
             "diagnostics-visible flag must be raised after quarantine"
         );
         // Defaults remain loadable alongside the quarantine.
         assert_eq!(AppConfig::default().schema_version, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
-        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
     }
 
     /// Issue #379: when the quarantine rename itself fails (e.g. a
@@ -501,10 +506,8 @@ mod tests {
     /// the diagnostics-visible flag is raised either way.
     #[test]
     fn test_corrupt_config_quarantine_rename_failure_preserves_original() {
-        // Process-wide CONFIG_QUARANTINED is global: serialize the two
-        // quarantine tests so parallel save/restore cannot interleave.
-        let _guard = QUARANTINE_TEST_LOCK.lock();
-        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
+        // Issue #758 slice 2: per-test caches, no process-wide lock.
+        let caches = crate::state::AppCaches::new();
         let dir = std::env::temp_dir().join(format!(
             "pj-test-quarantine-fail-{}-{}",
             std::process::id(),
@@ -518,7 +521,7 @@ mod tests {
         // `fs::rename(file, dir)` fail on both POSIX and Windows.
         std::fs::create_dir_all(dir.join("config.json.bak")).unwrap();
 
-        let backup = quarantine_corrupt_config(&path, "test rename-failure sentinel");
+        let backup = quarantine_corrupt_config(&caches, &path, "test rename-failure sentinel");
         assert_eq!(backup, dir.join("config.json.bak"));
         // Rename failed → the corrupt original must still be in place with
         // its bytes untouched, and the flag is raised so diagnostics still
@@ -533,14 +536,13 @@ mod tests {
             "failed quarantine must not truncate or alter the original"
         );
         assert!(
-            config_was_quarantined(),
+            config_was_quarantined(&caches),
             "diagnostics-visible flag must be raised even when the rename fails"
         );
         // Defaults remain loadable alongside the failed quarantine.
         assert_eq!(AppConfig::default().schema_version, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
-        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
     }
 
     /// Issue #379: `extra` keys serialize in deterministic (sorted) order so
@@ -1393,7 +1395,9 @@ mod tests {
             "patch-channel-refused",
             r#"{"updates": {"channel": "nightly", "future_channel_key": 1}, "autostart": true}"#,
         );
-        let cfg = load_config_from(&path).expect("a bad channel must not fail the document");
+        let caches = crate::state::AppCaches::new();
+        let cfg =
+            load_config_from(&caches, &path).expect("a bad channel must not fail the document");
         assert_eq!(cfg.updates.channel, UpdateChannel::Stable);
         assert!(
             cfg.updates.extra.contains_key("future_channel_key"),
@@ -3363,7 +3367,7 @@ mod tests {
     /// setting was lost, and nothing was logged.
     #[test]
     fn test_unknown_update_channel_keeps_the_rest_of_the_config_and_warns() {
-        let _guard = QUARANTINE_TEST_LOCK.lock();
+        let _guard = LOG_CAPTURE_TEST_LOCK.lock();
         LOGGER.call_once(|| {
             // Best-effort: another test may have installed a logger first.
             let _ = log::set_boxed_logger(Box::new(CapturingLogger));
@@ -3442,15 +3446,16 @@ mod tests {
     /// polling tuning and everything else too.
     #[test]
     fn test_one_bad_section_keeps_every_other_section() {
-        let _guard = QUARANTINE_TEST_LOCK.lock();
+        // Only the shared log sink needs serialising (issue #758 slice 2); the
+        // quarantine flag is this test's own `caches`.
+        let _guard = LOG_CAPTURE_TEST_LOCK.lock();
         LOGGER.call_once(|| {
             // Best-effort: another test may have installed a logger first.
             let _ = log::set_boxed_logger(Box::new(CapturingLogger));
             log::set_max_level(log::LevelFilter::Warn);
         });
         LOG_LINES.lock().clear();
-        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
-        CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+        let caches = crate::state::AppCaches::new();
 
         let (dir, path) = temp_config_file(
             "sections",
@@ -3467,7 +3472,8 @@ mod tests {
             }"#,
         );
 
-        let cfg = load_config_from(&path).expect("a partially invalid document must still load");
+        let cfg =
+            load_config_from(&caches, &path).expect("a partially invalid document must still load");
 
         assert_eq!(
             cfg.teams.status_format,
@@ -3494,7 +3500,7 @@ mod tests {
             !quarantine_backup_path(&path).exists(),
             "one bad section must not quarantine the whole file"
         );
-        assert!(!config_was_quarantined());
+        assert!(!config_was_quarantined(&caches));
         let logged = LOG_LINES.lock().clone();
         assert!(
             logged
@@ -3503,7 +3509,6 @@ mod tests {
             "the fallback must name the field it replaced: {logged:?}"
         );
 
-        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3513,15 +3518,13 @@ mod tests {
     /// the section's defaults, the second as those defaults plus a warning.
     #[test]
     fn test_empty_or_null_client_id_loads_without_quarantining() {
-        let _guard = QUARANTINE_TEST_LOCK.lock();
-        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
-        CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+        let caches = crate::state::AppCaches::new();
         for contents in [
             r#"{"spotify": {}, "autostart": true}"#,
             r#"{"spotify": {"client_id": null}, "autostart": true}"#,
         ] {
             let (dir, path) = temp_config_file("client-id", contents);
-            let cfg = load_config_from(&path).expect("must load");
+            let cfg = load_config_from(&caches, &path).expect("must load");
             assert_eq!(cfg.spotify.client_id, "", "{contents}");
             assert_eq!(
                 cfg.spotify.redirect_uri,
@@ -3533,10 +3536,9 @@ mod tests {
                 "the rest of the document is kept: {contents}"
             );
             assert!(!quarantine_backup_path(&path).exists(), "{contents}");
-            assert!(!config_was_quarantined(), "{contents}");
+            assert!(!config_was_quarantined(&caches), "{contents}");
             let _ = std::fs::remove_dir_all(&dir);
         }
-        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
     }
 
     /// Issue #926: the field-by-field loader is for documents that ARE an
@@ -3545,12 +3547,12 @@ mod tests {
     /// with the app booting on defaults.
     #[test]
     fn test_non_object_root_is_still_quarantined() {
-        let _guard = QUARANTINE_TEST_LOCK.lock();
-        let prev = CONFIG_QUARANTINED.load(Ordering::SeqCst);
         for contents in ["[1, 2, 3]", "\"spotify\"", "null", "{ NOT VALID JSON !!!"] {
-            CONFIG_QUARANTINED.store(false, Ordering::SeqCst);
+            // A fresh `AppCaches` per iteration, so each case starts from an
+            // un-raised flag without any save/restore dance (issue #758).
+            let caches = crate::state::AppCaches::new();
             let (dir, path) = temp_config_file("non-object", contents);
-            let cfg = load_config_from(&path).expect("quarantine still yields defaults");
+            let cfg = load_config_from(&caches, &path).expect("quarantine still yields defaults");
             assert_eq!(cfg.schema_version, default_schema_version());
             assert!(cfg.spotify.client_id.is_empty());
             assert!(
@@ -3558,10 +3560,9 @@ mod tests {
                 "{contents} must be quarantined"
             );
             assert!(!path.exists(), "{contents}");
-            assert!(config_was_quarantined(), "{contents}");
+            assert!(config_was_quarantined(&caches), "{contents}");
             let _ = std::fs::remove_dir_all(&dir);
         }
-        CONFIG_QUARANTINED.store(prev, Ordering::SeqCst);
     }
 
     // -----------------------------------------------------------------
@@ -3643,7 +3644,8 @@ mod tests {
     fn test_loose_config_is_still_tightened_on_load() {
         let (dir, path) = temp_config_file("tighten", r#"{"autostart": true}"#);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let cfg = load_config_from(&path).expect("a readable config must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("a readable config must load");
         assert!(cfg.autostart);
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -3712,7 +3714,8 @@ mod tests {
                 {"enabled": true, "days": [0]}
             ]}}"#,
         );
-        let cfg = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("must load");
         let first = &cfg.status_rules.quiet_hours[0];
         assert_eq!(first.days, vec![2]);
         assert_eq!(first.start_minutes, 1439);
@@ -3749,7 +3752,8 @@ mod tests {
                                  "future_rule_flag": "r"},
                 "shortcuts": {"future_shortcut": "s"}}"#,
         );
-        let cfg = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("must load");
         assert_eq!(
             cfg.teams.extra.get("future_flag"),
             Some(&serde_json::json!(true))
@@ -3818,7 +3822,8 @@ mod tests {
     fn test_save_refuses_a_newer_document_and_never_lowers_the_marker() {
         let contents = r#"{"schema_version": 99, "future_key": {"kept": true}, "autostart": true}"#;
         let (dir, path) = temp_config_file("newer-than-us", contents);
-        let cfg = load_config_from(&path).expect("a newer document must still load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("a newer document must still load");
         assert_eq!(
             cfg.schema_version, 99,
             "a newer document keeps its own version instead of being relabelled"
@@ -3871,7 +3876,8 @@ mod tests {
                      "availability": "Busy", "activity": "InACall",
                      "future_pp_flag": true, "future_pp_block": {"a": [1, 2]}}}}"#,
         );
-        let cfg = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("must load");
         assert_eq!(
             cfg.teams.preferred_presence.extra.get("future_pp_flag"),
             Some(&serde_json::json!(true)),
@@ -3912,7 +3918,8 @@ mod tests {
                 "teams": {"preferred_presence": {"client_secret": "PP-SENTINEL",
                                                   "kept_pp": 3}}}"#,
         );
-        let cfg = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("must load");
 
         let serialized = serde_json::to_string(&cfg).expect("must serialize");
         assert!(
@@ -3990,7 +3997,8 @@ mod tests {
         );
         // And it is still a usable config: the next launch must not boot on
         // defaults.
-        let loaded = load_config_from(&path).expect("the surviving config must load");
+        let caches = crate::state::AppCaches::new();
+        let loaded = load_config_from(&caches, &path).expect("the surviving config must load");
         assert_eq!(loaded.spotify.client_id, "LIVE");
         assert_eq!(loaded.logging.keep_files, 7);
 
@@ -4055,7 +4063,8 @@ mod tests {
                                  "client_secret": "RULES-SENTINEL"},
                 "shortcuts": {"client_secret": "SHORTCUT-SENTINEL"}}"#,
         );
-        let cfg = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("must load");
 
         let serialized = serde_json::to_string(&cfg).expect("must serialize");
         assert!(
@@ -4247,12 +4256,13 @@ mod tests {
     /// and the value itself never reaches the log.
     #[test]
     fn test_legacy_secret_sidecar_survives_a_later_save() {
-        let _guard = QUARANTINE_TEST_LOCK.lock();
+        let _guard = LOG_CAPTURE_TEST_LOCK.lock();
         LOGGER.call_once(|| {
             let _ = log::set_boxed_logger(Box::new(CapturingLogger));
             log::set_max_level(log::LevelFilter::Warn);
         });
         LOG_LINES.lock().clear();
+        let caches = crate::state::AppCaches::new();
 
         let (dir, path) = temp_config_file(
             "legacy-sidecar",
@@ -4277,7 +4287,7 @@ mod tests {
 
         // Any later save replaces `config.json` wholesale — the #803 premise —
         // and the sidecar is what keeps the user's copy.
-        let mut cfg = load_config_from(&path).expect("must load");
+        let mut cfg = load_config_from(&caches, &path).expect("must load");
         cfg.autostart = false;
         save_config_to(&path, &cfg).expect("save must succeed");
         assert!(
@@ -4320,7 +4330,8 @@ mod tests {
     fn test_save_rejects_a_stale_revision_and_leaves_the_file_alone() {
         let contents = r#"{"autostart": true, "revision": 5}"#;
         let (dir, path) = temp_config_file("stale-revision", contents);
-        let mut stale = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let mut stale = load_config_from(&caches, &path).expect("must load");
         assert_eq!(stale.revision, 5);
 
         stale.revision = 4; // the other window saved in between
@@ -4346,7 +4357,8 @@ mod tests {
     #[test]
     fn test_save_advances_the_revision_monotonically() {
         let (dir, path) = temp_config_file("revision", r#"{"autostart": true}"#);
-        let cfg = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let cfg = load_config_from(&caches, &path).expect("must load");
         assert_eq!(cfg.revision, 0, "a pre-#943 file reads as revision 0");
 
         let first = save_config_to(&path, &cfg).expect("first save");
@@ -4375,7 +4387,8 @@ mod tests {
     #[test]
     fn test_a_payload_without_a_revision_is_stamped_not_refused() {
         let (dir, path) = temp_config_file("no-revision", r#"{"autostart": true, "revision": 7}"#);
-        let mut payload = load_config_from(&path).expect("must load");
+        let caches = crate::state::AppCaches::new();
+        let mut payload = load_config_from(&caches, &path).expect("must load");
         payload.revision = 0;
         payload.autostart = false;
 

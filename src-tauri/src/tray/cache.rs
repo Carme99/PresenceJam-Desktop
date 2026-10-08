@@ -81,15 +81,12 @@ pub const TRAY_SPOTIFY_FETCH_THROTTLE: Duration = Duration::from_secs(60);
 /// live re-fetch when stale (issue #388).
 pub type DeviceCacheSlot = Option<(Instant, Vec<crate::spotify::DeviceInfo>)>;
 
-
 /// Shortest gap between the post-action re-fetches of the Devices/Up Next lists
 /// (issue #883). A player action wants those submenus to mirror what just
 /// happened, but a burst of clicks must share one devices+queue pair: five
 /// seconds is long enough to coalesce a burst, short enough that the menu still
 /// matches the click the user just made.
 pub const TRAY_POST_ACTION_FETCH_MIN: Duration = Duration::from_secs(5);
-
-
 
 /// Whether a rebuild must re-fetch the Devices/Up Next lists on behalf of a
 /// player action (issue #883). Pure in its instants, so the coalescing rule —

@@ -74,6 +74,10 @@ pub fn tray_state_changed(prev: Option<&TrayStateSnapshot>, next: &TrayStateSnap
 /// the throttle bucket of both caches (issue #805).
 /// Single construction site so the key can never be built from a subset of what
 /// the menu shows (issue #691).
+// Nine inputs by design (issue #691): the key is built at one construction
+// site from everything the menu renders, so it stays a pure function that
+// can never be built from a subset.
+#[allow(clippy::too_many_arguments)]
 pub fn tray_snapshot_for(
     is_syncing: bool,
     is_window_visible: bool,
@@ -136,13 +140,6 @@ pub fn shuffle_toggle_target(current: bool) -> bool {
     !current
 }
 
-/// Last known Spotify playing state, driving the Play/Pause check mark and
-/// the tray status line (and the toggle's fallback dispatch). Re-seeded
-/// from the polling loop's stored track on a genuine track change, from the
-/// poller's `playback-state-changed` event when the playing state changes
-/// for the same track (issue #689), and by the tray's own successful
-/// play/pause/transfer actions. Issue #3.0-P3.
-
 /// Records the playing state the Play/Pause mark and the status line render.
 /// Every path that learns the truth writes it here, so the mark never infers
 /// playback from a candidate that may already be stale. Issue #3.0-P3.
@@ -169,24 +166,11 @@ pub fn consume_playback_state_changed(caches: &crate::state::AppCaches, payload:
     }
 }
 
-/// Last known shuffle state, driving the Shuffle item's check mark
-/// (issue #582). Written by the polling loop from the poll body
-/// (`note_playback_modes`) and optimistically by the tray's own successful
-/// toggle, so a same-track toggle does not wait for the next poll. It is a
-/// module-level atomic rather than a field on the app's frozen `TrackInfo`
-/// because that type is the ts-rs-exported IPC shape shared with the
-/// Dashboard and built by exhaustive literals outside this module.
-
-
 /// Records the playback modes a poll body reported. Called by the polling
 /// loop for every observed item (playing or paused) — the poll response is
 /// the source of truth for both toggles, so no extra Spotify request is
 /// needed to render them. See issue #582.
-pub fn note_playback_modes(
-    caches: &crate::state::AppCaches,
-    shuffle: bool,
-    repeat: RepeatState,
-) {
+pub fn note_playback_modes(caches: &crate::state::AppCaches, shuffle: bool, repeat: RepeatState) {
     caches.shuffle_flag().store(shuffle, Ordering::Release);
     caches.repeat_flag().store(repeat as u8, Ordering::Release);
 }

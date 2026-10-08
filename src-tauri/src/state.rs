@@ -782,9 +782,7 @@ impl AppCaches {
     ) -> &Mutex<Option<(Instant, Vec<crate::spotify::DeviceInfo>)>> {
         &self.devices_cache
     }
-    pub(crate) fn queue_slot(
-        &self,
-    ) -> &Mutex<Option<(Instant, crate::spotify::QueueInfo)>> {
+    pub(crate) fn queue_slot(&self) -> &Mutex<Option<(Instant, crate::spotify::QueueInfo)>> {
         &self.queue_cache
     }
     pub(crate) fn last_tray_action_slot(&self) -> &Mutex<Option<Instant>> {
@@ -793,9 +791,7 @@ impl AppCaches {
     pub(crate) fn last_action_fetch_slot(&self) -> &Mutex<Option<Instant>> {
         &self.last_action_fetch
     }
-    pub(crate) fn last_tray_state_slot(
-        &self,
-    ) -> &Mutex<Option<crate::tray::TrayStateSnapshot>> {
+    pub(crate) fn last_tray_state_slot(&self) -> &Mutex<Option<crate::tray::TrayStateSnapshot>> {
         &self.last_tray_state
     }
     pub(crate) fn window_visible_flag(&self) -> &AtomicBool {
@@ -1228,7 +1224,7 @@ mod tests {
             .expect("app.rs has no #[cfg(test)] mod tests block");
         // Wiring half: setup persists the conflict outcome onto process state.
         for marker in [
-            "migrate_legacy_client_secret_with_app(app.handle())",
+            "migrate_legacy_client_secret_with_app(",
             "LegacySecretOutcome::ConflictKeychainDiffers",
             "secret_conflict",
         ] {
@@ -1288,5 +1284,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Issue #758 slice 2: two `AppState`s never share one tray. Quarantining
+    /// through one state's caches raises only its flag; the other's stays
+    /// down. Fails pre-fix by construction: a single process-wide
+    /// `CONFIG_QUARANTINED` static is raised no matter which state loads.
+    #[test]
+    fn test_two_app_states_do_not_share_caches() {
+        use std::sync::atomic::Ordering;
+        let first = AppState::new();
+        let second = AppState::new();
+        first
+            .caches
+            .quarantined_flag()
+            .store(true, Ordering::SeqCst);
+        assert!(
+            crate::config::config_was_quarantined(&first.caches),
+            "the quarantined state must observe its own flag"
+        );
+        assert!(
+            !crate::config::config_was_quarantined(&second.caches),
+            "a second AppState must not observe the first one's quarantine"
+        );
+        crate::tray::note_window_visibility(&first.caches, true);
+        assert!(
+            crate::tray::window_visible(&first.caches),
+            "the first state's mirror must report what was recorded"
+        );
+        assert!(
+            !crate::tray::window_visible(&second.caches),
+            "the second state's mirror must stay at its default"
+        );
     }
 }

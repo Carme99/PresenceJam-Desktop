@@ -279,7 +279,7 @@ pub(crate) fn cli_read_tokens() -> Result<token_io::TokensFile, String> {
 pub(crate) fn cli_headless_state() -> (Arc<AppState>, Vec<String>) {
     let state = Arc::new(AppState::new());
     let mut failures = Vec::new();
-    match config::load_config() {
+    match config::load_config(&state.caches) {
         Ok(cfg) => *state.config.get_mut() = Some(Arc::new(cfg)),
         Err(e) => failures.push(format!(
             "no config loaded ({e}); reporting the built-in defaults"
@@ -530,11 +530,10 @@ pub(crate) fn cli_sync_once_preflight(
     Ok(())
 }
 
-/// Load the files [`cli_sync_once_preflight`] decides on, turning a load
-/// failure into the reason the CLI prints.
 pub(crate) fn cli_sync_once_preflight_from_disk() -> Result<(), String> {
+    let caches = crate::state::AppCaches::new();
     let config =
-        config::load_config().map_err(|e| format!("cannot read the stored config: {e}"))?;
+        config::load_config(&caches).map_err(|e| format!("cannot read the stored config: {e}"))?;
     let tokens = cli_read_tokens().map_err(|e| format!("cannot read the stored tokens: {e}"))?;
     cli_sync_once_preflight(&config, &tokens)
 }

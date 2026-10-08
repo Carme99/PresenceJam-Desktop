@@ -14,7 +14,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tauri::Emitter;
 pub fn config_dir() -> Result<PathBuf, String> {
     // Maintained replacement for the unmaintained `dirs` crate (issue #418):
@@ -56,13 +56,10 @@ pub fn get_config_path() -> Result<PathBuf, String> {
 /// Set when `load_config` finds a corrupt config.json and quarantines it to
 /// `<config>.bak` (issue #379). Diagnostics-visible via
 /// [`config_was_quarantined`]; warn-log-only otherwise — no other channel is
-/// touched by this slice.
-pub(crate) static CONFIG_QUARANTINED: AtomicBool = AtomicBool::new(false);
-
-/// Diagnostics-visible flag: true once this process has quarantined a corrupt
-/// config.json to `.bak` and fallen back to defaults (issue #379).
-pub fn config_was_quarantined() -> bool {
-    CONFIG_QUARANTINED.load(Ordering::SeqCst)
+/// touched by this slice. Owned by `AppCaches` (issue #758 slice 2) so each
+/// test constructs isolated flags instead of serialising on a test lock.
+pub fn config_was_quarantined(caches: &crate::state::AppCaches) -> bool {
+    caches.quarantined_flag().load(Ordering::SeqCst)
 }
 
 /// Backup path alongside the original: `config.json` → `config.json.bak`.
@@ -251,6 +248,7 @@ pub fn config_quarantine_backup_name() -> Option<String> {
 /// rename errors are logged and swallowed so the caller falls back to
 /// defaults either way (issue #379).
 pub(crate) fn quarantine_corrupt_config(
+    caches: &crate::state::AppCaches,
     path: &std::path::Path,
     parse_err: impl std::fmt::Display,
 ) -> PathBuf {
@@ -270,7 +268,7 @@ pub(crate) fn quarantine_corrupt_config(
             rename_err
         ),
     }
-    CONFIG_QUARANTINED.store(true, Ordering::SeqCst);
+    caches.quarantined_flag().store(true, Ordering::SeqCst);
     backup
 }
 
@@ -432,8 +430,8 @@ pub(crate) fn tighten_config_permissions(path: &std::path::Path) {
     }
 }
 
-pub fn load_config() -> Result<AppConfig, String> {
-    load_config_from(&get_config_path()?).map(|config| {
+pub fn load_config(caches: &crate::state::AppCaches) -> Result<AppConfig, String> {
+    load_config_from(caches, &get_config_path()?).map(|config| {
         with_keychain_flags(config, || {
             crate::keychain::cached_spotify_client_secret_presence()
         })
@@ -444,7 +442,10 @@ pub fn load_config() -> Result<AppConfig, String> {
 /// parse and the normalization, with the keychain stamping left to the public
 /// entry point — so this half is testable against real files with no keychain
 /// probe, the same shape [`import_config_document`] uses.
-pub(crate) fn load_config_from(path: &std::path::Path) -> Result<AppConfig, String> {
+pub(crate) fn load_config_from(
+    caches: &crate::state::AppCaches,
+    path: &std::path::Path,
+) -> Result<AppConfig, String> {
     if !path.exists() {
         log::info!(
             "[CFG] Config file not found at '{}', using defaults",
@@ -476,6 +477,7 @@ pub(crate) fn load_config_from(path: &std::path::Path) -> Result<AppConfig, Stri
         // single-pass parse answered those two shapes before.
         Ok(other) => {
             quarantine_corrupt_config(
+                caches,
                 path,
                 format!("expected a JSON object, found {}", json_kind(&other)),
             );
@@ -485,7 +487,7 @@ pub(crate) fn load_config_from(path: &std::path::Path) -> Result<AppConfig, Stri
             // Issue #379: never lose the evidence — quarantine the corrupt
             // file to `<config>.bak` alongside the original and boot on
             // defaults. Observable via `config_was_quarantined()`.
-            quarantine_corrupt_config(path, &e);
+            quarantine_corrupt_config(caches, path, &e);
             return Ok(AppConfig::default());
         }
     };

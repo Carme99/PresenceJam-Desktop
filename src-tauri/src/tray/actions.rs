@@ -20,7 +20,6 @@ pub fn tray_write_lock() -> &'static parking_lot::Mutex<()> {
     TRAY_WRITE_LOCK.get_or_init(|| parking_lot::Mutex::new(()))
 }
 
-
 /// Runs a Spotify player action from a tray click using the stored access
 /// token. On success the tray menu is force-refreshed and the action's
 /// deterministic outcome is recorded for the items that mirror it:

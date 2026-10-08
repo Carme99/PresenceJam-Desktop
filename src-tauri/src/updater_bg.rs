@@ -1370,20 +1370,30 @@ fn install_method_for(
 #[cfg(desktop)]
 #[tauri::command]
 pub async fn check_for_update(app: AppHandle) -> Result<Option<UpdateCheckOutcome>, String> {
+    use tauri::Manager;
+    let caches = app
+        .try_state::<std::sync::Arc<crate::AppState>>()
+        .map(|s| std::sync::Arc::clone(&s));
     let found = tauri::async_runtime::spawn_blocking(move || {
-        let channel = crate::config::load_config()
-            .map_err(|e| {
-                // A read failure must never be a silent, permanent
-                // "no update" state: the reason lands in the log file, and the
-                // next check (mount / 24h tick) re-reads the config, so a
-                // transient failure restores itself. Parse failures do not
-                // reach here at all — `load_config` quarantines the file and
-                // boots on defaults (verified in config.rs).
-                log::warn!("{TAG} check_for_update: config unreadable ({e}); update check failed");
-                format!("config load failed: {e}")
-            })?
-            .updates
-            .channel;
+        // Issue #758 slice 2: the config read goes through the managed
+        // `AppState`'s caches; a command invoked before setup managed state
+        // (or in a test without one) falls back to throwaway caches.
+        let channel = match caches.as_ref() {
+            Some(state) => crate::config::load_config(&state.caches),
+            None => crate::config::load_config(&crate::state::AppCaches::new()),
+        }
+        .map_err(|e| {
+            // A read failure must never be a silent, permanent
+            // "no update" state: the reason lands in the log file, and the
+            // next check (mount / 24h tick) re-reads the config, so a
+            // transient failure restores itself. Parse failures do not
+            // reach here at all — `load_config` quarantines the file and
+            // boots on defaults (verified in config.rs).
+            log::warn!("{TAG} check_for_update: config unreadable ({e}); update check failed");
+            format!("config load failed: {e}")
+        })?
+        .updates
+        .channel;
         tauri::async_runtime::block_on(check_with_channel(&app, channel))
     })
     .await
@@ -1528,11 +1538,18 @@ pub async fn stage_deferred_update(
         drop(guard);
         active
     };
+    let state_caches = app
+        .try_state::<std::sync::Arc<crate::AppState>>()
+        .map(|s| std::sync::Arc::clone(&s));
     let outcome = tauri::async_runtime::spawn_blocking(move || {
         tauri::async_runtime::block_on(async move {
             let current = env!("CARGO_PKG_VERSION").to_string();
-            let channel = crate::config::load_config()
-                .map_err(|e| {
+            // Issue #758 slice 2: same managed-caches read as check_for_update.
+            let channel = match state_caches.as_ref() {
+                Some(state) => crate::config::load_config(&state.caches),
+                None => crate::config::load_config(&crate::state::AppCaches::new()),
+            }
+            .map_err(|e| {
                     // The channel decides which manifest is staged, so an
                     // unreadable config is a visible failure for THIS call —
                     // never a silent guess — with the reason in the log file.
