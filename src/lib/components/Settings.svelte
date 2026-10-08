@@ -863,8 +863,8 @@
     gap: var(--sp-4);
   }
 
-/* C9: unsaved-changes banner shown when localConfig drifts from the
-     saved store; and the polling min>max clamp feedback hint. */
+/* C9: unsaved-changes banner shown when the explicit #890 dirty flag is
+     set; per-card clamp feedback is styled by `.clamp-hint` in app.css. */
   .dirty-banner {
     display: flex;
     flex-direction: column;

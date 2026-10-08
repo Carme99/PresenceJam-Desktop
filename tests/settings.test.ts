@@ -2179,7 +2179,7 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     expect(get(theme)).toBe('system');
   });
 
-  it('mounts AppearanceCard alone: autostart invokes the command without a dirty banner', async () => {
+  it('mounts AppearanceCard alone: autostart invokes the command and raises no error on success', async () => {
     const { default: AppearanceCard } =
       await import('$lib/components/settings/AppearanceCard.svelte');
     const cfg = structuredClone(defaultConfig);
@@ -2212,7 +2212,7 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     expect(autodirty).toBe(0);
   });
 
-  it('mounts AppearanceCard alone: autostart failure surfaces and auto-clears', async () => {
+  it('mounts AppearanceCard alone: autostart failure surfaces through the parent callback', async () => {
     const { default: AppearanceCard } =
       await import('$lib/components/settings/AppearanceCard.svelte');
     const cfg = structuredClone(defaultConfig);
@@ -2229,8 +2229,8 @@ describe('Settings extracted cards slice 2 (#750)', () => {
         saveMessage: '',
         followSystemChecked: false,
         onreset: () => {},
-        // Gap 6: the parent callback restores main's 3000ms clear. The card
-        // reports through it; the expiry below proves the parent's window.
+        // Gap 6: the parent callback owns main's 3000ms clear window. The card
+        // reports through it; the expiry is proven by the full-page test below.
         onAutostartError: (message: string) => { cleared = message; }
       });
       await tick();
