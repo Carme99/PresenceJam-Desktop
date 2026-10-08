@@ -530,6 +530,8 @@ pub(crate) fn cli_sync_once_preflight(
     Ok(())
 }
 
+/// Load the files [`cli_sync_once_preflight`] decides on, turning a load
+/// failure into the reason the CLI prints.
 pub(crate) fn cli_sync_once_preflight_from_disk() -> Result<(), String> {
     let caches = crate::state::AppCaches::new();
     let config =

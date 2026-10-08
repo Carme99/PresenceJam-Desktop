@@ -1275,6 +1275,7 @@ pub async fn get_diagnostics_snapshot(app: AppHandle) -> Result<DiagnosticsSnaps
         let log_dir = app_clone.path().app_log_dir().ok();
         // Read here, like `log_dir`, so `build_snapshot` stays an assembly
         // plus sanitization boundary that tests can drive with a planted
+        // marker record (#603) or a planted quarantine (#537).
         let failed_update_install = crate::updater_bg::read_failed_install_marker();
         let quarantine = ConfigQuarantine::observe(&state.caches);
         build_snapshot(
