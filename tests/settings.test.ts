@@ -2247,6 +2247,41 @@ describe('Settings extracted cards slice 2 (#750)', () => {
     }
   });
 
+  it('autostart failure message auto-clears after 3s on the full page', async () => {
+    vi.useFakeTimers();
+    try {
+      invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'set_autostart_enabled') throw new Error('os denied');
+        if (cmd === 'update_config')
+          return args != null && typeof args === 'object' && 'patch' in args
+            ? { ...get(configStore), ...(args.patch as object) }
+            : get(configStore);
+        if (cmd === 'load_config') return get(configStore);
+        if (cmd === 'save_config')
+          return args != null && typeof args === 'object' && 'config' in args ? args.config : undefined;
+        if (cmd === 'get_sync_status')
+          return { spotify_connected: true, teams_connected: true };
+        if (cmd === 'get_spotify_granted_scopes') return ['user-modify-playback-state'];
+        if (cmd === 'get_teams_granted_scopes') return ['Presence.Read', 'profile'];
+        return [];
+      });
+      const { container } = await mountSettings();
+      const toggle = container.querySelector('#autostart') as HTMLInputElement;
+      await fireEvent.click(toggle);
+      // The failure line shares the footer `saveMessage` channel…
+      await waitFor(() => {
+        expect(container.querySelector('.save-message')).not.toBeNull();
+      });
+      // …and the parent's 3000ms window clears it (gap 6: main's saveTimeout).
+      await vi.advanceTimersByTimeAsync(3000);
+      await waitFor(() => {
+        expect(container.querySelector('.save-message')).toBeNull();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('mounts UpdatesCard alone and switches the channel', async () => {
     const { defaultConfig } = await import('$lib/stores/config');
     const { default: UpdatesCard } = await import('$lib/components/settings/UpdatesCard.svelte');
