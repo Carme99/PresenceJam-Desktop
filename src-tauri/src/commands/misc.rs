@@ -21,7 +21,7 @@ const CMD: &str = "[CMD.MISC]";
 /// See issue #74.
 ///
 /// Issue #342: when the filter is enabled the formatted sample is routed
-/// through `filter_status` exactly like the runtime polling loop does, so
+/// through `filter_status_for_locale` exactly like the runtime polling loop does, so
 /// the preview demonstrates the effective fallback (a whitespace-only
 /// placeholder renders the canonical default, not the raw format). The
 /// optional profane sample lets the user see that fallback path with a
@@ -199,12 +199,11 @@ mod tests {
     use super::preview_status;
 
     #[test]
-    fn preview_status_uses_explicit_locale_over_stale_global_locale() {
-        let _serialised = crate::i18n::LOCALE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::i18n::set_current(Some("de"));
-
+    fn preview_status_uses_explicit_locale() {
+        // Issue #758 slice 3: the preview carries its own explicit locale, so
+        // no installed table is consulted — there is nothing stale to race.
+        // The German-named custom text below proves the point: it renders
+        // verbatim under the French locale instead of leaking German.
         let localized = preview_status(
             "{track}".to_string(),
             Some(true),
@@ -224,8 +223,6 @@ mod tests {
             Some("fr".to_string()),
         );
         assert_eq!(custom, "Eigener Status");
-
-        crate::i18n::set_current(None);
     }
 
     #[test]

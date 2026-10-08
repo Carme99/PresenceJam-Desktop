@@ -736,10 +736,11 @@ impl TokensLoadGate {
 /// `AppState` (see `AppState::caches`): each test constructs its own
 /// `AppCaches::new()`, and production paths reach them via `state.caches`.
 ///
-/// Genuinely process-wide handles stay statics (issue #758 step 3): the tray
-/// icon handle (`tray::TRAY`), the tray write serialization lock
-/// (`tray::TRAY_WRITE_LOCK`), the locale table (`i18n::CURRENT`),
-/// `macos_deeplink::CLAIMED`, and the keychain/HTTP client caches.
+/// Genuinely process-wide handles stay statics (issue #758 slice 3 keeps
+/// them): the tray icon handle (`tray::TRAY`), the tray write serialization
+/// lock (`tray::TRAY_WRITE_LOCK`), `macos_deeplink::CLAIMED`, and the
+/// keychain/HTTP client caches. The locale table (`i18n::LocaleState`) moved
+/// onto `AppState::locale` in slice 3, so no test-wide lock survives.
 ///
 /// Lock shapes match the previous statics exactly (`parking_lot` mutexes for
 /// the cache slots and dedup snapshot, atomics elsewhere), so the
@@ -889,6 +890,11 @@ pub struct AppState {
     /// test constructs an isolated session and production session
     /// boundaries are per-session resets, not global resets.
     pub session: crate::polling::SessionState,
+    /// Issue #758 slice 3 (final): the installed native-surface locale table.
+    /// Owned here so each test installs its own language and two `AppState`s
+    /// never share one table; the tray/menu builders render from the state
+    /// they already hold instead of a process-wide static.
+    pub locale: crate::i18n::LocaleState,
     /// Issue #758 slice 2: per-`AppState` tray + config caches and mirrors
     /// (throttled devices/queue caches, post-action fetch instants, dedup
     /// snapshot, window/playing/mode mirrors, delayed-refresh guard,
@@ -922,6 +928,7 @@ impl AppState {
             secret_conflict: AtomicBool::new(false),
             last_sync_snapshot: RwLock::new(None),
             session: crate::polling::SessionState::new(),
+            locale: crate::i18n::LocaleState::new(),
             caches: AppCaches::new(),
         }
     }

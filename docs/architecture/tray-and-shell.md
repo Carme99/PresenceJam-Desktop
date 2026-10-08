@@ -88,12 +88,14 @@ The UI is localized to **English, German, and French** via the i18n barrel
   Detached Logs/Settings windows own independent locale instances, so a `storage`
   listener converges them on the main window's write (the same pattern as the
   `#423` theme listener, with a same-value guard that stops a write loop) (#620).
-- **Native surfaces (4.7.0, #674):** the tray menu (`tray/`) and the native
-  application menu (`menu.rs`) render from a Rust string table
-  (`src-tauri/src/i18n.rs`: one `Strings` field per literal, with `EN`/`DE`/`FR`
-  tables). An unknown `locale` falls back to English and is logged, and a Rust
-  parity test fails when the three tables drift apart or a label is hard-coded
-  back into `tray/`/`menu.rs`.
+- **Native surfaces (4.7.0, #674; owned by `AppState` since #758 slice 3):**
+  the tray menu (`tray/`) and the native application menu (`menu.rs`) render
+  from a Rust string table (`src-tauri/src/i18n.rs`: one `Strings` field per
+  literal, with `EN`/`DE`/`FR`/`ES`/`IT`/`PL`/`PT`/`NL` tables) owned by
+  `AppState::locale` — each state installs and renders its own table, so no
+  process-wide static survives. An unknown `locale` falls back to English
+  and is logged, and a Rust parity test fails when the eight tables drift
+  apart or a label is hard-coded back into `tray/`/`menu.rs`.
 - Known limitation: Rust-side error strings surfaced through `invoke()`
   rejections and event payloads remain English, as does the app name.
 
