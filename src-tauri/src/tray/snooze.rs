@@ -446,7 +446,6 @@ pub fn snooze_status_line(strings: &Strings, snooze: &TraySnooze) -> String {
 mod tests {
     use super::*;
     use crate::i18n::{DE, EN, FR};
-    use crate::tray::testkit::MODE_ATOM_LOCK;
     use crate::tray::testkit::{body_of, tray_prod_source};
     /// A config carrying `snooze_until` as stored.
     fn snoozed_config(stored: &str) -> std::sync::Arc<crate::config::AppConfig> {

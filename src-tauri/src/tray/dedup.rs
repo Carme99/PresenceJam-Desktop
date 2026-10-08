@@ -201,7 +201,7 @@ pub fn repeat_menu_label(strings: &Strings, state: RepeatState) -> &'static str 
 /// One-line sync/status summary for the tray's status item and tooltip
 /// (issue #591). The Pause/Resume verb on its own left the sync state
 /// unstated, and the presence-gated dock badge is macOS-only. `is_playing`
-/// is `LAST_PLAYING_STATE` — the same source as the Play/Pause checkmark —
+/// is `playing_flag` — the same source as the Play/Pause checkmark —
 /// not the polling loop's copy, which goes stale on a same-track pause.
 ///
 /// Localized from the table it is handed (issue #674); the artist/title and
@@ -227,7 +227,6 @@ pub fn sync_status_line(
 mod tests {
     use super::*;
     use crate::i18n::{DE, EN, FR};
-    use crate::tray::testkit::MODE_ATOM_LOCK;
     /// Issue #582: the two toggles render the state the poll body reported
     /// (`note_playback_modes` → the atoms the menu build reads), and the
     /// click target is the documented cycle, so a successful toggle leaves

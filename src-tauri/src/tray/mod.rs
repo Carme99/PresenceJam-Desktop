@@ -833,16 +833,18 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), String> {
     // pause would leave the mark claiming "playing" until the next track.
     // Consuming the event here keeps the tray's belief truthful; the
     // poller's own re-store then drives the rebuild that paints it.
+    // The consume is inline (not spawned): tauri invokes `listen` callbacks
+    // synchronously on the emitter thread, so `note_playing_state` lands
+    // before `process_track` returns and before the rebuild that paints it.
+    // A spawn would race the rebuild and could paint a stale Play/Pause
+    // mark on a same-track pause (#758 slice-2 review). `try_state` is a
+    // lock-free map lookup, so there is no blocking cost to staying inline.
     let listen_handle = app.handle().clone();
     app.listen("playback-state-changed", move |event| {
-        let payload = event.payload().to_string();
-        let app = listen_handle.clone();
-        std::thread::spawn(move || {
-            let Some(state) = app.try_state::<std::sync::Arc<crate::AppState>>() else {
-                return;
-            };
-            consume_playback_state_changed(&state.caches, &payload);
-        });
+        let Some(state) = listen_handle.try_state::<std::sync::Arc<crate::AppState>>() else {
+            return;
+        };
+        consume_playback_state_changed(&state.caches, event.payload());
     });
 
     // Immediately set the real menu to reflect actual state (Bug 11 fix).
@@ -1134,12 +1136,12 @@ pub(crate) fn rebuild_tray_menu(
         })?;
 
     // Spotify playback controls (issue #3.0-P3). Play/Pause is a single
-    // check-item whose native checked state comes from LAST_PLAYING_STATE
-    // (see the static's docs — the polling loop's stored track goes stale
-    // on a same-track pause); the Devices/Up Next submenus are built from
+    // check-item whose native checked state comes from `playing_flag`
+    // (the polling loop's stored track goes stale on a same-track pause);
+    // the Devices/Up Next submenus are built from
     // the pre-fetched throttled caches so the polling loop's per-iteration
     // rebuilds don't hammer the Spotify API. The checkmark is derived from
-    // (track_id, is_playing) via the track_key dedup and LAST_PLAYING_STATE,
+    // (track_id, is_playing) via the track_key dedup and `playing_flag`,
     // so a same-track pause flips without waiting for the next poll. See
     // issues #229 and #217.
     let is_playing = caches.playing_flag().load(Ordering::Acquire);
@@ -1982,9 +1984,15 @@ mod tests {
             body.contains("app.listen(\"playback-state-changed\""),
             "setup_tray must subscribe to the poller's playback-state-changed event (issue #689)"
         );
+        // The consume is inline on the listener thread (not spawned): a spawn
+        // would race the rebuild and could paint a stale Play/Pause mark.
         assert!(
-            body.contains("consume_playback_state_changed(&state.caches, &payload)"),
-            "the subscription must hand the payload to the tray's consumer"
+            body.contains("consume_playback_state_changed(&state.caches, event.payload())"),
+            "the subscription must hand the payload to the tray's consumer inline"
+        );
+        assert!(
+            !body.contains("std::thread::spawn"),
+            "the playback-state consume must not hop threads (issue #689 ordering)"
         );
     }
     /// Issue #882: `setup_tray` runs on the main thread inside Tauri's

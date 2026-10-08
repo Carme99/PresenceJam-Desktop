@@ -267,7 +267,6 @@ pub fn queue_for_menu(
 mod tests {
     use super::*;
     use crate::i18n::{DE, EN, FR};
-    use crate::tray::testkit::MODE_ATOM_LOCK;
     /// Issue #582: a check mark can only carry on/off, while `repeat_state`
     /// has three documented values — so the label must name the mode, or a
     /// user cannot tell "repeat one" from "repeat the playlist". Issue #674:
