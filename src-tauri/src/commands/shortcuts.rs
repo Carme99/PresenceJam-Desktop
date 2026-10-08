@@ -1596,6 +1596,8 @@ mod tests {
     /// `commands::sync`'s lifecycle for sync. A runner that grew its own HTTP
     /// call or its own claim/emit sequence would be a second implementation
     /// that can drift from the commands and the tray.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that every runner delegates to the existing player/sync implementations instead of re-implementing them; the runners need a live `AppHandle` for the calls they delegate, so the delegation is pinned at the source.
     #[test]
     fn runners_delegate_to_the_existing_implementations() {
         let source = include_str!("shortcuts.rs");
@@ -1648,6 +1650,8 @@ mod tests {
     /// The read that decides the playback direction goes through the same
     /// refresh-aware policy as the tray's play/pause item, and a failed read
     /// performs no action at all.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the refresh-aware read plus the no-action-on-failure arm; the press path needs a live `AppHandle`, so the arm is pinned at the source.
     #[test]
     fn a_failed_playback_state_read_performs_no_action() {
         let source = include_str!("shortcuts.rs");

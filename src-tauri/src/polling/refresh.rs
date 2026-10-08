@@ -302,6 +302,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the exact helper-definition and call-site COUNTS across the polling package; call-site placement is structural, so the counts are pinned at the source.
     #[test]
     fn test_cas_discard_block_is_single_source_of_truth() {
         // Post-split (#754): the CAS helpers live in refresh.rs and their call
@@ -350,6 +352,8 @@ mod tests {
     /// structural guard covers every current typed CAS caller and fails on
     /// either provider's write accessor, without inventing a fake runtime
     /// lock shape that production no longer has.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is no `spotify_mut()`/`teams_mut()` guard retained around any typed CAS call; the callers run the live refresh against real tokens, so the guard discipline is pinned at the source.
     #[test]
     fn test_typed_cas_callers_do_not_retain_slot_write_guard() {
         // Post-split (#754): the single-file call sites now live in the
@@ -475,6 +479,8 @@ mod tests {
     /// compare/commit lock; call sites persist only after they return. If a
     /// future contributor moves a persist call back inside a helper body, the
     /// deadlock returns and this guard fails.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of `persist_tokens(` inside both helper bodies plus persistence at the call sites; the helpers run the live refresh, so the split is pinned at the source.
     #[test]
     fn test_cas_helper_body_has_no_persist_and_call_sites_persist() {
         let prod_source = prod_source();

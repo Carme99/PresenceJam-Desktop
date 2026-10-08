@@ -2326,6 +2326,14 @@ mod tests {
         &after_anchor[..end.unwrap_or_else(|| panic!("`{}` body never closed", anchor))]
     }
 
+    /// The seven-field `spotify-track-changed` wire contract, pinned both
+    /// behaviourally (serialize a `TrackInfo` above) and at the emit site.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tail invariant is the exact `app.emit` call-site string
+    /// inside `process_track` — driving the emit needs a live `AppHandle`
+    /// plus a full poll body, and the serialization half IS covered
+    /// behaviourally above.
     #[test]
     fn track_changed_event_serializes_exactly_the_seven_field_contract() {
         let track = crate::spotify::TrackInfo {
@@ -2370,6 +2378,8 @@ mod tests {
     /// write (`set_teams_status_message`) so a busy/meeting presence can
     /// suppress it, and the availability call sites (set_teams_presence
     /// re-arm + clear_teams_presence on pause) must exist.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the presence-gate-read-before-status-write ORDER plus the shared-tail reach; the write path needs live Graph, so the ordering is pinned at the source.
     #[test]
     fn test_presence_gate_precedes_status_write_and_availability_call_sites_exist() {
         let source = include_str!("write.rs");
@@ -2491,6 +2501,8 @@ mod tests {
     /// exactly once. Pre-fix the store/emit/placeholder-clear/gate work ran
     /// first and only the track key was restored, duplicating the
     /// `spotify-track-changed` event and the Graph presence read on retry.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the debounce-guard-before-every-side-effect ORDER plus the short-retry return; the branch lives in the live `process_track`, so the ordering is pinned at the source (the debounce predicate IS covered behaviourally above).
     #[test]
     fn test_debounce_branch_restores_previous_key_and_sleeps_short() {
         let source = include_str!("write.rs");
@@ -2562,6 +2574,8 @@ mod tests {
     /// Issues #370/#388 structural guard: the Teams refresh lives in one
     /// shared helper called from BOTH write paths. Pre-fix
     /// `handle_no_track` cloned the stored token with no expiry/refresh.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is one `teams_token_for_write` definition with both write paths calling it; call-site routing is structural, so the shape is pinned at the source.
     #[test]
     fn test_teams_token_refresh_is_single_shared_helper() {
         let source = include_str!("write.rs");
@@ -3176,6 +3190,8 @@ mod tests {
     /// fails. The core path it guards is executed by
     /// `test_teams_write_with_refresh_fn_emits_reconnect_on_dead_credential`,
     /// so together the two tests cover behaviour + binding.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the real `refresh_teams_token` + `persist_tokens` closure binding with `app` as emitter; there is no mock runtime, so the binding is pinned at the source.
     #[test]
     fn test_wrapper_still_binds_real_refresh_and_app_emitter() {
         let prod_source = prod_source();
@@ -3281,7 +3297,7 @@ mod tests {
     /// `PlaceholderWrite::Post` arm must route through
     /// [`teams_write_with_optional_refresh`].
     ///
-    /// Why a source guard survives here (issue #778 allows exactly this
+    /// Why a source scan survives here (issue #778 allows exactly this
     /// shape): the invariant is *which function the arm calls*. Driving the
     /// helper behaviourally cannot observe it — the arm lives inside
     /// `process_track`, whose other inputs are a real `AppHandle`, real
@@ -3341,6 +3357,8 @@ mod tests {
     /// is kept as a narrow wiring guard for that one specific call site so
     /// a future revert of `handle_no_track`'s delegation is caught. NOT a
     /// behaviour test.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is `handle_no_track` delegating its clear to the shared 401-retry helper; the clear needs live Graph, so the delegation is pinned at the source.
     #[test]
     fn test_no_track_clear_arm_routes_through_helper_wiring_guard() {
         let body = prod_fn_body(prod_source(), "pub(crate) fn handle_no_track(");
@@ -3392,6 +3410,8 @@ mod tests {
     /// Finding D3 (issue #686) structural guard: in the paused-clear branch the
     /// gate verdict is computed BEFORE the byte-identity comparison, and the
     /// suppressing arm records a suppression instead of a post.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the gate-verdict-before-byte-identity ORDER plus suppression bookkeeping; the clear needs live Graph, so the ordering is pinned at the source.
     #[test]
     fn test_paused_clear_asks_the_gate_before_the_dedup() {
         let prod = prod_source();
@@ -3455,6 +3475,8 @@ mod tests {
 
     /// Finding D4 (issue #687) structural guard: the same ordering on the
     /// no-track clear.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the rule-verdict-before-dedup-before-POST ORDER; the clear needs live Graph, so the ordering is pinned at the source.
     #[test]
     fn test_no_track_clear_asks_the_rule_before_the_dedup() {
         let prod = prod_source();
@@ -3492,6 +3514,13 @@ mod tests {
     }
 
     /// Finding D6 (issue #689): pausing the SAME track is a state change.
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tail invariant is the `let playing_changed` derivation
+    /// plus its `} else if playing_changed {` arm shape inside
+    /// `process_track` — the predicate itself IS covered behaviourally
+    /// above, but the arm wiring needs a live `AppHandle` and a Graph
+    /// read no hermetic test may reach.
     #[test]
     fn test_playback_state_change_is_detected_for_the_same_track() {
         assert!(
@@ -3590,6 +3619,8 @@ mod tests {
     /// Pre-fix it never touched `gated_track_key`, so a gated track's key
     /// survived the track and `get_sync_status` kept reporting
     /// `presence_gated = true` over a "Nothing playing" card.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `gated_track_key` write plus sentinel bookkeeping on each arm; the arms live in the live `handle_no_track`, so the ownership is pinned at the source.
     #[test]
     fn test_no_track_path_owns_the_gate_state() {
         let prod = prod_source();
@@ -3630,6 +3661,8 @@ mod tests {
     /// `/presence` GET per poll on a steady pause — and the fast path may not
     /// come back at the price of the D3 poisoning (a suppressed write claiming
     /// it was posted).
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the skip-fast-path predicate truth table; the predicate IS covered behaviourally here and the skipped read needs live Graph, so the wiring is pinned at the source.
     #[test]
     fn test_paused_clear_skips_the_gate_read_only_when_it_cannot_matter() {
         // The steady pause: the placeholder is on Teams, no rule suppresses,
@@ -3755,6 +3788,8 @@ mod tests {
 
     /// Issue #791 structural guard: `handle_no_track` must consult the
     /// presence/manual-status verdict before the clear POST.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the read-record-verdict-decide-before-POST ORDER; the POST needs live Graph, so the ordering is pinned at the source.
     #[test]
     fn test_no_track_clear_consults_presence_verdict_before_post() {
         let prod = prod_source();
@@ -3799,6 +3834,8 @@ mod tests {
     /// Review round 2, item 3: `handle_no_track`'s early returns cannot post a
     /// clear, so they must retire the finished track's gate instead of leaving
     /// `get_sync_status` answering `presence_gated = true` forever.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is gate retirement on every early return; the returns live in the live `handle_no_track`, so the retirement is pinned at the source.
     #[test]
     fn test_no_track_early_returns_retire_the_gate() {
         let prod = prod_source();
@@ -3917,7 +3954,9 @@ mod tests {
     /// Finding PollCore#0 (issue #568): the counter that feeds this decision is
     /// now bumped ONLY by `is_auth_failure` errors (dead access/refresh token)
     /// — a network failure has its own counter and can never reach this exit.
-
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `last_etag.as_deref()` conditional-GET round-trip; the poll needs live Spotify HTTPS, so the round-trip is pinned at the source.
     #[test]
     fn test_conditional_get_round_trip_is_preserved() {
         let spotify_src = include_str!("../sources/spotify.rs");
@@ -3947,7 +3986,9 @@ mod tests {
     /// no-track / clear path). Both answers flow through the trait's
     /// `TrackInfo::from(&NowPlaying)` conversion so the existing
     /// `process_track` signature stays unchanged.
-
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is exactly ONE `get_currently_playing` call site owned by the trait surface; call-site placement is structural, so the count is pinned at the source.
     #[test]
     fn test_single_top_level_get_currently_playing_match() {
         let source = include_str!("../sources/spotify.rs");
@@ -3972,7 +4013,9 @@ mod tests {
     /// The body is isolated by brace counting from `start_polling`'s
     /// opening `{` (house style — never boundary anchors/log-line
     /// anchors, which silently drift and leave the assertion vacuous).
-
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `rule_presence_backoff(` arm plus the no-pair clear; the clear needs live Graph, so the routing is pinned at the source.
     #[test]
     fn test_no_track_presence_routes_pair_through_rule_backoff() {
         let prod = prod_source();
@@ -3988,7 +4031,12 @@ mod tests {
     }
 
     /// Finding #635: the read-before-write policy, as a truth table.
-
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the tail invariant is emit-site routing — `process_track`
+    /// must call the pinned `*_payload(` builders with no inline `json!`
+    /// bypass. The wire shapes themselves ARE asserted behaviourally above;
+    /// reaching the emit needs a live `AppHandle` no hermetic test may hold.
     #[test]
     fn test_event_payload_shapes_are_pinned() {
         // Issue #762: the builders now return ts-rs-typed structs, so the

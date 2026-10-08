@@ -582,6 +582,8 @@ mod tests {
     /// The count is deliberately exact: adding a fifth gate that waits without
     /// consulting `stop_rx` is precisely the regression this pins, so a new
     /// wait site must be added here *and* be stop-aware.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is exactly four `stop_rx.recv_timeout(` sites and no plain `thread::sleep`; the driver needs an `AppHandle`, so the wait contract is pinned at the source.
     #[test]
     fn test_every_driver_wait_site_is_stop_aware() {
         let source = include_str!("loop.rs");
@@ -655,6 +657,8 @@ mod tests {
     /// fail both assertions below; a future change that wants to raise the
     /// cap must update the literal value (and the doc comment) here at the
     /// same time, so the contract stays explicit.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `SNOOZE_WAKE_SECONDS` cap value and its use at the snooze wait site; the driver needs an `AppHandle`, so the cap is pinned at the source.
     #[test]
     fn test_snooze_pause_wait_is_bounded_by_snooze_wake_seconds() {
         let source = include_str!("loop.rs");

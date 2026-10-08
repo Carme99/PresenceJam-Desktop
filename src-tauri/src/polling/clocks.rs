@@ -261,6 +261,8 @@ mod tests {
     /// Finding PollCore#4 (issue #572): a polling session resets the shared
     /// clocks on start and on exit, so a new session (or a refresh issued
     /// while nothing runs) never inherits a dead session's clocks.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `reset_write_clocks(&state.session)` call in both the loop exit and the session start; the loop needs a live `AppHandle`, so the call sites are pinned at the source.
     #[test]
     fn test_polling_lifecycle_resets_shared_write_clocks() {
         let loop_source = include_str!("loop.rs");

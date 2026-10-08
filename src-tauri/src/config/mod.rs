@@ -266,6 +266,8 @@ mod tests {
     /// `fn atomic_write_json(...)` signature. The body's `{`/`}` count is
     /// independent of what other functions are declared around it, so this
     /// test survives reordering / splitting / renaming of adjacent code.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of `fs::remove_file(path)` between temp-write-fsync and `rename()`; the crash window only exists in a real filesystem race no hermetic test can stage, so the absence is pinned at the source.
     #[test]
     fn test_atomic_write_json_does_not_remove_destination_first() {
         let src = concat!(
@@ -2324,6 +2326,8 @@ mod tests {
     /// The needles are assembled with `concat!` so this test's own source
     /// never contains the literal it searches for — otherwise an
     /// `include_str!` scan would match the test itself and pass vacuously.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `[CFG]` tag on every log macro region; log-tag spelling is not observable behaviour a hermetic test can assert on, so the sweep is pinned at the source.
     #[test]
     fn test_config_log_tags_use_cfg_prefix() {
         let src = concat!(
@@ -3615,6 +3619,8 @@ mod tests {
     /// / read-only mount), and `chmod` is gated on ownership of the file, not on
     /// write access to its directory — so the "0o555 temp dir" shape suggested
     /// in the issue does not deny it, for an unprivileged user or for root.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the absence of `?` in `tighten_config_permissions`; a real failing chmod needs a file the test does not own, so the absence is pinned at the source.
     #[test]
     fn test_config_mode_tightening_cannot_abort_the_load() {
         let body = fn_body(

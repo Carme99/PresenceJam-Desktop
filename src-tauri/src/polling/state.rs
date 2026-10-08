@@ -773,6 +773,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of `.compare_exchange(` in `start_polling`; the claim already happened in the caller, and the starter spawns the live poller, so the absence is pinned at the source.
     #[test]
     fn test_start_polling_does_not_claim_is_syncing() {
         let source = include_str!("state.rs");
@@ -807,7 +809,9 @@ mod tests {
 
     /// Regression guard for issue #79/#117: poll_once.rs must NOT emit raw
     /// "error" events directly.
-
+    ///
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `sync-stopped` + typed-payload emit on the poller-exit path; the poller needs a live `AppHandle` to emit, so the emit wiring is pinned at the source.
     #[test]
     fn test_self_terminating_poller_emits_sync_stopped() {
         let state_source = include_str!("state.rs");

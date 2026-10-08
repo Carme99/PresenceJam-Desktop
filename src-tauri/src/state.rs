@@ -1020,6 +1020,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of a `pub` inner field on the cache struct; field visibility is not runtime behaviour, so the encapsulation is pinned at the source.
     #[test]
     fn test_onboarding_cache_encapsulation_no_direct_state_access() {
         // Regression guard for issue #80: a future contributor must
@@ -1221,6 +1223,8 @@ mod tests {
     /// (the one-shot `spotify-secret-conflict` event fires before any webview
     /// has mounted, so nothing persists it otherwise), and both auth-completion
     /// paths must clear the flag again. Fails pre-fix: no such store exists.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the setup-persists plus both-paths-clear wiring for the replayable flag; the setup hook and auth completions need a live `App`, so the wiring is pinned at the source (the flag default IS covered behaviourally below).
     #[test]
     fn test_secret_conflict_flag_survives_setup_and_clears_on_reconnect() {
         use std::sync::atomic::Ordering;
@@ -1271,6 +1275,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of `pub` inner fields on the four sub-structs; field visibility is not runtime behaviour, so the encapsulation is pinned at the source.
     #[test]
     fn test_app_state_sub_encapsulation_no_pub_inner_fields() {
         let source = include_str!("state.rs");

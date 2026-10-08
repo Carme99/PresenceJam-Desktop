@@ -690,6 +690,8 @@ mod tests {
     /// and the poller's emitters *not* carrying it. Structural because the emit
     /// needs a live `AppHandle`; whitespace is normalised so rustfmt reflowing
     /// the call cannot break the guard.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `user_initiated: true` marker on this emitter and its absence on the poller's; the emit needs a live `AppHandle`, so the marker is pinned at the source.
     #[test]
     fn reconnect_teams_marks_its_emit_user_initiated() {
         let mark = |src: &str| src.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1044,6 +1046,8 @@ mod tests {
     /// in the command body is the pre-#942 shape, where two overlapping callers
     /// each refreshed from the same token. Structural because the command needs
     /// a live `AppHandle` and a real refresh round-trip.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the command routes through the `BOOT_GATE_FLIGHT` single-flight lock; the command needs a live `AppHandle` and a real refresh round-trip, so the routing is pinned at the source.
     #[test]
     fn the_command_routes_through_the_single_flight_lock() {
         let body = crate::token_io::test_scan::fn_body(
@@ -1065,6 +1069,8 @@ mod tests {
     /// Issue #760: the boot gate reads the client secret exactly once. The
     /// presence probe plus the fetch are what the typed island replaced, and
     /// re-introducing either restores the TOCTOU window between them.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is exactly one keychain read and no second-probe call; the gate runs inside the boot flow needing a live `AppHandle`, so the count is pinned at the source.
     #[test]
     fn the_spotify_gate_reads_the_secret_once() {
         let body = crate::token_io::test_scan::fn_body(

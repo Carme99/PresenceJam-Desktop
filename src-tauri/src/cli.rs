@@ -893,6 +893,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the headless publish path filters through the locale-aware `filter_cli_manual_status` with its loaded config instead of the raw `profanity::filter_status`; driving the path writes a real Teams status over HTTPS, so the call-site wiring is pinned at the source.
     #[test]
     fn test_headless_manual_status_uses_loaded_locale_for_safe_fallbacks() {
         let source = include_str!("cli.rs");

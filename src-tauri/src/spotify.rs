@@ -2578,6 +2578,8 @@ mod tests {
     // re-adding a bare `Client::new()` token request fails the suite. The
     // builder body is isolated with the shared literal-aware scanner
     // (`crate::token_io::test_scan`), not a next-function boundary anchor.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of bare `Client::new()` plus routing through the shared builder; the requests need live HTTPS, so the routing is pinned at the source.
     #[test]
     fn token_requests_go_through_shared_client_builder() {
         let src = include_str!("spotify.rs");

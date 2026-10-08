@@ -219,6 +219,8 @@ mod tests {
     /// the module without updating this list), `cargo test` fails fast.
     /// `logs` joined the list with the #595 LogViewer backfill, and
     /// `shortcut_reason` with the #968 machine-readable Settings reasons.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the declared submodule list itself; a module declaration is not runtime behaviour, so the registry is pinned at the source.
     #[test]
     fn test_commands_split_groups_present() {
         let source = include_str!("mod.rs");
@@ -251,6 +253,8 @@ mod tests {
     /// the legacy un-namespaced `[CMD]` prefix must no longer appear in
     /// any of the per-group command files. Each group should use its
     /// own `[CMD.<GROUP>]` constant.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the absence of the legacy `[CMD] ` prefix across the command files; log-tag spelling is not observable behaviour a hermetic test can assert on, so the sweep is pinned at the source.
     #[test]
     fn test_log_tags_use_namespaced_prefix() {
         // `include_str!` requires a literal path, so this is one helper fn
@@ -419,6 +423,8 @@ mod tests {
     /// reconnect_spotify_session, is_spotify_client_secret_set}` and
     /// `commands/teams_auth.rs::refresh_teams`. A thread id is observable at
     /// runtime; a grep over a signature is not evidence the body moved.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the async-plus-`spawn_blocking` discipline per command; driving every command needs a live `AppHandle` plus keychain/disk/HTTPS, so the discipline is pinned at the source (the owned commands ARE covered behaviourally by thread-id tests).
     #[test]
     fn test_commands_touching_io_are_async_and_offloaded() {
         // Positive control: the detector must fire on a body that does exactly
@@ -502,6 +508,8 @@ mod tests {
     /// installed. The ordering is the whole fix and the command needs a live
     /// `AppHandle` to drive (this crate has no mock runtime), so the guard is
     /// a source-order assertion over the command's own body.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the discard-before-`app.restart()` ORDER inside the command; the command needs a live `AppHandle` (this crate has no mock runtime), so the ordering is pinned at the source.
     #[test]
     fn test_relaunch_app_discards_a_staged_update_before_restart() {
         let body = commands_in(include_str!("misc.rs"))
@@ -540,6 +548,8 @@ mod tests {
     /// so the scan keeps every backticked token there verbatim --
     /// including `seek`, which has no underscore and would be lost to any
     /// underscore filter (the only prose exclusion is the lone `window`).
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is that the doc matrix names every registered command; matrix-to-registry agreement is not runtime behaviour, so the coverage is pinned at the source.
     #[test]
     fn test_guard_matrix_covers_every_registered_command() {
         // Registered set: brace-count the `generate_handler![...]` list

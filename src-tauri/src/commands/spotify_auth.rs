@@ -1784,6 +1784,8 @@ mod tests {
     // `peek_wrong_state_then_correct_state_succeeds` (peek-then-bind order
     // through the real helper and binding) and by pkce's
     // `binding_validate_does_not_consume_the_slot`.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the peek-then-bind-then-take-then-consume-on-Ok ORDER; the handler needs Tauri state no unit test can drive (the guarded behaviour IS covered behaviourally by the peek-then-bind tests), so the ordering is pinned at the source.
     #[test]
     fn manual_path_consumes_the_binding_only_after_a_successful_exchange() {
         let src = include_str!("spotify_auth.rs");
@@ -1893,6 +1895,8 @@ mod tests {
     // literal-aware scanner rather than driven directly. Issue #928 moved the
     // keychain probe into `reconnect_spotify_session_offloaded` (the blocking
     // pool hop), so the credential assertion is made against that body.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the ABSENCE of keychain delete/store calls on the re-authorize path; the command takes Tauri state and the keychain must stay untouched, so the absence is pinned at the source.
     #[test]
     fn re_authorize_command_never_deletes_the_stored_credential() {
         let src = include_str!("spotify_auth.rs");
@@ -1973,6 +1977,8 @@ mod tests {
         );
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `commit_spotify_session(` call and the absence of the removed wrappers plus the pre-#932 `persist_tokens` short-circuit; the handler needs Tauri state, so the call-site wiring is pinned at the source.
     #[test]
     fn manual_paste_handler_uses_commit_spotify_session_seam() {
         let src = include_str!("spotify_auth.rs");
@@ -1980,6 +1986,8 @@ mod tests {
         assert_uses_commit_spotify_session_seam(body, "manual-paste path");
     }
 
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the `commit_spotify_session(` call and the absence of the removed wrappers plus the pre-#932 short-circuit in the deep-link callback; the callback needs Tauri state, so the call-site wiring is pinned at the source.
     #[test]
     fn deep_link_handler_uses_commit_spotify_session_seam() {
         // The deep-link path lives in deep_link.rs, but its post-exchange block is

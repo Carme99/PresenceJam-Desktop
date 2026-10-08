@@ -763,6 +763,8 @@ mod tests {
     /// an `AppHandle`, so the ordering is pinned at the source — the same shape
     /// as the #572/D1 loop guards — while the gate's own behaviour is covered
     /// by the tests above.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the gate-before-clocks-before-iteration ORDER plus the stop-aware sleep arm; the driver needs an `AppHandle`, so the ordering is pinned at the source.
     #[test]
     fn test_quiet_pause_gate_precedes_the_clock_load_and_the_iteration() {
         let loop_source = include_str!("loop.rs");
@@ -813,6 +815,8 @@ mod tests {
     /// for any un-gated track while the window is open, never re-fires for a
     /// track it already gated (the #380 re-check owns that decision), and sits
     /// ahead of the first Teams write in `process_track`.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the mid-track entry position ahead of the first Teams write; the entry lives inside `process_track` needing live Graph, so the position is pinned at the source (the entry predicate IS covered behaviourally above).
     #[test]
     fn test_quiet_gate_entry_due_mid_track() {
         assert!(
@@ -994,6 +998,8 @@ mod tests {
     /// `AppHandle`, so this pins the ORDER and the pure decision rather than
     /// executing a real iteration. The remaining runtime evidence is the
     /// `[POLLING] snooze:` lines and the absence of Spotify GETs in the log.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the snooze-before-quiet-before-clocks-before-iteration ORDER plus the stop-aware sleep and expiry-clear arms; the driver needs an `AppHandle`, so the ordering is pinned at the source.
     #[test]
     fn snooze_gate_precedes_the_quiet_gate_the_clock_load_and_the_iteration() {
         let loop_source = include_str!("loop.rs");
@@ -1060,6 +1066,8 @@ mod tests {
     /// The behavioural half (that it clears an expired field and leaves a live
     /// one alone) is `config::clamp_snooze`'s unit test — this function writes
     /// to the real config path, so a test must not call it.
+    /// Why a source scan survives here (issue #778 allows exactly this
+    /// shape): the invariant is the guard-clamp-stamp-save-then-adopt ORDER; the fn writes the real config path, so a test must not call it and the ordering is pinned at the source.
     #[test]
     fn clear_snooze_if_expired_persists_before_adopting() {
         let prod = prod_source();

@@ -684,10 +684,10 @@ pub fn sync_status_from_state(state: &AppState) -> SyncStatus {
     }
     // Single critical section: all read guards held at once, clones below
     // cannot observe a writer interleaving between fields.
-    let track_guard = state.polling.current_track();
-    let spotify_guard = state.tokens.spotify();
-    let config_guard = state.config.get();
-    let teams_guard = state.tokens.teams();
+    let track_guard = section_order_recorder::acquire("track", || state.polling.current_track());
+    let spotify_guard = section_order_recorder::acquire("spotify", || state.tokens.spotify());
+    let config_guard = section_order_recorder::acquire("config", || state.config.get());
+    let teams_guard = section_order_recorder::acquire("teams", || state.tokens.teams());
     let is_syncing = state.polling.is_syncing();
 
     let current_track = track_guard.clone();
@@ -827,6 +827,53 @@ fn section_held_probe() {
         probe();
     }
 }
+
+// Issue #778 (remainder): records the ORDER in which `sync_status_from_state`
+// takes its four read guards, so a test can prove the documented #398 order
+// (`current_track -> spotify -> config -> teams`) rather than merely proving
+// each slot was held at some point. Each guard acquisition runs through
+// `acquire`, which records the slot name and THEN takes the guard in the same
+// expression — reordering two `let` lines moves the note with the guard, so
+// the recorded sequence is the actual acquisition order, not a parallel
+// comment on it. Compiled into production builds as a plain passthrough
+// (never armed there), so the command path carries no recording cost.
+mod section_order_recorder {
+    #[cfg(test)]
+    std::thread_local! {
+        static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static ORDER: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Take `take` and record `slot` first when a capture is armed. In
+    /// production builds (never armed) this is a plain passthrough.
+    #[inline]
+    pub(super) fn acquire<T>(_slot: &'static str, take: impl FnOnce() -> T) -> T {
+        #[cfg(test)]
+        if ARMED.with(|armed| armed.get()) {
+            ORDER.with(|order| order.borrow_mut().push(_slot));
+        }
+        take()
+    }
+
+    /// Arm the recorder, run `body`, and return the acquisition sequence.
+    /// Always disarms, even if `body` panics.
+    #[cfg(test)]
+    pub(super) fn capture<R>(body: impl FnOnce() -> R) -> (R, Vec<&'static str>) {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                ARMED.with(|armed| armed.set(false));
+            }
+        }
+        ORDER.with(|order| order.borrow_mut().clear());
+        ARMED.with(|armed| armed.set(true));
+        let _guard = Guard;
+        let out = body();
+        let order = ORDER.with(|order| order.borrow().clone());
+        (out, order)
+    }
+}
+
 #[tauri::command]
 pub async fn refresh_status(
     window: tauri::Window,
@@ -934,10 +981,11 @@ mod tests {
     /// guard grants its `try_write` and fails the test), then a second
     /// snapshot after the drops must assemble an equal struct, proving the
     /// section released cleanly. Rewording the "Single critical section"
-    /// comment cannot fail this test. ORDER: deferred — the adjacent `let`
-    /// bindings are structural, not behavioural: same-thread `try_write`
-    /// never exercises concurrent acquisition order, so a reorder still
-    /// passes here. Reorder-mutation proof is the named follow-up.
+    /// comment cannot fail this test. ORDER is owned by the adjacent
+    /// `test_sync_status_section_acquires_guards_in_documented_order`, which
+    /// records the actual acquisition sequence: same-thread `try_write`
+    /// here can only prove each slot was taken, never the order — which is
+    /// why the order needs its own recorder.
     ///
     /// Issue #679 moved the assembly out of the `get_sync_status` command into
     /// `sync_status_from_state` (the command, and the headless `--status` CLI
@@ -1000,6 +1048,34 @@ mod tests {
         );
         free_w.store(true, std::sync::atomic::Ordering::Release);
         assert!(free.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// Issue #778 (remainder): the ORDER half of the #398 contract. The
+    /// held-section test above proves each guard is TAKEN; this one proves
+    /// they are taken in the documented order (`current_track -> spotify ->
+    /// config -> teams`). Each acquisition runs through the recorder's
+    /// `acquire` in the same expression as the guard itself, so the captured
+    /// sequence IS the acquisition order — reordering two `let` lines moves
+    /// the note with the guard and fails here, with no source-text assertion
+    /// involved. Verified by mutation: swapping the whole `spotify` and
+    /// `teams` `let` lines (a pure reorder — guard names still bind the same
+    /// slots, so every other section test stays green) fails this test on
+    /// `["track", "teams", "config", "spotify"]`. Deleting an acquisition
+    /// fails twice over: the sequence shortens AND the held-section test
+    /// grants that slot's `try_write` mid-assembly.
+    #[test]
+    fn test_sync_status_section_acquires_guards_in_documented_order() {
+        use super::{section_order_recorder, sync_status_from_state, AppState};
+
+        let state = AppState::new();
+        let (_status, order) = section_order_recorder::capture(|| sync_status_from_state(&state));
+        assert_eq!(
+            order,
+            ["track", "spotify", "config", "teams"],
+            "the snapshot must acquire its four read guards in the #398 order \
+             (current_track -> spotify -> config -> teams) — a reordered or \
+             dropped acquisition breaks the lock-ordering contract (issue #398)"
+        );
     }
 
     /// Issue #879: the assembly is reached through the offload, so the
