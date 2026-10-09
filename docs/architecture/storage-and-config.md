@@ -147,8 +147,26 @@ sequenceDiagram
 
 | Command | Action |
 |---------|--------|
-| `reconnect_spotify` | Clears Spotify tokens (in-memory + atomic rewrite of tokens.json), emits `spotify-reconnect-required` event |
+| `reconnect_spotify_session` | Clears the live Spotify session and re-arms the reconnect flow — **the command the UI actually calls** (one `invoke()` site, from the persist-warning banner). |
+| `reconnect_spotify` | Clears Spotify tokens (in-memory + atomic rewrite of tokens.json), emits `spotify-reconnect-required` event. Still registered in `generate_handler!` but has **no `invoke()` call site** in `src/` or `tests/` — superseded by `reconnect_spotify_session`, so it is a registered-but-callerless escape hatch, not a live path. |
 | `reconnect_teams` | Clears Teams tokens (in-memory + atomic rewrite of tokens.json), emits `teams-reconnect-required` with `{user_initiated: true}` — this is the only user-initiated emitter, so the frontend can suppress its "session expired" notice for a reconnect the user just asked for (#675) |
+
+
+### The token-commit seam (#932)
+
+Both Spotify commit paths — the manual-paste command and the deep-link callback
+— route through **one** `commit_spotify_session`
+(`src-tauri/src/commands/spotify_auth.rs:98`), mirroring the Teams policy: a
+failed keychain write is a `match`, not a `?`. A locked keychain, a full disk or
+a failed AES-key write leaves the **in-memory** session in `AppState`,
+invalidates the onboarding cache, emits `spotify-auth-complete` and returns
+`Ok` — the persistence gap surfaces separately on `spotify-auth-persist-warning`
+(routed to `reconnect_spotify_session`), never as a sign-in failure the UI would
+misreport. Two source guards in `commands/spotify_auth.rs` pin both call sites so
+a per-path wrapper cannot reappear between the production call site and the seam.
+
+The Teams client and the shared retry/expiry helpers live in
+`src-tauri/src/http.rs` and are built **once**, not per call site.
 
 ## State Management
 
@@ -165,11 +183,22 @@ pub struct AppState {
     pub pending: PendingAuths,                // #80 step 2: spotify + teams RwLocks
     pub config: Config,                       // #80 step 2: AppConfig RwLock
     pub onboarding_cache: OnboardingCache,    // #80 step 1: 30s cache sub-struct
+    pub calendar: CalendarGate,               // #867: cached Outlook calendar gate
+    pub launch_binding: OnceLock<LaunchBinding>, // #66: per-launch OAuth anti-hijack binding
+    pub tray_available: AtomicBool,           // #819: whether setup_tray succeeded
+    pub deep_link_seen: DeepLinkDedup,        // #799: single-flight OAuth callback gate
+    pub session: SessionState,                // #758: write-decision clocks + latches
+    pub caches: AppCaches,                    // #758: throttled devices/queue + UI mirrors
+    pub locale: LocaleState,                  // #758 slice 3: installed locale
+    // + recovery markers, the last published SyncStatus, the manual-status
+    //   record and the secret-conflict flag (see state.rs for the full set)
 }
 ```
 
 Each sub-struct exposes only lock-acquisition methods (`tokens.spotify_mut()`,
-`polling.try_claim()`, `pending.spotify_mut()`, `config.set()`, `onboarding_cache.lock()`).
+`polling.try_claim()`, `pending.spotify_mut()`, `config.get_mut()`,
+`onboarding_cache.lock()`). Note `config.set()` no longer exists — the write path
+is `get_mut()`, mirroring `try_get_mut()`.
 The lock-encapsulation pattern is what makes future work like "lock must not be
 held across await" enforceable: a `lock_async` method could replace `lock` later
 without rewriting every call site.

@@ -109,8 +109,11 @@ indefinitely.
 
 ### Presence gating + availability sync (v3.0)
 
-Two `TeamsConfig` flags shape what the polling loop writes, and
-`AppConfig::status_rules` adds a third, track- and time-based gate:
+Seven `TeamsConfig` flags shape what the polling loop writes, and
+`AppConfig::status_rules` adds an eighth, track- and time-based gate. The
+reasons sit at different precedences so the most specific explanation wins —
+`busy` / `in a call` outranks `out of office`, which outranks the two
+platform signals below:
 
 - **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
   the loop calls `get_teams_presence` *before* the status write.
@@ -124,6 +127,25 @@ Two `TeamsConfig` flags shape what the polling loop writes, and
   presence is clear (`Available`, `Away`, …); a transient gate-read
   failure at change time degrades to a logged warning and the write
   proceeds.
+- **`gate_when_presenting` (default OFF, #872):** folds
+  `SHQueryUserNotificationState` into the same gate through a
+  `PresentationState` enum behind a swappable trait
+  (`src-tauri/src/platform/focus.rs`). A full-screen app, a slide deck, or
+  Windows Focus Assist Quiet Time pauses the status write. The probe answers
+  `Unknown` on Linux and macOS, where the flag is a **no-op**. Reason
+  strings `presenting` (FullScreen | Presentation) and `quiet-time`
+  (QuietTime); `None` and `Unknown` both map to an empty reason and fall
+  through to the next layer. Lowest precedence of the presence-class reasons,
+  so it can never outrank `busy` or `in a call`.
+- **`idle_away_after_seconds` (default 0 = off, #873):** a second probe in
+  `src-tauri/src/platform/idle.rs` reports seconds since the last
+  keyboard/mouse event — `GetLastInputInfo` on Windows, `None` on
+  Linux/macOS. Non-zero values are clamped to **60–3600**. When the user has
+  been idle past the threshold the write is suppressed with reason `idle`.
+  The first iteration after the gate clears forces exactly one status write
+  through a `force_resume_write` clock that overrides the #384
+  byte-identical dedup — otherwise the gate could clear with Teams still
+  showing a stale status for as long as the keepalive window.
 - **`gate_when_out_of_office` (default OFF, #637):** the **lowest-precedence**
   reason, so a user who is busy or in a call still gets that more specific
   explanation. Fires on either documented signal —
