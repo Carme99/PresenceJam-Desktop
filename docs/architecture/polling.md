@@ -247,6 +247,33 @@ platform signals below:
 `polling::start_polling` is a pure thread-spawner; the panic guard + spawn-error
 map-err in `polling/state.rs` resets the flag so future claims don't wedge.
 
+### Now-playing fields the rules walker reads (v5, #868/#871)
+
+`TrackRuleEntry` gained eight fields in 5.0, fed by `process_track` from the
+`NowPlaying` poll body. The Rust field names, for anyone reading
+`config/schema.rs:635+`:
+
+| Field | Matched against |
+| --- | --- |
+| `match_kind` | how the text fields compare — `Substring` (legacy), `Exact`, `Glob` |
+| `album_substring` | the album title |
+| `show_substring` | the show name, when the item is a podcast episode |
+| `device_substring` | the active Spotify device's name |
+| `playlist_uri` | the context URI |
+| `min_duration_seconds` | a duration floor, capped at 24 h |
+| `negate` | inverts the whole match |
+| `action` | `Suppress` \| `Replace { status }` \| `SnoozeMinutes { value }` \| `Profile { id }` \| `Presence { availability, activity }` |
+
+`decision_from_rule` projects through `action` first and falls back to the
+legacy flat `replacement_status` / `presence_availability` / `presence_activity`
+fields, so a pre-#868 config keeps its rule text.
+
+`TrackInfo` also carries the active device's `volume_percent`,
+`supports_volume` and `actions` (a typed `DeviceActions` mirroring Spotify's
+documented `device.actions` object) — the flags that gate the Dashboard's volume
+slider and click-to-seek bar. See `USAGE.md` § Volume, seek and playback
+capabilities.
+
 ### User-editable config surface (4.6, #538)
 
 Three fields that existed in `config.json` but had no UI (and, for two of them,

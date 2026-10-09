@@ -103,7 +103,8 @@ The **Repeat** item spells its mode out — `Repeat: Off` → `Repeat: Context` 
 **Cause:** The stored token encryption key is present but unreadable — a corrupted keychain entry, a partial write, or a key that no longer matches the `tokens.json` nonce. The app cannot decrypt the token file, so it cannot sync.
 
 **Fix:** both the Reconnect view (its corrupt-key banner) and the Diagnostics
-page's connections card offer **Reset local token storage**. It is
+page's connections card offer **Reset local token storage** (the
+`reset_local_token_storage` command). It is
 main-window-only, runs the reset behind an arm/confirm pair, deletes the
 keychain entries and the encrypted `tokens.json` sidecar, and finishes with the
 re-sign-in prompt — you will need to connect Spotify and Teams again. Nothing
