@@ -10,7 +10,7 @@ Logs and Settings can each be *popped out* into their own window (and popped
 back in), VS Code detached-panel style:
 
 - **Creation is Rust-side:** `src/lib/stores/detach.ts` invokes the
-  `detach_pane` command; `src-tauri/src/lib.rs` matches a fixed
+  `detach_pane` command; `src-tauri/src/app.rs` matches a fixed
   `DetachedPaneSpec` table for the stable labels `logs-detached` /
   `settings-detached`, their `/detached/<pane>` URLs, and their window sizes.
   A SvelteKit route (`src/routes/detached/[pane]/+page.svelte`) renders
@@ -101,7 +101,7 @@ The UI is localized to **English, German, and French** via the i18n barrel
 
 ## Auto-Update (v3.0)
 
-Updates are delivered through `tauri-plugin-updater` (registered in `lib.rs`).
+Updates are delivered through `tauri-plugin-updater` (registered in `app.rs`).
 The main capability grants exactly `updater:allow-check` and
 `updater:allow-download-and-install`, plus the notification permissions the
 webview uses. The endpoints the app actually uses come from
@@ -148,7 +148,7 @@ endpoint, signature mismatch) is silent — never blocks the UI.
   the payload immediately on Windows), so `src-tauri/src/updater_bg.rs` exposes
   a `stage_deferred_update` command that performs its own check + download +
   signature verification on the blocking pool and holds the verified bytes in
-  managed `PendingUpdate` state. `lib.rs` runs the app via `build().run()` with
+  managed `PendingUpdate` state. `app.rs` runs the app via `build().run()` with
   a **`RunEvent::Exit` arm**: when the user quits (tray + menu Quit share a bounded
   graceful-shutdown — `request_graceful_shutdown` emits `app-shutdown`, waits up to an 8 s
   drain acknowledgement, then exits unconditionally — and `app_exit` funnels into

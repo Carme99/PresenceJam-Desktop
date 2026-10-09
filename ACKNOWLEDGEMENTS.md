@@ -58,7 +58,7 @@ PresenceJam uses the following open-source projects. We're grateful to all the m
 | [@testing-library/svelte](https://github.com/testing-library/svelte-testing-library) | 5.x | MIT | Component-mount helpers for the Svelte test suite |
 | [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped) | 24.x | MIT | Node.js type declarations for config and tooling files |
 
-**Rust-only plugins.** Not every Rust plugin has a JS counterpart here, and the absences are deliberate: `tauri-plugin-dialog` (settings export/import, #673) has no `@tauri-apps/plugin-dialog` dependency and no `dialog:*` capability in `capabilities/default.json` because the confirm dialog is built and answered in Rust, and the log, opener, autostart and deep-link plugins are likewise driven from Rust (`lib.rs`) with no frontend import — so no `@tauri-apps/plugin-log` / `-opener` / `-autostart` / `-deep-link` row exists in the Node table.
+**Rust-only plugins.** Not every Rust plugin has a JS counterpart here, and the absences are deliberate: `tauri-plugin-dialog` (settings export/import, #673) has no `@tauri-apps/plugin-dialog` dependency and no `dialog:*` capability in `capabilities/default.json` because the confirm dialog is built and answered in Rust, and the log, opener, autostart and deep-link plugins are likewise driven from Rust (`app.rs`) with no frontend import — so no `@tauri-apps/plugin-log` / `-opener` / `-autostart` / `-deep-link` row exists in the Node table.
 
 ## Third-Party Services
 

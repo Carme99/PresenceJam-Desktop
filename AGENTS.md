@@ -113,31 +113,41 @@ frontend type-check reads stale generated types.
 │   ├── icons/
 │   ├── tauri.conf.json      # bundle id, window size, CSP, updater config
 │   └── src/
-│       ├── lib.rs           # entry point — AppState, run(), deep-link, CLI
+│       ├── lib.rs           # module registry + `pub use app::run` / `pub use state::{…}`
 │       ├── main.rs          # `fn main()` only
+│       ├── app.rs           # Tauri `run()` + `setup_*` wiring, CLI console attach, log perms
+│       ├── cli.rs           # CLI flag parsing/dispatch (`--status`, `--serve`, `--daemon`, …)
+│       ├── deep_link.rs     # `presencejam://callback` URL handling
+│       ├── state.rs         # `AppState` + token-commit seams (`Config`, `Tokens`, `Polling`)
+│       ├── events.rs        # typed ts-rs event payloads (`#[ts(export)]` structs)
+│       ├── http.rs          # shared retry/expiry helpers + cached HTTP client
+│       ├── redact.rs        # single `redact_len` construction for diagnostics + logs
 │       ├── i18n.rs          # Rust-side tray/menu i18n table
 │       ├── spotify.rs       # Spotify Web API client (PKCE auth)
 │       ├── teams.rs         # Microsoft Graph client (device-code flow)
 │       ├── profanity.rs     # filter
 │       ├── keychain.rs      # 256-bit AES-GCM key storage (OS keychain)
 │       ├── token_io.rs      # AES-GCM encrypt/decrypt of tokens.json
-│       ├── config.rs        # AppConfig + load/save + clamp_* helpers
+│       ├── config/          # schema, clamp, snooze, patch, migrate, io, transfer, mod
 │       ├── diagnostics.rs   # redacted support snapshot
 │       ├── updater_bg.rs    # silent background updates + deferred ("Install on quit")
-│       ├── tray.rs          # system tray + playback menu (single dispatcher since #804)
+│       ├── tray/            # system tray + playback menu (mod, cache, dedup, snooze,
+│       │                    #   devices, actions, testkit; single dispatcher since #804)
 │       ├── menu.rs          # macOS app menu
-│       ├── serve.rs         # `--serve` token-guarded localhost API
+│       ├── serve.rs         # `--serve` token-guarded localhost control API
 │       ├── pkce.rs          # PKCE verifier/challenge helpers
 │       ├── history.rs       # bounded status-decision history ring
 │       ├── calendar.rs      # Outlook calendar pre-gate (cached, throttled)
 │       ├── macos_deeplink.rs
 │       ├── platform/        # focus, idle (Windows-only probes; Unknown elsewhere)
 │       ├── polling/
-│       │   ├── mod.rs
+│       │   ├── mod.rs       # registry + `PollState` + `ErrorSeverity` emitters
 │       │   ├── loop.rs      # the single sync thread + smart sleep
-│       │   ├── poll_once.rs # one-iteration helper (used by --sync-once too)
+│       │   ├── iteration.rs # one-iteration helper (used by --sync-once too)
 │       │   ├── state.rs     # polling state machine
 │       │   └── daemon.rs    # `--daemon` supervisor
+│       │                   # + clocks, timing, refresh, gate, rules, presence,
+│       │                   #   status_text, write, exit (one file per concern, #754)
 │       ├── commands/        # one file per command family (config, auth, sync,
 │       │                    #   window, playback, rules, shortcuts, misc)
 │       └── sources/         # Spotify + MPRIS + SMTC (Windows) playback sources
@@ -205,7 +215,7 @@ The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust j
 ### Style
 
 - **Module log tags in square brackets**: `[CONFIG]`, `[POLL]`, `[TEAMS]`, etc.
-  The single dispatcher in `tray.rs` and the menu dispatcher in `menu.rs` already
+  The single dispatcher in `tray/mod.rs` and the menu dispatcher in `menu.rs` already
   share a `[MENU]` tag — keep new sub-dispatchers inside the same module under
   the same tag.
 - **Logging**: `log::info!`, `log::warn!`, `log::error!`, `log::debug!`. Never
@@ -214,10 +224,10 @@ The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust j
   tauri-plugin-log level.
 - **Errors**: `Result<T, E>` everywhere on fallible I/O and parse paths.
   `unwrap()` is **disallowed** on any code that could see production data. The
-  sole exception is the `tray.rs` `cached_devices` cache-hit fast path, which
+  sole exception is the `tray/cache.rs` `cached_devices` cache-hit fast path, which
   unwraps a snapshot it just proved is `Some` — and that one is documented in
   `CLAUDE.md` §Rust for historical reasons; do not add new `unwrap()` calls.
-- **No panics in hot loops**. `polling/loop.rs` and `polling/poll_once.rs` are
+- **No panics in hot loops**. `polling/loop.rs` and `polling/iteration.rs` are
   the long-lived sync thread; classify every error, log it, and back off.
 - **`#[cfg(target_os = "…")]`** must be **minimal**. Every cross-platform gate
   in CI is in `ci.yml` — a regression inside `#[cfg(target_os = "macos")]`
@@ -229,7 +239,7 @@ The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust j
 
 ### Clamps
 
-`config.rs` exposes `clamp_polling`, `clamp_teams`, `clamp_track_rule_action`,
+`config/clamp.rs` exposes `clamp_polling`, `clamp_teams`, `clamp_track_rule_action`,
 `clamp_presence_profiles`, and friends. **Every** new user-tunable config field
 goes through a clamp helper — never let the user save out-of-range values into
 `config.json`. Clamps are tested by unit tests next to the helper; add the test
@@ -556,7 +566,7 @@ the v5 retrospectives track why each one was forbidden.
   `log::*!`. The CLI failure path flushes the logger first because
   tauri-plugin-log buffers — see [§4 Authoring rules (Rust)](#4-authoring-rules-rust).
 - **Do NOT add a `unwrap()` on any fallible I/O or parse path.** The one
-  documented exception is the `tray.rs` `cached_devices` cache-hit fast
+  documented exception is the `tray/cache.rs` `cached_devices` cache-hit fast
   path; everything else is a `Result` or an `.expect("reason")` with a
   real reason.
 - **Do NOT write plaintext tokens, refresh tokens, client secrets, PKCE
@@ -564,7 +574,7 @@ the v5 retrospectives track why each one was forbidden.
   keychain-backed AES-GCM envelope is the only place tokens live. Logging
   a token shape is forbidden even at debug.
 - **Do NOT log raw event ids, menu ids, or device ids at info level.** The
-  unknown-event redaction is the helper `tray.rs` uses; reuse it, do not
+  unknown-event redaction is the helper `tray/mod.rs` uses; reuse it, do not
   inline it.
 - **Do NOT introduce a second lock crate** next to `parking_lot`. If you
   think you need `tokio::sync::Mutex` or `std::sync::Mutex`, the answer is
@@ -602,12 +612,14 @@ the v5 retrospectives track why each one was forbidden.
 - **Do NOT skip the profanity filter** on any code path that ends at the
   Teams status. The filter is the only thing standing between a crafted
   track title and a Teams status blast.
-- **Do NOT introduce new `unsafe`** in production code. Ten existing FFI blocks
-  are reviewed exceptions for platform calls with no safe Rust wrapper: the
-  atomic-publish renames in `diagnostics.rs`, the CLI parent-console attach in
-  `lib.rs`, the LaunchServices claim in `macos_deeplink.rs`, and the Win32
-  probes in `platform/{focus,idle}.rs`. Keep that list at ten — an eleventh
-  needs a reason in the PR.
+- **Do NOT introduce new `unsafe`** in production code. Eleven existing FFI
+  blocks are reviewed exceptions for platform calls with no safe Rust wrapper:
+  the CLI parent-console attach in `app.rs:374-394`, the LaunchServices claim in
+  `macos_deeplink.rs:209`, the three atomic-publish renames in
+  `diagnostics.rs:1405-1473`, the `SHQueryUserNotificationState` probe in
+  `platform/focus.rs:110`, and the `GetLastInputInfo` / `GetTickCount` probes in
+  `platform/idle.rs:94,106`. Keep that list at eleven — a twelfth needs a reason
+  in the PR.
 - **Do NOT bypass `redact_sensitive`** when building a diagnostics payload.
 - **Do NOT change the bundle id** (`com.presencejam.app`) — it is the
   on-disk anchor for `tokens.json` and `app_log_dir()`.
@@ -646,7 +658,7 @@ every time. Steps that are not relevant are skipped, not reordered.
     fix the named gap, push a follow-up commit, and re-run the gate.
 12. **After both reviewers score 100/100, merge** with squash.
 
-If the issue touches shared files (e.g. `config.rs`, `app.css`,
+If the issue touches shared files (e.g. `config/`, `app.css`,
 `default.json`), coordinate through `hub` before editing — the wave
 playbook requires a worktree-per-branch, not a single shared checkout.
 
@@ -659,9 +671,9 @@ one outside this list, treat it as a bug and file an issue.
 
 | Symbol | What it is |
 | --- | --- |
-| `AppState` | The single Rust state object (config, token slots, tray handles, deep-link state). See `src-tauri/src/lib.rs`. |
-| `AppConfig` | The on-disk + in-memory config struct. Clamps live in `config.rs`. |
-| `clamp_*` | The family of input-sanitisation helpers in `config.rs`. |
+| `AppState` | The single Rust state object (config, token slots, tray handles, deep-link state). See `src-tauri/src/state.rs`. |
+| `AppConfig` | The on-disk + in-memory config struct. Clamps live in `config/clamp.rs`. |
+| `clamp_*` | The family of input-sanitisation helpers in `config/clamp.rs`. |
 | `redact_sensitive` | The single redaction helper for diagnostics. Tracked by #910. |
 | `[TAG]` | Module log tag in square brackets (`[CONFIG]`, `[POLL]`, `[TEAMS]`). |
 | `gated_track_key` | The presence-gate re-check key, evaluated on a 240 s mid-track clock. |
