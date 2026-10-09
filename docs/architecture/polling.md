@@ -81,6 +81,17 @@ increase backoff while polling continues (#568, finding PollCore#0):
 - The poll loop counts `SourceError::Auth` as its auth/reconnect path. The
   Spotify source maps expired and invalid credentials there, and also maps
   `NotPremium` there; `AutoSource` tries the OS source first and consults
+
+  The three implementations behind `playback.source` are
+  `sources::spotify::SpotifySource` (wraps `get_currently_playing` and owns the
+  `If-None-Match` ETag cache), `sources::smc::SmcSource` (Windows
+  `GlobalSystemMediaTransportControlsSessionManager`, most-recently-updated
+  `Playing` session) and `sources::mpris::MprisSource` (Linux `zbus`, walks
+  `org.mpris.MediaPlayer2.*`, prefers the previous winner). A kind change
+  rebuilds the source on the next poll, dropping the ETag cache and the
+  system-source singletons with the old source. On Windows and Linux the system
+  source runs even without Spotify connected; on macOS there is no OS source and
+  the onboarding wizard explains the Spotify-only fallback.
   Spotify only after the OS source has no track or fails.
 - All non-auth source variants — including `SourceError::Unauthenticated`,
   `SourceError::Transient`, and `SourceError::Other` — feed a **separate**
