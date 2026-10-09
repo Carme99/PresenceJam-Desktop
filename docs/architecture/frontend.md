@@ -149,6 +149,18 @@ sequenceDiagram
 | `show-about` | `null` | User picks About in the app menu |
 | `update-stage-progress` | `{downloaded, total, request_id}` (`total` null without `Content-Length`; not ts-rs-exported — mirrored in `UpdatePrompt.svelte`) | A deferred install-on-quit payload is downloading; throttled to 250 ms / 5 % with the first chunk always emitting. `request_id` identifies the exact stage so a cancelled or superseded download cannot overwrite the next stage's frontend position (v4.6, #590; v4.7.0, #711) |
 | `update-stage-complete` | `{version, request_id}` | A deferred install-on-quit payload finished staging successfully — emitted once per successful stage, only when something was actually staged. `version` is the **staged** version, not the current one; `request_id` lets the frontend reject a completion that was cancelled or superseded (v4.7.0, #678; #711) |
+| `presence-paused` | `{status}` | The poller is holding the status for a paused track (finding D7, #690) |
+| `manual-status-updated` | `ManualStatusUpdated` | A manual status was posted, cleared or expired locally — the composer chip and the tray "Clear manual status" entry both read this (v5, #870) |
+| `preferred-presence-updated` | `{available, label, availability?, activity?}` | The Graph `setUserPreferredPresence` session was armed or cleared — the optional fields carry the pair when `available` is true (v5, #866) |
+| `spotify-auth-persist-warning` | `AuthPersistWarning` = `{provider, message}` | The Spotify token commit succeeded **in memory** but the keychain write failed, so the session is live only until the next restart. Renders in the Settings persist-warning banner and routes to `reconnect_spotify_session` (#932) |
+| `teams-auth-persist-warning` | `AuthPersistWarning` = `{provider, message}` | Same failure on the Teams side; routes to `reconnectTeams`. **Wire-format break in 5.0:** this event used to emit a bare `string` and now emits `{provider, message}` — an external listener still expecting the string will receive the stringified object (#932) |
+| `spotify-track-changed` (typed at the IPC boundary) | `TrackInfo` | As above — from 5.0 the listener is `listen<TrackInfo>` rather than an untyped payload, and the same `TrackInfo` is forwarded to notifications (#780) |
+
+**Not emitted (declared but unwired):** `config-changed` is defined in
+`events.rs` with a typed `ConfigChanged` payload and re-exported from
+`config/io.rs::emit_config_changed`, but that function has **no call site** and
+no webview subscribes. Config changes are adopted on the next load. See
+[`storage-and-config.md`](./storage-and-config.md).
 
 ### Frontend notification throttle (C8)
 

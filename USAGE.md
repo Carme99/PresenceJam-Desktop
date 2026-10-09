@@ -4,7 +4,7 @@ Day-to-day guide to running PresenceJam.
 
 ## The System Tray
 
-PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). The app window is hidden by default to keep your taskbar clean.
+PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). The app window starts visible; it is hidden on launch only when `teams.start_minimized` is set or the autostart plugin passes `--minimized` (keeping the taskbar clean).
 
 **Tray icon behavior:**
 - **Left-click** — open/focus the PresenceJam window
@@ -101,6 +101,16 @@ The **live preview** below the field renders against a fixed sample item — dev
 | Profanity placeholder | `Currently Listening to Spotify` | Shown when a track name is filtered. Supports `{emoji}`. |
 | Custom words to filter | empty | Extra words/phrases, one per line, bounded to the first **64 entries of 32 characters** and shown with the same clamp feedback as the polling fields. A word you add is matched with the same rules as the built-in list — word boundaries are respected (adding `spam` does not flag `spamalot`), and the usual evasions (`s.p.a.m`, `5pam`) are caught — so the effect is visible immediately in the status preview below. |
 
+**Manual status composer (v5):** the Dashboard carries a small composer for a
+one-off Teams status, and the tray gains a **Recent statuses** submenu for the
+last five you posted (deduped on identical text). A manual status is bounded to
+**128 characters**, profanity-filtered, and carries an expiry in minutes clamped
+**5–720** — it expires locally *and* on Teams at the same instant. While one is
+armed the Dashboard chip shows the remaining window, the tray shows a **Clear
+manual status** entry, and `respect_manual_status` keeps the poller from
+overwriting it. The three CLI flags (`--set-status`, `--set-status-expiry`,
+`--clear-status`) drive the same composer from a script.
+
 ### Presence
 
 | Setting | Default | Description |
@@ -121,12 +131,22 @@ Quiet hours and track rules either **suppress** the Teams status write or **repl
 **Quiet hours** — each entry has an on/off checkbox, a start and an end time, and a weekday picker. Times wrap around midnight (a new entry starts at 22:00 → 07:00). **No weekday ticked means every day.** Each entry also carries a **Stop polling during this window** checkbox (off by default): while such a window is active the app makes no Spotify or Teams request at all, touches no write clock and leaves your Teams status exactly as it is — the poller re-checks the window every iteration and resumes by itself when it ends, and the thread is never stopped or parked. The log shows one transition pair, `[POLLING] quiet hours: polling paused until …` and the resume line.
 
 Each quiet-hours row also has a **Presence while this rule applies** picker. It offers *Don't change my presence* plus the five `(availability, activity)` pairs Microsoft's `setPresence` accepts — **Available/Available**, **Busy/InACall**, **Busy/InAConferenceCall**, **Away/Away** and **DoNotDisturb/Presenting**. Anything else is rejected at the config boundary and cleared rather than guessed at. The action is **inert while "Show Available while listening" (availability sync) is off**, and it never overrides a call, a meeting, or a status you set by hand.
-**Track rules** — each entry matches case-insensitively on artist and/or track-title substrings, plus an optional replacement status:
+**Track rules** — each entry matches case-insensitively on artist, track title, album, show, device or playlist, with an optional duration floor and an optional negate flip, and can suppress the write, post replacement text, snooze for N minutes, switch profile or set a presence pair:
 
 | Field | Behaviour |
 |-------|-----------|
-| Artist contains | Matched against the track's artist. Empty = any artist. |
-| Track title contains | Matched against the track title. Empty = any title. |
+| Match | How the text fields compare: **Substring** (the legacy case-insensitive `contains`), **Exact**, or **Glob**. |
+| Artist / Track title contains | As before. Empty = any. |
+| Album contains / Show contains | Matched against the album title, or the show name when the playing item is a podcast episode. |
+| Device contains | Matched against the active Spotify device's name. |
+| Playlist URI | Matched against the context URI. |
+| Minimum duration | Only matches a track at least this long (capped at 24 h). |
+| Negate | Inverts the whole match, so the rule applies to everything *except* what the fields describe. |
+| Active days / Window | Unchanged. |
+| Action | One of: **Suppress** (post nothing), **Replace** (post this text), **Snooze for** N minutes, **Switch profile**, or **Set presence** — a discriminated union replacing the old flat fields, with the legacy `replacement_status` / `presence_*` fields still honoured for `Suppress`. |
+
+| Field | Behaviour |
+|-------|-----------|
 | Active days | The weekdays this rule applies on — none ticked means every day. |
 | Window start / Window end | The rule's own time window, with the same wrap-over-midnight semantics as quiet hours: an end time of `00:00` means the end of the day, and a start equal to the end never matches. The default `00:00 → 24:00` contains every time. |
 | Post this instead | Non-empty — this text is posted instead of the formatted status. **Empty — the status write is suppressed entirely** for the matching track. |
@@ -143,6 +163,142 @@ New track rules are added **disabled**, so a half-filled rule can't suppress you
 **Pause and stop status text.** The two texts posted when playback pauses (`Paused` by default) and when nothing is playing (`Nothing playing on Spotify`) are editable at the bottom of this card — `teams.paused_status_format` / `teams.stopped_status_format` in `config.json`. The 🎵 prefix is added for you, and clearing a field restores the shipped default, so the rendered text is unchanged unless you change it. A matching rule's replacement status still takes precedence over both.
 
 Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_rules[]`), and the 4.7 schedule fields (`days`, `start_minutes`, `end_minutes`), `quiet_hours[].pause_polling` and the two status texts are additive with serde defaults, so a pre-4.7 (or pre-4.5) config file loads unchanged (#432).
+
+### Volume, seek and playback capabilities
+
+The Dashboard renders a **volume slider** and a **click-to-seek progress bar**;
+the tray gains a **Volume** submenu (0 / 25 / 50 / 75 / 100) and a **Seek**
+submenu (⏪ −30 s / +30 s ⏩). These read the active device's documented
+capability flags — Spotify's `device.actions` object, mirrored 1:1 in the typed
+`DeviceActions` struct — so a control the device refuses is never sent:
+
+| Flag | Governs |
+| --- | --- |
+| `supports_volume` | the volume slider and the tray Volume submenu |
+| `supports_seek` | the click-to-seek bar and the tray Seek submenu |
+
+The existing shuffle / repeat / previous / next items get the same disable
+treatment, and the Rust side (`commands/playback::set_volume` / `seek`) and the
+tray rebuild apply the identical gate — a stale-capabilities click cannot reach
+Graph. `player_set_volume` and `player_seek` join the existing `player_*`
+family.
+
+### Activity — the status-decision history
+
+The Dashboard's **Activity** card shows the last 20 presence decisions
+(presence updated, presence gated, snooze started or ended, preferred presence
+armed or cleared). The ring is bounded at **200** entries; the Diagnostics
+snapshot surfaces the same history as `redact_sensitive`-passed lines, so a
+credential-shaped `note` cannot reach a public paste.
+
+An optional JSONL mirror (`presence-history.jsonl`, written beside the log file)
+is gated by `logging.presence_history`, **off by default**, so a noisy rule set
+cannot grow the log without bound.
+
+### Calendar pre-gate
+
+PresenceJam can read your Outlook calendar and hold back the status write while
+you are in a meeting — the same suppression the presence gate already applies,
+but driven by the calendar rather than a Teams presence signal.
+
+The read is **cached and throttled to 5 minutes** (`GET /me/calendarView` with
+`Prefer: outlook.timezone` and a `$select` projection), requires the
+`Calendars.ReadBasic` scope, and is **fail-open in every direction**: a tenant
+that refuses the scope, a token that has not yet re-consented, or an empty
+calendar all reproduce today's behaviour exactly. Nothing about the calendar is
+stored beyond the cache.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `pre_meeting_suppress_minutes` | `0` | Optional head start ahead of a busy meeting. Capped at **60 minutes** by `clamp_teams`. |
+
+When the gate clears, the un-gate lands **within one poll of the meeting's end**
+rather than waiting for the re-arm cadence — `gate_recheck_due` also fires when
+the cached calendar's next boundary passes. The tray snooze submenu gains an
+**Until this meeting ends** entry, shown only while a busy meeting is in
+progress; with no meeting active it falls back to "until tomorrow".
+
+### Testing your rules
+
+The **Test these rules** card runs the *same* walker the poller uses, through
+the `explain_rules` command, and reports a per-rule reason chain — matched, not
+matched, disabled, outside-window, or negate-flipped — plus a one-line headline.
+The Dashboard's "why" `<details>` row under the `presence-gated` chip re-runs the
+same tester against the track currently playing, so a suppressed status can be
+explained without reading the rule table.
+
+### Presence profiles
+
+A **presence profile** is a named overlay applied at *read* time — switching one
+never rewrites `config.json` (`effective_config(&cfg)` merges it on top of the
+base document in memory). Each profile can override `status_format`,
+`clear_on_pause`, `availability_sync`, the presence gates, `preferred_presence`,
+a subset of `track_rules` and `notifications`.
+
+Profiles are switched from three places that share one path: the tray's
+**Active profile** submenu (beside the snooze items, with a **Base
+configuration** sentinel that clears the active id), the third global-shortcut
+slot, and `presencejam --profile <id>` (`--profile base` returns to the base
+configuration).
+
+Names are unique, case-sensitive and at most **32 characters**; a profile whose
+name normalises to empty is dropped on load, and an unknown `active_profile` id
+clears to `None`. Profile lists travel through **Export / Import settings** —
+`presence_profiles` and `active_profile` are part of the exported document, and
+the schema-version floor rose from 2 to 3 in 5.0.
+
+### Preferred presence
+
+`teams.preferred_presence` is an opt-in integration with Graph's
+`setUserPreferredPresence`, which moves the user's availability bubble rather
+than posting a status message. It is **off by default**, and inert while
+`respect_manual_status` is on — a hand-set status outranks it.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `enabled` | `false` | Opt-in, mirroring how `availability_sync` shipped. |
+| `availability` | — | One of `Busy`, `DoNotDisturb`, `BeRightBack`, `Away`. Normalised on load and every save. |
+| `activity` | — | Must form a valid pair with `availability`; an unsupported pair clears both and disables the feature. |
+| `expiry_minutes` | — | Clamped **5–720**. The session is cleared at expiry, at the next snooze end, and on `RunEvent::Exit`. |
+
+A matching rule that does not name its own presence pair — or a freshly armed
+snooze — drives the configured pair. **National-cloud note:** sovereign clouds
+have historically rejected this commercial-Graph surface; the call routes
+through the same `/users/{oid}` fallback the other Graph POSTs use.
+
+### Playback source
+
+`playback.source` chooses where now-playing comes from:
+
+| Value | Behaviour |
+| --- | --- |
+| `auto` (default) | The OS source first, falling back to Spotify when the OS source returns no session or fails. |
+| `spotify` | Spotify only. |
+| `system` | The OS source only — MPRIS on Linux, SMTC on Windows. |
+
+On **Windows and Linux** the system source runs even when Spotify is not
+connected, so a non-Premium user gets a working status from whatever else is
+playing on the desktop. On **macOS** there is no OS implementation (Apple
+exposes no public API for another app's now-playing), so the onboarding wizard
+surfaces a Spotify-only note. A kind change from Settings rebuilds the source on
+the next poll, dropping the Spotify ETag cache and the system-source singletons
+with the old source.
+
+### Working-hours import
+
+The quiet-hours card's **Import Outlook working hours** button reads Graph
+`mailboxSettings/workingHours` (requires the `MailboxSettings.Read` scope, which
+forces one Teams re-consent) and inverts each working day into off-hours: a
+Mon–Fri 09:00–17:00 schedule yields **five** wrap-around night entries
+(17:00–09:00 on each weekday) plus **two** full-day entries for Saturday and
+Sunday.
+
+The result is **previewed, not persisted** — the card shows the proposed rules
+behind a **Replace existing** toggle, and only saving the card (the same
+read-merge-write lock every other edit uses) writes them to disk. A tenant that
+refuses the scope, a session that has not yet re-consented, or an Outlook user
+who has cleared the Work hours tab each produce a reconnect / try-again message
+and leave your existing rules alone.
 
 ### Polling
 
@@ -173,14 +329,14 @@ All four classes are stored in `config.json` under `notifications` (`track_chang
 | Theme | Dark | **Dark**, **Light** or **System**. *System* follows your operating system's appearance live — switching the desktop between light and dark repaints the app immediately, with no restart — while an explicit Dark or Light stays pinned and is never overridden by the OS. The pre-paint bootstrap resolves the stored preference, so a System user never sees a flash of the wrong theme on launch. |
 | Compact spacing | Off | Tightens the spacing and type scale (a token-scale override applied before first paint, not a set of component variants). It is independent of the theme, including the System option. |
 | Launch at login | Off | Start PresenceJam automatically when your OS boots |
-| Language | System | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
+| Language | System | Interface language: one of eight — English, Deutsch, Français, Español, Italiano, Polski, Português (Brasil) or Nederlands. Defaults to your OS/browser language, and **Follow the system language** re-resolves on every boot. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
 | Start minimized | Off | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/app.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ### Logging
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Write a log file | On | Turns the on-disk log off entirely; the in-app Log Viewer still works from the live buffer. Takes effect immediately. |
+| Write a log file | On | Turns logging off entirely — both the on-disk log **and** the in-app Log Viewer, which reads the same Webview target. To keep the viewer working while writing nothing to disk, use `error` or `warn` instead.|
 | Log level | Info | `Off`, `Error`, `Warn`, `Info`, `Debug` or `Trace`. Takes effect immediately. |
 | Maximum log file size (MB) | 10 | The live file rotates once it reaches this size. Accepted range 1–500 MB. |
 | Archived log files to keep | 3 | How many rotated files are kept. Accepted range 1–20. The live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files — one more than the number in the field. |

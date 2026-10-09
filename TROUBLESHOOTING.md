@@ -100,6 +100,18 @@ The **Repeat** item spells its mode out — `Repeat: Off` → `Repeat: Context` 
 
 ### Reconnect shows "Keychain unavailable"
 
+**Cause:** The stored token encryption key is present but unreadable — a corrupted keychain entry, a partial write, or a key that no longer matches the `tokens.json` nonce. The app cannot decrypt the token file, so it cannot sync.
+
+**Fix:** both the Reconnect view (its corrupt-key banner) and the Diagnostics
+page's connections card offer **Reset local token storage** (the
+`reset_local_token_storage` command). It is
+main-window-only, runs the reset behind an arm/confirm pair, deletes the
+keychain entries and the encrypted `tokens.json` sidecar, and finishes with the
+re-sign-in prompt — you will need to connect Spotify and Teams again. Nothing
+else in your configuration is touched. After the reset, sign in through
+**Reconnect** rather than the onboarding wizard: the wizard's cache is
+invalidated, but the reconnect flow re-probes the keychain on every entry.
+
 **Cause:** The OS keychain could not be read — typically a locked Secret Service keyring on Linux, or a denied credential store. This is **not** the same as "no stored credential": your Spotify Client Secret is still in the keychain, the app just cannot reach it right now. Treating the two alike is what used to push a fully set-up user back through the Spotify wizard.
 
 **Fix:**
@@ -177,7 +189,7 @@ tray is a full quit: re-launch the app to start a fresh session.
 
 **Cause:** The language picker (Settings → Appearance → Language) defaults to your browser/OS language and persists the choice.
 
-**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → Appearance. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
+**Fix:** Pick one of the eight interface languages in Settings → Appearance: **English**, **Deutsch**, **Français**, **Español**, **Italiano**, **Polski**, **Português (Brasil)** or **Nederlands**. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
 
 ### "Install on quit" seemed to do nothing
 
