@@ -16,7 +16,8 @@ subject can be read (and reviewed) on its own:
 | [Frontend](./docs/architecture/frontend.md) | Directory layout, the diagnostics and log-viewer pages, the Rust→frontend event bus, and the notification throttle |
 
 Other entry points: [docs/README.md](./docs/README.md) (documentation index),
-[docs/RELEASING.md](./docs/RELEASING.md) (cutting a release) and
+[docs/RELEASING.md](./docs/RELEASING.md) (cutting a release),
+[docs/HEADLESS.md](./docs/HEADLESS.md) (headless and supervised operation) and
 [docs/STATE-OF-FEATURES.md](./docs/STATE-OF-FEATURES.md) (what is shipped and
 verified, row by row).
 

@@ -86,9 +86,11 @@ frontend type-check reads stale generated types.
 ├── TROUBLESHOOTING.md
 ├── USAGE.md                 # day-to-day guide
 ├── docs/                    # long-form docs, per-topic
-│   ├── PLATFORMS.md
-│   ├── RELEASING.md
-│   ├── STATE-OF-FEATURES.md
+│   ├── README.md            # documentation index
+│   ├── PLATFORMS.md         # OS / architecture matrix + Linux requirements
+│   ├── HEADLESS.md          # `--serve` / `--daemon` + the packaging units
+│   ├── RELEASING.md         # version-bearing files, CI gates, tag → publish
+│   ├── STATE-OF-FEATURES.md # what is shipped and verified, row by row
 │   ├── architecture/        # six subject pages behind ARCHITECTURE.md
 │   └── link-audit.py
 ├── packaging/               # OS packaging units (systemd, launchd, Task Scheduler, …)
