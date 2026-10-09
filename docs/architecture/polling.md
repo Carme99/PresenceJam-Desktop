@@ -249,8 +249,10 @@ mirroring the backend bound:
 `profanity.rs` screens the formatted status string before it hits Microsoft
 Graph. If matched, the status is replaced with `config.teams.profanity_placeholder`
 (default: `Currently Listening to Spotify`), with the `{emoji}` placeholder
-resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
-**original profane text is never written to logs**.
+resolved to 🎵 or ⏸️. Since issue #912 the post-write log line carries only
+the byte count, never the text — the posted status is user content and a
+crafted track title must not reach the log, and the text itself goes to
+`debug!`. The **original profane text is never written to logs** at any level.
 
 Detection features (v4.1.1, #328–#344; `src-tauri/src/profanity.rs` is the source of truth — curated word list plus compounds like `asshole`/`bullshit`/`sonofabitch` (#411)):
 - **Extended leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, `ph→f` pre-fold, `x→ck` expansion, dropped-`c` `uk→uck` (scoped to `u`), terminal `z→s` (#377/#470), fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
@@ -259,7 +261,7 @@ Detection features (v4.1.1, #328–#344; `src-tauri/src/profanity.rs` is the sou
 - **Repeated-character collapse:** generic run-collapse (`shiiit → shit` regardless of excess length).
 - **Rescan of the placeholder** (case-insensitive `{emoji}`): a profane placeholder falls back to the default (`Currently Listening to Spotify`).
 - **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`.
-- **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
+- **Compound-word safe-suffixes:** only `tail`/`tails` is whitelisted, and only for the `cock` stem — `cocktail` stays clean. `head` is *not* a safe suffix: it is a profane continuation (`dickhead`, issue #330).
 - **Strong stems + y-tail:** `shit/fuck/bitch` flag glued compounds; `shitty/bitchy/fucky` flag while `cocky/spicy/tardy` stay clean.
 
 ### Status formatting (4.6)

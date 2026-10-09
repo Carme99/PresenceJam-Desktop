@@ -177,7 +177,7 @@ tray is a full quit: re-launch the app to start a fresh session.
 
 **Cause:** The language picker (Settings → Appearance → Language) defaults to your browser/OS language and persists the choice.
 
-**Fix:** Pick **English**, **Deutsch**, or **Français** in Settings → Appearance. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
+**Fix:** Pick one of the eight interface languages in Settings → Appearance: **English**, **Deutsch**, **Français**, **Español**, **Italiano**, **Polski**, **Português (Brasil)** or **Nederlands**. The choice applies immediately and persists across restarts. Rust-side error strings surfaced by the backend remain English by design — only UI strings are localized.
 
 ### "Install on quit" seemed to do nothing
 

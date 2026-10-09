@@ -55,7 +55,7 @@ unchanged.
 
 ### Interface Languages (v4.0)
 
-The UI is localized to **English, German, and French** via the i18n barrel
+The UI is localized to eight languages via the i18n barrel — English, German, French, Spanish, Italian, Polish, Brazilian Portuguese (`pt`, with `pt-BR` resolving to it) and Dutch
 (`src/lib/i18n.ts` re-exporting `src/lib/i18n/{en,de,fr}.ts` +
 `store.svelte.ts`):
 

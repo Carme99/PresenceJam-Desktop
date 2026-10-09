@@ -35,10 +35,18 @@ settings:
   `migrate_config` in place.
 
 The current config writer has a monotonic `revision` field and rejects stale
-whole-document payloads. `config-changed` publication and live frontend adoption **are** present: `config/io.rs` declares
-`CONFIG_CHANGED_EVENT` and emits it after every accepted save (issue #943), and the webview
-subscribes and reloads. The cross-process sidecar lock and the reserved JavaScript-safe terminal
-boundary remain **not present at this main checkout**.
+whole-document payloads. The `revision` guard itself **is** live: a stale
+whole-document payload is rejected. Live `config-changed` publication is
+**not present at this main checkout** — `config/io.rs::emit_config_changed`
+is defined and re-exported but has **no call site**, so nothing emits the
+event after a save, and no webview listener subscribes to it. The typed
+`ConfigChanged` envelope exists in `events.rs` and in
+`src/lib/types-generated/`, so a future live-push implementation has its
+payload shape ready. Until then, a config write is adopted by the **next**
+load, not pushed to a running GUI — which is why the `--profile` path below is
+described as a next-load write. The cross-process sidecar lock and the
+reserved JavaScript-safe terminal boundary likewise remain **not present at
+this main checkout**.
 `--profile` path is a direct next-load write because it exits before the Tauri
 event path; it does not publish a live profile change to a running GUI.
 

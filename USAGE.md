@@ -4,7 +4,7 @@ Day-to-day guide to running PresenceJam.
 
 ## The System Tray
 
-PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). The app window is hidden by default to keep your taskbar clean.
+PresenceJam lives in your **system tray** (Windows taskbar or macOS menu bar). The app window starts visible; it is hidden on launch only when `teams.start_minimized` is set or the autostart plugin passes `--minimized` (keeping the taskbar clean).
 
 **Tray icon behavior:**
 - **Left-click** — open/focus the PresenceJam window
@@ -121,12 +121,22 @@ Quiet hours and track rules either **suppress** the Teams status write or **repl
 **Quiet hours** — each entry has an on/off checkbox, a start and an end time, and a weekday picker. Times wrap around midnight (a new entry starts at 22:00 → 07:00). **No weekday ticked means every day.** Each entry also carries a **Stop polling during this window** checkbox (off by default): while such a window is active the app makes no Spotify or Teams request at all, touches no write clock and leaves your Teams status exactly as it is — the poller re-checks the window every iteration and resumes by itself when it ends, and the thread is never stopped or parked. The log shows one transition pair, `[POLLING] quiet hours: polling paused until …` and the resume line.
 
 Each quiet-hours row also has a **Presence while this rule applies** picker. It offers *Don't change my presence* plus the five `(availability, activity)` pairs Microsoft's `setPresence` accepts — **Available/Available**, **Busy/InACall**, **Busy/InAConferenceCall**, **Away/Away** and **DoNotDisturb/Presenting**. Anything else is rejected at the config boundary and cleared rather than guessed at. The action is **inert while "Show Available while listening" (availability sync) is off**, and it never overrides a call, a meeting, or a status you set by hand.
-**Track rules** — each entry matches case-insensitively on artist and/or track-title substrings, plus an optional replacement status:
+**Track rules** — each entry matches case-insensitively on artist, track title, album, show, device or playlist, with an optional duration floor and an optional negate flip, and can suppress the write, post replacement text, snooze for N minutes, switch profile or set a presence pair:
 
 | Field | Behaviour |
 |-------|-----------|
-| Artist contains | Matched against the track's artist. Empty = any artist. |
-| Track title contains | Matched against the track title. Empty = any title. |
+| Match | How the text fields compare: **Substring** (the legacy case-insensitive `contains`), **Exact**, or **Glob**. |
+| Artist / Track title contains | As before. Empty = any. |
+| Album contains / Show contains | Matched against the album title, or the show name when the playing item is a podcast episode. |
+| Device contains | Matched against the active Spotify device's name. |
+| Playlist URI | Matched against the context URI. |
+| Minimum duration | Only matches a track at least this long (capped at 24 h). |
+| Negate | Inverts the whole match, so the rule applies to everything *except* what the fields describe. |
+| Active days / Window | Unchanged. |
+| Action | One of: **Suppress** (post nothing), **Replace** (post this text), **Snooze for** N minutes, **Switch profile**, or **Set presence** — a discriminated union replacing the old flat fields, with the legacy `replacement_status` / `presence_*` fields still honoured for `Suppress`. |
+
+| Field | Behaviour |
+|-------|-----------|
 | Active days | The weekdays this rule applies on — none ticked means every day. |
 | Window start / Window end | The rule's own time window, with the same wrap-over-midnight semantics as quiet hours: an end time of `00:00` means the end of the day, and a start equal to the end never matches. The default `00:00 → 24:00` contains every time. |
 | Post this instead | Non-empty — this text is posted instead of the formatted status. **Empty — the status write is suppressed entirely** for the matching track. |
@@ -173,14 +183,14 @@ All four classes are stored in `config.json` under `notifications` (`track_chang
 | Theme | Dark | **Dark**, **Light** or **System**. *System* follows your operating system's appearance live — switching the desktop between light and dark repaints the app immediately, with no restart — while an explicit Dark or Light stays pinned and is never overridden by the OS. The pre-paint bootstrap resolves the stored preference, so a System user never sees a flash of the wrong theme on launch. |
 | Compact spacing | Off | Tightens the spacing and type scale (a token-scale override applied before first paint, not a set of component variants). It is independent of the theme, including the System option. |
 | Launch at login | Off | Start PresenceJam automatically when your OS boots |
-| Language | System | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
+| Language | System | Interface language: one of eight — English, Deutsch, Français, Español, Italiano, Polski, Português (Brasil) or Nederlands. Defaults to your OS/browser language, and **Follow the system language** re-resolves on every boot. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
 | Start minimized | Off | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/app.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ### Logging
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Write a log file | On | Turns the on-disk log off entirely; the in-app Log Viewer still works from the live buffer. Takes effect immediately. |
+| Write a log file | On | Turns logging off entirely — both the on-disk log **and** the in-app Log Viewer, which reads the same Webview target. To keep the viewer working while writing nothing to disk, use `error` or `warn` instead.|
 | Log level | Info | `Off`, `Error`, `Warn`, `Info`, `Debug` or `Trace`. Takes effect immediately. |
 | Maximum log file size (MB) | 10 | The live file rotates once it reaches this size. Accepted range 1–500 MB. |
 | Archived log files to keep | 3 | How many rotated files are kept. Accepted range 1–20. The live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files — one more than the number in the field. |

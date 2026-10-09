@@ -129,8 +129,10 @@ same suite on macOS after its compile check. The Windows leg keeps
 before tests run (`STATUS_ENTRYPOINT_NOT_FOUND`). Compiling platform-gated code
 is still required there: a `cargo check` alone catches `cfg`-guarded breakage
 even though it does not execute runtime tests. Re-expand the Windows test leg
-when the runner image links the binary cleanly, and record any further
-platform-specific reduction here rather than leaving it implied.
+**once the dev-dependency hazard is removed, not when an image changes** — see
+the `rust-platform-check` job in `ci.yml` for the paired binary-fingerprint
+evidence from PR #1116, and record any further platform-specific reduction
+here rather than leaving it implied.
 
 ## 4. The tag → publish chain (`release.yml`)
 
