@@ -96,7 +96,7 @@ The **live preview** below the field renders against a fixed sample item — dev
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Clear on pause | On | Clears your Teams status when Spotify pauses or stops. There is no Settings toggle for this — edit `teams.clear_on_pause` in `config.json` directly (consumed at `src-tauri/src/polling/poll_once.rs`). |
+| Clear on pause | On | Clears your Teams status when Spotify pauses or stops. There is no Settings toggle for this — edit `teams.clear_on_pause` in `config.json` directly (consumed at `src-tauri/src/polling/write.rs`). |
 | Profanity filter | On | Replaces profane track/artist names with a safe placeholder |
 | Profanity placeholder | `Currently Listening to Spotify` | Shown when a track name is filtered. Supports `{emoji}`. |
 | Custom words to filter | empty | Extra words/phrases, one per line, bounded to the first **64 entries of 32 characters** and shown with the same clamp feedback as the polling fields. A word you add is matched with the same rules as the built-in list — word boundaries are respected (adding `spam` does not flag `spamalot`), and the usual evasions (`s.p.a.m`, `5pam`) are caught — so the effect is visible immediately in the status preview below. |
@@ -153,7 +153,7 @@ Both lists live in `config.json` under `status_rules` (`quiet_hours[]`, `track_r
 | Max interval | 60s | Ceiling for the track-end smart sleep — while a track plays, PresenceJam never sleeps longer than this (up to 300 s in Settings). |
 | Paused backoff ceiling | 300s | The upper bound for the pause backoff ladder (30 → 60 → 120 s → this value), accepted in the range 60–3600 s with inline clamp feedback. Raising it lets the ladder climb further before settling (fewer idle API calls); lowering it settles sooner. A value below the base interval is floored at the base, so the ladder never shrinks as pauses accumulate. |
 
-All four are clamped by the backend (`config.rs::clamp_polling`): default 5–300 s, min 5–30 s, max between min and 300 s, and the pause ceiling 60–3600 s. The Settings form previews the clamped values before saving ("Min interval exceeds max interval — max will be saved as {max}s.").
+All four are clamped by the backend (`config/clamp.rs::clamp_polling`): default 5–300 s, min 5–30 s, max between min and 300 s, and the pause ceiling 60–3600 s. The Settings form previews the clamped values before saving ("Min interval exceeds max interval — max will be saved as {max}s.").
 
 ### Notifications
 
@@ -174,7 +174,7 @@ All four classes are stored in `config.json` under `notifications` (`track_chang
 | Compact spacing | Off | Tightens the spacing and type scale (a token-scale override applied before first paint, not a set of component variants). It is independent of the theme, including the System option. |
 | Launch at login | Off | Start PresenceJam automatically when your OS boots |
 | Language | System | Interface language: English, Deutsch (German), or Français (French). Defaults to your OS/browser language. The choice is stored in `config.json` (`locale`) and is the single source of truth for the window, the tray menu and the native application menu — an unknown value falls back to English. Switching it also retags `<html lang>` for screen readers and applies the locale's number and plural rules (French counts `0` as singular). Detached Logs and Settings windows follow the switch. |
-| Start minimized | Off | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/lib.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
+| Start minimized | Off | Open the app minimized to the tray (window hidden on launch). There is no Settings toggle — set `teams.start_minimized` to `true` in `config.json` (consumed at `src-tauri/src/app.rs`). On macOS, it also switches the app's activation policy to `Accessory`, removing the dock icon and menu-bar app menu — the app becomes a pure tray-resident app. The dock icon reappears when you set the field back to `false` (no restart needed). |
 
 ### Logging
 
@@ -337,7 +337,7 @@ The first recognised flag wins if you pass more than one.
 
 ## Status Expiry
 
-Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with the pause/stop placeholder — by default `🎵 Paused` and `🎵 Nothing playing on Spotify`, both editable in Settings → Status rules → *Pause and stop status text* (`teams.paused_status_format` / `teams.stopped_status_format`; the 🎵 is added for you, and clearing a field restores these defaults) — and that placeholder **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/poll_once.rs` sets a fixed now + 60 s, on both the paused and the no-track path). The pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
+Teams custom status messages automatically expire. PresenceJam sets the message's expiry (`expiryDateTime`) to the **track's end time + a buffer** (default 10 s; `polling.expiry_buffer_seconds` in `config.json`). This is an app-side choice — the Graph API doesn't shorten it. When playback pauses or stops, PresenceJam replaces the message with the pause/stop placeholder — by default `🎵 Paused` and `🎵 Nothing playing on Spotify`, both editable in Settings → Status rules → *Pause and stop status text* (`teams.paused_status_format` / `teams.stopped_status_format`; the 🎵 is added for you, and clearing a field restores these defaults) — and that placeholder **expires 60 s after it is posted** (`placeholder_expiry_str()` in `src-tauri/src/polling/timing.rs` sets a fixed now + 60 s, on both the paused and the no-track path). The pause placeholder does *not* inherit the track-end buffer. Graph has no "clear status message" action, so the short-lived placeholder is the documented clear mechanism: it self-removes ~1 min after the last successful post even if the app quits.
 
 ---
 

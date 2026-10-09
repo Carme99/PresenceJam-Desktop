@@ -221,33 +221,66 @@ PresenceJam-Desktop/
 │       └── detached/[pane]/+page.svelte    # Renders LogViewer/Settings in detached mode (v4.0)
 ├── src-tauri/
 │   ├── src/
-│   │   ├── lib.rs                          # Tauri entry, command registration, AppState
+│   │   ├── lib.rs                          # module registry + `pub use app::run` / `pub use state::{…}`
+│   │   ├── app.rs                          # Tauri `run()` + `setup_*` wiring, CLI console attach, log perms
+│   │   ├── cli.rs                          # CLI flag parsing/dispatch (`--status`, `--serve`, `--daemon`, `--profile`)
+│   │   ├── deep_link.rs                    # `presencejam://callback` URL handling
+│   │   ├── state.rs                        # `AppState` + token-commit seams (`Config`, `Tokens`, `Polling`)
+│   │   ├── events.rs                       # typed ts-rs event payloads (`#[ts(export)]` structs)
+│   │   ├── http.rs                         # shared retry/expiry helpers + cached HTTP client
+│   │   ├── redact.rs                       # single `redact_len` construction for diagnostics + logs
 │   │   ├── main.rs                         # Binary entry point — calls `presence_jam_lib::run()`
-│   │   ├── commands/                       # Split from commands.rs (PR #76)
-│   │   │   ├── mod.rs                      #   re-exports + tests
-│   │   │   ├── config.rs                   #   save_config / load_config
+│   │   ├── commands/                       # one file per command family (split from commands.rs, PR #76)
+│   │   │   ├── mod.rs                      #   re-exports + submodule map + caller-location guard matrix
+│   │   │   ├── config.rs                   #   save_config / load_config / import_working_hours
 │   │   │   ├── spotify_auth.rs             #   start_spotify_auth / reconnect / refresh
-│   │   │   ├── teams_auth.rs                #   device code + refresh
+│   │   │   ├── teams_auth.rs               #   device code + refresh
 │   │   │   ├── sync.rs                     #   start_syncing / stop_syncing / get_sync_status
-│   │   │   ├── window.rs                    #   show_window / autostart / logs folder
-│   │   │   ├── onboarding.rs                #   is_onboarding_complete / complete / reconnect
-│   │   │   ├── playback.rs                 #   player-refresh policy + get_spotify_granted_scopes (v3.0; #770)
+│   │   │   ├── window.rs                   #   show_window / autostart / logs folder
+│   │   │   ├── onboarding.rs               #   is_onboarding_complete / complete / reconnect
+│   │   │   ├── playback.rs                 #   player-refresh policy + volume/seek + granted scopes
+│   │   │   ├── rules.rs                    #   explain_rules dry-run tester (#868)
+│   │   │   ├── shortcut_reason.rs          #   machine codes for shortcut rejection copy
+│   │   │   ├── shortcuts.rs                #   global-hotkey registration, validation and rebinding
+│   │   │   ├── status.rs                   #   `--set-status` / `--clear-status` / manual-status composer
 │   │   │   ├── misc.rs                     #   preview_status / update_tray_menu_state / relaunch_app
 │   │   │   ├── logs.rs                     #   get_recent_logs — bounded on-disk tail for the Logs pane (v4.6, #595)
-│   │   │   └── shortcuts.rs                #   global-hotkey registration, validation and rebinding (v4.7, #676)
-│   │   ├── polling/                        # Split from polling.rs (PR #72)
-│   │   │   ├── mod.rs                      #   re-exports + ErrorSeverity + emit_error
-│   │   │   ├── loop.rs                     #   driver (mpsc channel, ~50 lines)
-│   │   │   ├── poll_once.rs                #   single source of truth for one iteration
-│   │   │   └── state.rs                    #   start_polling / stop_polling + panic guard
-│   │   ├── config.rs                      # AppConfig struct, ts-rs TS derive
+│   │   ├── polling/                        # one file per concern (split from polling.rs, PR #72; #754)
+│   │   │   ├── mod.rs                      #   registry + `PollState` + ErrorSeverity + emit_error
+│   │   │   ├── loop.rs                     #   the single sync thread + smart sleep (764 ln)
+│   │   │   ├── iteration.rs                #   single source of truth for one iteration (used by --sync-once)
+│   │   │   ├── state.rs                    #   start_polling / stop_polling + panic guard
+│   │   │   ├── clocks.rs                   #   write-decision clocks + the D11 generation guard
+│   │   │   ├── timing.rs                   #   backoff ladder, debounce, placeholder expiry, safe sleep
+│   │   │   ├── refresh.rs                  #   Spotify + Teams token refresh for a write
+│   │   │   ├── gate.rs                     #   presence gate, snooze/quiet-hours latches, re-check clock
+│   │   │   ├── rules.rs                    #   the track-rule walker + match/action decision
+│   │   │   ├── presence.rs                 #   availability session arm/clear, preferred-presence branch
+│   │   │   ├── status_text.rs              #   status formatting + placeholder substitution (locale-aware)
+│   │   │   ├── write.rs                    #   the Teams write path + shared retry helper
+│   │   │   ├── exit.rs                     #   `RunEvent::Exit` cleanup
+│   │   │   └── daemon.rs                   #   `--daemon` supervisor (#896)
+│   │   ├── config/                         # schema, clamp, snooze, patch, migrate, io, transfer, mod
+│   │   │   ├── mod.rs                      #   re-exported `crate::config::X` surface + tests
+│   │   │   ├── schema.rs                   #   AppConfig + section structs, ts-rs TS derives
+│   │   │   ├── clamp.rs                    #   every clamp_* helper + MAX_*/PRESENCE_COMBINATIONS
+│   │   │   ├── io.rs                       #   load/save + atomic_write_json
+│   │   │   ├── migrate.rs                  #   schema_version floor + legacy migration
+│   │   │   ├── patch.rs                    #   field-level patch merge
+│   │   │   ├── snooze.rs                   #   snooze deadlines + presets
+│   │   │   └── transfer.rs                 #   export / import section keys
+│   │   ├── sources/                        # Auto / Spotify / System playback sources (#862)
+│   │   │   ├── mod.rs                      #   `PlaybackSource` trait + `AutoSource` wrapper
+│   │   │   ├── spotify.rs                  #   SpotifySource + the If-None-Match ETag cache
+│   │   │   ├── smc.rs                      #   Windows SMTC session source
+│   │   │   └── mpris.rs                    #   Linux zbus / org.mpris.MediaPlayer2 source
 │   │   ├── keychain.rs                    # OS keychain wrapper, secret-service Linux
 │   │   ├── token_io.rs                    # Hand-rolled atomic-write for tokens.json
 │   │   ├── pkce.rs                        # PKCE verifier/challenge generation
 │   │   ├── profanity.rs                   # Curated profanity word list
 │   │   ├── spotify.rs                      # PKCE OAuth client + Web API (ts-rs TS)
 │   │   ├── teams.rs                        # Device-code + MS Graph (ts-rs TS)
-│   │   ├── tray/                         # System tray menu (mod + cache/dedup/snooze/devices/actions, #756) (native CheckMenuItem Play/Pause + live tooltip, v4.0)
+│   │   ├── tray/                          # System tray menu — mod, cache, dedup, snooze, devices, actions, testkit (#756)
 │   │   ├── updater_bg.rs                  # Background update checks + stage_deferred_update / PendingUpdate (v4.0)
 │   │   ├── diagnostics.rs                 # Telemetry-free get_diagnostics_snapshot (v4.0)
 │   │   ├── menu.rs                        # macOS / Windows app menu bar
