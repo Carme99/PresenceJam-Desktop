@@ -1,5 +1,15 @@
-<?xml version="1.0" encoding="UTF-16"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!--
+  The prolog used to declare encoding="UTF-16" while the file has always
+  been stored as UTF-8 without a BOM. A parser that honours the
+  declaration over the actual bytes rejects the document. If you re-save
+  this file through an editor that writes UTF-16, re-declare UTF-16 here
+  to match the bytes; do not leave the two disagreeing.
+
+  Note for editors: a double hyphen is illegal inside an XML comment, so
+  no flag spelled with two leading dashes may appear in this block. Write
+  them bare (as "daemon mode") rather than with the dashes.
+
   Issue #896: Windows Task Scheduler unit.
 
   Installed by the package's `install-task.ps1` (or the MSI's
@@ -8,7 +18,7 @@
       schtasks /Create /TN "PresenceJam Daemon" \
               /XML "%ProgramFiles%\PresenceJam\presencejam-task.xml"
 
-  The task runs `presencejam --daemon` at user logon. The daemon
+  The task runs the binary in daemon mode at user logon. The daemon
   is foreground-only — the task sits in the foreground (the
   `exec` runs forever) so Task Scheduler treats an unexpected
   exit (anything other than a clean `taskkill`) as a failure and
@@ -23,30 +33,40 @@
 
   Issue #896's "SIGTERM/SIGINT → exit 0" contract applies to Unix;
   on Windows the daemon does not install signal handlers and a
-  `taskkill` is what stops the process. The `RunLevel=HighestAvailable`
-  + `User=LocalSystem` is the standard headless daemon posture; for a
-  per-user install, switch to `PrincipalType=InteractiveUser` and let
-  the operator's Credential Manager hold the OS keychain.
+  `taskkill` is what stops the process.
+
+  The principal runs as the INTERACTIVE user, not SYSTEM. The config
+  and the OS keychain are per-user, so a SYSTEM-launched daemon would
+  read a different profile than the signed-in account whose Spotify
+  and Teams sessions are stored there. `LogonType=InteractiveToken`
+  with the operator's own `UserId` is what keeps the daemon pointed at
+  the right keyring; `<UserId>` must be set to that account
+  (e.g. `DOMAIN\jsmith` or `COMPUTER\jsmith`) before registering.
+  `RunLevel=HighestAvailable` is retained.
 -->
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>PresenceJam</Author>
     <Description>Spotify → Teams presence sync daemon (issue #896)</Description>
-    <URI>\PresenceJam\Daemon</URI>
+    <URI>\PresenceJam Daemon</URI>
   </RegistrationInfo>
 
   <Triggers>
     <LogonTrigger>
       <Enabled>true</Enabled>
       <!-- Allow a brief delay after logon so the OS keychain is
-           reachable before --daemon tries to read it. -->
+           reachable before the daemon tries to read it. -->
       <Delay><Duration>PT30S</Duration></Delay>
     </LogonTrigger>
   </Triggers>
 
   <Principals>
     <Principal id="AuthorPresenceJam">
-      <GroupId>S-1-5-18</GroupId> <!-- NT AUTHORITY\SYSTEM -->
+      <!-- Interactive user, NOT SYSTEM. Set <UserId> to the account whose
+           keyring holds the Spotify/Teams tokens before registering, or the
+           daemon will start against an empty, wrong profile. -->
+      <UserId>DOMAIN\username</UserId>
+      <LogonType>InteractiveToken</LogonType>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
