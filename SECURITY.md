@@ -90,7 +90,7 @@ local-user compromise is suspected. See
 for the implementation reference — the file locations, atomic writes and
 config-integrity layers live on that page, and
 [`docs/architecture/overview.md`](./docs/architecture/overview.md) carries the
-storage bullet naming `config.rs::save_config` → `atomic_write_json` and the
+storage bullet naming `config/io.rs::save_config` → `atomic_write_json` and the
 0600 file modes.
 
 #### File permissions (v2.8.x — issue #135 path A)
@@ -99,7 +99,7 @@ storage bullet naming `config.rs::save_config` → `atomic_write_json` and the
 read/write only) on Unix-like systems and inherit the user-only default
 ACL on Windows. Since #920 the log directory is **0700** and every
 `PresenceJam*.log*` file (the active `PresenceJam.log` plus rotated
-archives) is **0600** on Unix (`lib.rs::tighten_log_permissions`, run at
+archives) is **0600** on Unix (`app.rs::tighten_log_permissions`, run at
 startup and re-run by a 60 s watchdog after rotation creates successors
 with the process umask); on Windows the default ACL remains user-only and
 no explicit ACL change is required. For `tokens.json` this is defense-in-depth **on top of**
@@ -112,11 +112,11 @@ only file-level protection. The log holds track titles, artist names and — at 
 |---|---|
 | `tokens.json` temp sidecar is created with mode 0600 atomically and holds only AES-256-GCM ciphertext (no plaintext window) | `src-tauri/src/token_io.rs::write_tokens_atomic` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows, inherits user-only ACL); payload encrypted by `encrypt_tokens` before the temp file is opened. |
 | `tokens.json` live file inherits 0600 from the rename source | POSIX `rename(2)` preserves the source mode; the source is the 0600 tmp. |
-| `config.json` temp sidecar is created with mode 0600 atomically | `src-tauri/src/config.rs::atomic_write_json` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows). |
-| Pre-existing loose files are tightened on read (upgrade path) | `src-tauri/src/token_io.rs::read_tokens_at` and `src-tauri/src/config.rs::load_config` — `fs::set_permissions(0o600)` after `fs::metadata` shows a non-0600 mode. Idempotent. |
-| Stale `.tmp` sidecar from a prior crash is cleared before create_new (avoids `AlreadyExists` permanent save failure) | `src-tauri/src/token_io.rs::write_tokens_atomic` and `src-tauri/src/config.rs::atomic_write_json` — `fs::remove_file(&temp_path)` with `NotFound` tolerated. |
+| `config.json` temp sidecar is created with mode 0600 atomically | `src-tauri/src/config/io.rs::atomic_write_json` — `OpenOptions::new().create_new(true).mode(0o600)` (Unix); `fs::File::create` (Windows). |
+| Pre-existing loose files are tightened on read (upgrade path) | `src-tauri/src/token_io.rs::read_tokens_at` and `src-tauri/src/config/io.rs::load_config` — `fs::set_permissions(0o600)` after `fs::metadata` shows a non-0600 mode. Idempotent. |
+| Stale `.tmp` sidecar from a prior crash is cleared before create_new (avoids `AlreadyExists` permanent save failure) | `src-tauri/src/token_io.rs::write_tokens_atomic` and `src-tauri/src/config/io.rs::atomic_write_json` — `fs::remove_file(&temp_path)` with `NotFound` tolerated. |
 | Windows does NOT need an explicit DACL change | Windows default ACL on a new file in a user-owned directory inherits user-only access (issue #135 acceptance; verified by reading the existing `Encrypted tokens.json` paragraph above). |
-| Log dir is 0700 and every `PresenceJam*.log*` file is 0600 on Unix, incl. after rotation (issue #920) | `src-tauri/src/lib.rs::tighten_log_permissions` — `fs::set_permissions(0o700)` on the dir, `fs::set_permissions(0o600)` on each `PresenceJam*.log*` entry; run in `setup` from `app_log_dir()` and re-run every 60 s by the `log-perm-watchdog` thread because rotation creates successors with the process umask. |
+| Log dir is 0700 and every `PresenceJam*.log*` file is 0600 on Unix, incl. after rotation (issue #920) | `src-tauri/src/app.rs::tighten_log_permissions` — `fs::set_permissions(0o700)` on the dir, `fs::set_permissions(0o600)` on each `PresenceJam*.log*` entry; run in `setup` from `app_log_dir()` and re-run every 60 s by the `log-perm-watchdog` thread because rotation creates successors with the process umask. |
 
 **What this is NOT.** The file-mode tightening does not encrypt
 `config.json` — it remains plaintext JSON on disk; only the OS-level file
@@ -133,7 +133,7 @@ chosen over Path B (full encryption with keychain-stored key) for v2.8.x
 because it is a small, low-risk, cross-platform change that closes the
 umask-022 → 0644 exposure surface without introducing a new crypto
 dependency or breaking the atomic-write guarantees of `token_io.rs` and
-`config.rs`. Path B landed in v3.0 for `tokens.json` (issue #140:
+`config/migrate.rs`. Path B landed in v3.0 for `tokens.json` (issue #140:
 AES-256-GCM with a keychain-stored key — see "Encrypted tokens.json"
 above). `config.json` intentionally remains plaintext JSON: it holds no
 credentials (the Spotify `client_secret` lives in the keychain), only
@@ -510,6 +510,6 @@ The release workflow (`.github/workflows/release.yml`) uses two repository secre
 PresenceJam is open source. You're encouraged to review the code yourself:
 
 - [GitHub Repository](https://github.com/Carme99/PresenceJam-Desktop)
-- Key security-sensitive files: `src-tauri/src/spotify.rs`, `src-tauri/src/teams.rs`, `src-tauri/src/polling/poll_once.rs`, `src-tauri/src/token_io.rs`, `src-tauri/src/keychain.rs`, `src-tauri/src/profanity.rs`
+- Key security-sensitive files: `src-tauri/src/spotify.rs`, `src-tauri/src/teams.rs`, `src-tauri/src/polling/`, `src-tauri/src/token_io.rs`, `src-tauri/src/keychain.rs`, `src-tauri/src/profanity.rs`
 
 Contributions that improve security are welcome.

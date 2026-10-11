@@ -105,7 +105,7 @@ which must remain stable across status set and clear operations.
   present once `profile` is in the scope string. Only five
   availability/activity combinations are valid; PresenceJam uses
   `Available`/`Available` for availability sync, and the expiration is
-  derived rather than fixed — `poll_once.rs::presence_expiration_duration`
+  derived rather than fixed — `polling/presence.rs::presence_expiration_duration`
   adds one re-arm period (`AVAILABILITY_REARM_SECONDS`) to the remaining
   listening time and clamps the result into `PT5M`–`PT4H`, reserving
   `PT4H` for the unknown-position and live-stream branches (#165). See the
@@ -135,7 +135,7 @@ callbacks. The registration runs **on every launch**, not just at install:
 
 ### Routing flow
 
-`lib.rs::handle_deep_link` parses the URL, matches on scheme + path, and
+`deep_link.rs::handle_deep_link` parses the URL, matches on scheme + path, and
 dispatches to `handle_spotify_callback` — the only deep-link consumer.
 Teams auth uses the **device-code flow exclusively**, which needs no
 redirect URI at all (and therefore no callback route). The single-instance

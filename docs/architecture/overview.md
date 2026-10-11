@@ -17,7 +17,7 @@ PresenceJam is a Tauri 2 desktop application:
 - **Storage (atomic, no tauri-plugin-store):** all persistence goes
   through two hand-written atomic-write modules (`tauri-plugin-store` was
   fully pruned from the app and its capabilities in v4.0 — issue C13):
-  - `config.rs::save_config()` → `atomic_write_json()` → temp-file + rename
+  - `config/io.rs::save_config()` → `atomic_write_json()` → temp-file + rename
     + fsync to `%APPDATA%\PresenceJam\config.json` (Linux/macOS path
     variants handled by `dirs`).
   - `token_io.rs::persist_tokens()` → temp-file + rename + fsync to

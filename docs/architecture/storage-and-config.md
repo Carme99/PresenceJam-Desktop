@@ -35,7 +35,7 @@ settings:
   `migrate_config` in place.
 
 The current config writer has a monotonic `revision` field and rejects stale
-whole-document payloads. `config-changed` publication and live frontend adoption **are** present: `config.rs` declares
+whole-document payloads. `config-changed` publication and live frontend adoption **are** present: `config/io.rs` declares
 `CONFIG_CHANGED_EVENT` and emits it after every accepted save (issue #943), and the webview
 subscribes and reloads. The cross-process sidecar lock and the reserved JavaScript-safe terminal
 boundary remain **not present at this main checkout**.

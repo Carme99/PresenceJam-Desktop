@@ -7,7 +7,7 @@
 ## Polling Loop
 
 The sync loop is intentionally a single thread, driven by `polling/loop.rs`
-around the single-source-of-truth `polling/poll_once.rs` (refactored from
+around the single-source-of-truth `polling/iteration.rs` (refactored from
 the pre-v2.7.5 monolith in PR #72 — three near-duplicate API-call branches
 and 3 drift points now collapse into one). Flow:
 
@@ -231,7 +231,7 @@ Three fields that existed in `config.json` but had no UI (and, for two of them,
 no reader at all) are now editable in Settings, each with inline clamp feedback
 mirroring the backend bound:
 
-| Field | Bound (backend, `config.rs`) | Settings | Consumed by |
+| Field | Bound (backend, `config/clamp.rs`) | Settings | Consumed by |
 |-------|------------------------------|----------|-------------|
 | `status_rules.quiet_hours[].replacement_status` | `MAX_RULE_STATUS_CHARS` = 128 | "Post this instead (empty = suppress)" per quiet-hours row | ✅ the playing path *and* the no-track clear — a quiet-hours replacement is posted from both |
 | `teams.profanity_extra_words` | `clamp_teams`: at most 64 entries, each truncated to 32 chars | "Custom words to filter", one per line | ✅ `profanity::filter_status(text, placeholder, is_playing, extra_words)` → `contains_extra_word` (built-in boundary/evasion rules, no built-in stem carve-outs) — consumed by the polling status write and by `preview_status` |
@@ -242,7 +242,7 @@ mirroring the backend bound:
 > through the built-in boundary and evasion rules) and
 > `settings.pauseBackoffClampHint` (the ceiling is the ladder's top rung) are
 > both true on `main`. The matching implementation is covered by the profiling
-> tests in `profanity.rs` and the pause-ladder tests in `poll_once.rs`.
+> tests in `profanity.rs` and the pause-ladder tests in `polling/timing.rs`.
 
 ### Profanity filter
 

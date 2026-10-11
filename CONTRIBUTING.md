@@ -58,7 +58,7 @@ Types: `feat`, `fix`, `docs`, `test`, `refactor`, `chore`
 
 - Run `cargo check` before committing
 - Run `cargo fmt --check` (CI `rust` job gates on it) and `cargo clippy --all-targets -- -D warnings` (CI `rust-clippy` job) before committing
-- Error handling with `Result` types — no `unwrap()` on fallible I/O or parse paths in production code; the sole exception is the `tray.rs` `cached_devices` cache-hit fast path, which unwraps a snapshot it just proved is `Some`
+- Error handling with `Result` types — no `unwrap()` on fallible I/O or parse paths in production code; the sole exception is the `tray/cache.rs` `cached_devices` cache-hit fast path, which unwraps a snapshot it just proved is `Some`
 - Use `log::info!` / `log::debug!` over `println!`
 - Prefix module-level log tags in square brackets: `[MODULE]`
 - User-Agent and any version-stamped payload must use `env!("CARGO_PKG_VERSION")` — never hardcode the version. `Cargo.toml` is the single source of truth (mirrored into `tauri.conf.json` → `version`).
@@ -82,7 +82,7 @@ See [the architecture frontend page](./docs/architecture/frontend.md#directory-s
 
 ## Logging
 
-Logs are written by the logging plugin to `PresenceJam.log` in `%LOCALAPPDATA%\com.presencejam.app\logs\` (Windows; see USAGE.md for macOS/Linux paths) — Tauri's `app_log_dir()` appends the bundle identifier to the platform's local data directory, so this is not the same folder as `config.json` (issue #300). The file rotates on size and keeps a bounded number of archives: `logging.max_file_size_mb` (1–500 MB, default 10) and `logging.keep_files` (1–20, default 3) feed `lib.rs::log_rotation_strategy`, and the live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files. Both fields are editable in Settings → Logging.
+Logs are written by the logging plugin to `PresenceJam.log` in `%LOCALAPPDATA%\com.presencejam.app\logs\` (Windows; see USAGE.md for macOS/Linux paths) — Tauri's `app_log_dir()` appends the bundle identifier to the platform's local data directory, so this is not the same folder as `config.json` (issue #300). The file rotates on size and keeps a bounded number of archives: `logging.max_file_size_mb` (1–500 MB, default 10) and `logging.keep_files` (1–20, default 3) feed `app.rs::log_rotation_strategy`, and the live log is kept **in addition** to the archives, so the folder holds at most `keep_files + 1` files. Both fields are editable in Settings → Logging.
 
 ```powershell
 # Open logs folder in Explorer
