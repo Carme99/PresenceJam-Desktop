@@ -230,6 +230,11 @@ FLAGS:
                 bounds.
   --clear-status                    Clear any manual Teams status (issue #870)
                 and exit 0 on success, or exit 1 on stderr.
+  --profile <id>                Switch the active presence profile by id (issue
+                #869) and exit 0. The same switch path the tray's \"Active
+                profile\" submenu and the third global-shortcut slot use.
+                `--profile base` (or an empty id) clears back to the base
+                configuration. Unknown ids are rejected.
   --serve[=PORT]                    Start the token-guarded localhost HTTP
                 control + event API (issue #865) on 127.0.0.1:PORT (default
                 8649) and run until interrupted. `GET /status` returns the
@@ -791,6 +796,10 @@ mod tests {
             MINIMIZED_FLAG,
             SERVE_FLAG,
             DAEMON_FLAG,
+            PROFILE_FLAG,
+            SET_STATUS_FLAG,
+            SET_STATUS_EXPIRY_FLAG,
+            CLEAR_STATUS_FLAG,
         ] {
             assert!(help.contains(flag), "the usage text must document {}", flag);
         }

@@ -198,6 +198,104 @@ A CLI-only machine therefore cannot accidentally upgrade a plaintext
 `tokens.json` into the encrypted envelope — see
 [`SECURITY.md`](../SECURITY.md).
 
+> ### ⚠ Two defects in the shipped unit
+>
+> **1. `ProtectHome=true` will very likely stop this daemon working.**
+> The unit sets `ProtectSystem=strict`, `ProtectHome=true`, and
+> `ReadWritePaths=/var/log/presencejam`. But the daemon has to read
+> `~/.config/com.presencejam.app/` and reach the user's keyring socket to get
+> at the stored Spotify and Teams tokens. `ProtectHome=true` makes `/home`,
+> `/root` and `/run/user` inaccessible to the service, which is exactly where
+> both of those live. The hardening is sound in the abstract and wrong for
+> this process — an allow-list of the one config directory the daemon owns is
+> what it actually needs. Verify on a real target before shipping this unit to
+> anyone; the failure mode is a boot loop, because `Restart=on-failure` keeps
+> retrying a process that cannot possibly succeed.
+>
+> **2. `Documentation=` points at a repository that does not exist.**
+> ```
+> Documentation=https://github.com/presencejam/presencejam-desktop
+> ```
+> The repository is `github.com/Carme99/PresenceJam-Desktop`. The lowercase
+> `presencejam` org is not this project.
+
+### launchd — `packaging/launchd/com.presencejam.daemon.plist`
+
+```bash
+cp packaging/launchd/com.presencejam.daemon.plist \
+   ~/Library/LaunchAgents/com.presencejam.daemon.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.presencejam.daemon.plist
+```
+
+Per-user agents are the practical choice on macOS: the daemon must run in the
+user's GUI session to reach the Keychain. A system-wide `LaunchDaemon` needs a
+different `UserName`/`GroupName` and an explicit keychain ACL grant — see
+[`../SETUP.md`](../SETUP.md).
+
+`KeepAlive` is a dict with `SuccessfulExit=false` and `Crashed=true`, which is
+the correct policy for this contract: a clean `SIGTERM` → exit 0 does **not**
+trigger a restart, while a panic or keychain boot failure does. The
+surrounding comment describes the key as "`SuccessfulExit` (true)", which is
+the inverse of the value beneath it — the value is right, the comment reads
+backwards.
+
+Update `StandardOutPath` / `StandardErrorPath`; the defaults point into
+`/usr/local/var/log/`, which most macOS installs will not have.
+
+### Windows — `packaging/windows/presencejam-task.xml`
+
+```powershell
+schtasks /Create /TN "PresenceJam Daemon" `
+         /XML "%ProgramFiles%\PresenceJam\presencejam-task.xml"
+```
+
+Runs at logon with a 30-second delay (`PT30S`) so the OS keychain is reachable
+before the daemon tries to read it. `MultipleInstancesPolicy=IgnoreNew`,
+`RunOnlyIfNetworkAvailable=true`, `ExecutionTimeLimit=PT0S` (unlimited).
+
+> ### ⚠ Two defects in the shipped task
+>
+> **1. The registered name will not match.** The `<URI>` element is
+> `\PresenceJam\Daemon`, but the documented `schtasks` name is
+> `"PresenceJam Daemon"` — two different paths to the same task. Whichever
+> form `schtasks /End /TN …` is given, it has to be the one that was created.
+>
+> **2. It runs as `NT AUTHORITY\SYSTEM`, against the wrong user's data.** The
+> principal is `S-1-5-18`. The config and the OS keychain are per-user, so
+> running as SYSTEM reads a different profile than the signed-in user the Teams
+> and Spotify sessions belong to. The file's own comment suggests switching to
+> `PrincipalType=InteractiveUser` — that element does not exist in this Task
+> Scheduler schema, which uses `<Principal>` with a `<GroupId>` or `<UserId>`
+> and an `<LogonType>`. The correct per-user shape is a `<UserId>` for the
+> account plus `<LogonType>InteractiveToken`.
+
+---
+
+## Debugging a daemon that will not start
+
+The daemon writes through `tauri-plugin-log` to the platform log directory as
+well as whatever the supervisor captures.
+
+| Platform | Log file |
+| --- | --- |
+| Linux | `~/.local/share/com.presencejam.app/logs/` |
+| macOS | `~/Library/Logs/com.presencejam.app/` |
+| Windows | `%LOCALAPPDATA%\com.presencejam.app\logs\` |
+
+Look for `[DAEMON]` lines. The common failures in order of likelihood:
+
+1. **Keychain never became available.** You will see six backoff attempts and
+   then exit 1. Under systemd this is usually the `ProtectHome` interaction
+   described above, or a `gnome-keyring` that has not been unlocked in the
+   service session at all.
+2. **No Spotify `client_id`.** The daemon needs the configured OAuth client;
+   there is no interactive onboarding path to fall back on, so it exits 1
+   rather than prompting. Run the GUI once, or export the client id, before
+   handing the box to the service manager.
+3. **Nothing is ever written even though it runs.** Check that the GUI is not
+   also running against the same config — there is no single-instance lock in
+   daemon mode, so both will poll and they will fight over the Teams status.
+
 ---
 
 ## See also

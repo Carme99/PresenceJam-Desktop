@@ -20,7 +20,7 @@
 # are easier to reason about when fixed at one UID.
 
 Description=PresenceJam (Spotify → Teams presence sync daemon)
-Documentation=https://github.com/presencejam/presencejam-desktop
+Documentation=https://github.com/Carme99/PresenceJam-Desktop
 After=network-online.target
 Wants=network-online.target
 
@@ -43,11 +43,25 @@ StandardError=inherit
 
 # Hardening (issue #865 / #896: the daemon's network surface is the
 # local loopback HTTP API; no remote access, no broad FS write).
+#
+# `ProtectHome` is `read-only`, NOT `true`. The daemon genuinely needs its
+# own home directory: it reads `~/.config/com.presencejam.app/` for
+# config.json, reaches the OS keyring under `$HOME` for the Spotify and
+# Teams tokens, and writes logs under `~/.local/share/com.presencejam.app/`.
+# `ProtectHome=true` made all three unreachable, which — combined with
+# `Restart=on-failure` — turned any boot into an endless retry of a process
+# that could never succeed. The writable surface is instead re-scoped by the
+# ReadWritePaths below, so the home directory is readable but writable only
+# where this daemon actually needs it.
+#
+# If your keyring (gnome-kbd, kwallet) insists on write access to unlock at
+# boot, drop this to `ProtectHome=false` and rely on `User=presencejam` plus
+# `ProtectSystem=strict` for isolation.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/presencejam
+ProtectHome=read-only
+ReadWritePaths=%h/.config/com.presencejam.app %h/.local/share/com.presencejam.app /var/log/presencejam
 
 [Install]
 WantedBy=default.target
