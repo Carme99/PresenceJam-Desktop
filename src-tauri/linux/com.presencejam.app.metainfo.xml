@@ -67,6 +67,23 @@
   <content_rating type="oars-1.1"/>
   <releases>
     <!-- Newest first. release.yml asserts the top entry matches the tag. -->
+    <release version="5.0.0" date="2026-10-11">
+      <description>
+        <p>
+          PresenceJam now knows more about whether you are busy than you do.
+          Named presence profiles switchable from the tray, a hotkey or the
+          command line; track rules that match album, show, device, playlist
+          and duration and can explain why they did or did not fire; an
+          Outlook calendar pre-gate that suppresses the status write during a
+          meeting and un-gates within one poll of the end; working-hours
+          import into quiet-hours rules; a status-decision history on the
+          Dashboard; volume, seek and the documented playback capability
+          flags; a manual status composer with expiry; and a headless daemon
+          with a token-guarded localhost control API, packaged for systemd,
+          launchd and Task Scheduler.
+        </p>
+      </description>
+    </release>
     <release version="4.7.0" date="2026-09-17">
       <description>
         <p>
