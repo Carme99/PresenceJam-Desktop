@@ -129,8 +129,10 @@ same suite on macOS after its compile check. The Windows leg keeps
 before tests run (`STATUS_ENTRYPOINT_NOT_FOUND`). Compiling platform-gated code
 is still required there: a `cargo check` alone catches `cfg`-guarded breakage
 even though it does not execute runtime tests. Re-expand the Windows test leg
-when the runner image links the binary cleanly, and record any further
-platform-specific reduction here rather than leaving it implied.
+**once the dev-dependency hazard is removed, not when an image changes** — see
+the `rust-platform-check` job in `ci.yml` for the paired binary-fingerprint
+evidence from PR #1116, and record any further platform-specific reduction
+here rather than leaving it implied.
 
 ## 4. The tag → publish chain (`release.yml`)
 
@@ -266,11 +268,17 @@ behind the tag-push run.
 ### Linux install channels
 
 One `tauri build` produces three x86_64 formats: `.deb` (Debian, Ubuntu, Mint,
-popOS), `.rpm` (Fedora, RHEL, openSUSE) and `.AppImage` (everything else). Only
-the AppImage is an updater payload — `latest.json`'s `linux-x86_64` points at it
-— because tauri-plugin-updater replaces the running AppImage in place. A
-`.deb`/`.rpm` install has no AppImage to replace, so those users update through
-their package manager.
+popOS), `.rpm` (Fedora, RHEL, openSUSE) and `.AppImage` (everything else).
+`latest.json`'s `linux-x86_64` key points at the **AppImage**, because
+tauri-plugin-updater replaces a running AppImage in place.
+
+A `.deb` or `.rpm` install cannot use that payload directly — the plugin rejects
+AppImage bytes as an invalid updater binary — so `updater_bg::install_method_for`
+branches on the **running** bundle type and hands those users the matching
+`.deb`/`.rpm` release asset instead (`UpdateInstall::Deb` / `Rpm`, resolved from
+`installer_for_bundle_type`), with the banner agreeing with what the plugin will
+eventually do. Every other bundle type — AppImage, Msi, Nsis and App — keeps the
+in-app path, which is the behaviour that already works.
 
 Policy for adding a channel:
 

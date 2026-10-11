@@ -9,6 +9,7 @@ describes; if a page contradicts the tree, the tree wins — open an issue.
 | --- | --- |
 | Install the app, register a Spotify Developer app, connect Teams | [`../SETUP.md`](../SETUP.md) |
 | Use the app day to day — tray, dashboard, settings, status formats | [`../USAGE.md`](../USAGE.md) |
+| Run PresenceJam headless — `--serve`, `--daemon`, the packaging units | [`HEADLESS.md`](./HEADLESS.md) |
 | Fix something that is not working | [`../TROUBLESHOOTING.md`](../TROUBLESHOOTING.md) |
 | Check whether your OS and architecture is supported | [`PLATFORMS.md`](./PLATFORMS.md) |
 | Know which features are shipped and verified, row by row | [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) |

@@ -32,7 +32,7 @@ The app lives in your system tray, syncs while you work, and stays out of the wa
 - **Global shortcuts** — `CmdOrCtrl+Alt+P` toggles playback on your active Spotify device and `CmdOrCtrl+Alt+S` starts or stops the poller; both are rebindable in Settings ([USAGE](USAGE.md#global-shortcuts)).
 - **Diagnostics page** — one-click local support snapshot (versions, sanitized config, token expiry metadata, redacted log tail). Never leaves your machine.
 - **Detachable Logs & Settings** — pop Logs or Settings out into their own window and back in again.
-- **Interface languages** — English, German (Deutsch), and French (Français) via an in-app language picker.
+- **Interface languages** — eight of them via an in-app language picker: English, German, French, Spanish, Italian, Polish, Brazilian Portuguese and Dutch. `pt-BR` resolves to `pt` longest-tag-first and an unknown tag falls back to English.
 - **Availability sync (opt-in)** — optionally show yourself as **Available** in Teams while you listen, with the requested session bounded to the remaining listening time (Microsoft's `PT5M`–`PT4H` window) and cleared when you quit.
 - **Meeting/call-aware gating** — skips status writes while you're busy, in a meeting, on a call, or presenting, with optionals for **out-of-office** and for never overwriting a status you set by hand. The Dashboard chip names which one fired.
 - **Status rules (quiet hours & track rules)** — suppress the Teams status write during chosen hours/days or for matching tracks, post an optional replacement status, and set your Teams availability/activity while the rule applies.
@@ -153,20 +153,21 @@ npm run tauri build
 
 ## Command-line flags
 
-PresenceJam is a tray app, but the binary also answers seven CLI flags plus `--help` — useful from a script,
+PresenceJam is a tray app, but the binary also answers nine CLI flags — useful from a script,
 a cron job or a support session. None of them opens the app window, and any *other* argument is
 ignored, so the app starts normally exactly as it always has.
 
 | Command | What it does |
 | --- | --- |
 | `presencejam --status` | Prints the sync status as **JSON on stdout** and exits `0` — the same fields the app's `get_sync_status` command returns. Fully headless: builds no window and no tray icon and takes no single-instance lock. `spotify_connected` / `teams_connected` come from the same `config.json` and `tokens.json` the app reads. |
-| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0`
+| `presencejam --sync-once` | Runs **exactly one poll iteration** (including the Teams status write) and exits `0` on success, or `1` with the reason on **stderr**. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file.
 | `presencejam --set-status <message>` | Writes a manual Teams status, then exits. Replacement text is capped at 128 characters.
 | `presencejam --set-status-expiry <minutes>` | Sets how long that manual status lives before the poller clears it.
 | `presencejam --clear-status` | Clears any manual status immediately.
-| `presencejam --serve[=PORT]` | Serves the token-guarded localhost read-only status API (the surface `--status` reads from).
-| `presencejam --daemon` | Runs the background daemon without a window — what the systemd unit, the launchd plist and the Windows Task Scheduler definitions under `packaging/` invoke. | on success, or `1` with the reason on **stderr**. Needs a configured Spotify `client_id` and a sign-in to both Spotify and Teams; logs go to the normal log file. |
-| `presencejam --help` | Prints the usage text — every flag below — and exits `0`. Fully headless. |
+| `presencejam --serve[=PORT]` | Serves a token-guarded localhost control API on `127.0.0.1` (default port `8649`). `GET /status` and `GET /events` are read-only; `POST /pause`, `/resume`, `/snooze` and `/profile` are mutating and all five require `Authorization: Bearer <token>`.
+| `presencejam --daemon` | Runs the background daemon without a window — what the systemd unit, the launchd plist and the Windows Task Scheduler definitions under `packaging/` invoke. |
+| `presencejam --profile <id>` | Switches the active presence profile to `<id>`, or to the base configuration with `--profile base`. Third switch surface alongside the tray submenu and the hotkey. |
+| `presencejam --help` | Prints the usage text and exits `0`. Fully headless. |
 | `presencejam --minimized` | Starts with the window hidden (what the autostart plugin passes at login). This is a normal GUI launch. |
 
 **Platform requirement.** `--status` and `--help` need no desktop at all. `--sync-once` does on

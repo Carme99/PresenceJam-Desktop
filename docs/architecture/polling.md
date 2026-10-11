@@ -81,6 +81,17 @@ increase backoff while polling continues (#568, finding PollCore#0):
 - The poll loop counts `SourceError::Auth` as its auth/reconnect path. The
   Spotify source maps expired and invalid credentials there, and also maps
   `NotPremium` there; `AutoSource` tries the OS source first and consults
+
+  The three implementations behind `playback.source` are
+  `sources::spotify::SpotifySource` (wraps `get_currently_playing` and owns the
+  `If-None-Match` ETag cache), `sources::smc::SmcSource` (Windows
+  `GlobalSystemMediaTransportControlsSessionManager`, most-recently-updated
+  `Playing` session) and `sources::mpris::MprisSource` (Linux `zbus`, walks
+  `org.mpris.MediaPlayer2.*`, prefers the previous winner). A kind change
+  rebuilds the source on the next poll, dropping the ETag cache and the
+  system-source singletons with the old source. On Windows and Linux the system
+  source runs even without Spotify connected; on macOS there is no OS source and
+  the onboarding wizard explains the Spotify-only fallback.
   Spotify only after the OS source has no track or fails.
 - All non-auth source variants — including `SourceError::Unauthenticated`,
   `SourceError::Transient`, and `SourceError::Other` — feed a **separate**
@@ -109,8 +120,11 @@ indefinitely.
 
 ### Presence gating + availability sync (v3.0)
 
-Two `TeamsConfig` flags shape what the polling loop writes, and
-`AppConfig::status_rules` adds a third, track- and time-based gate:
+Seven `TeamsConfig` flags shape what the polling loop writes, and
+`AppConfig::status_rules` adds an eighth, track- and time-based gate. The
+reasons sit at different precedences so the most specific explanation wins —
+`busy` / `in a call` outranks `out of office`, which outranks the two
+platform signals below:
 
 - **`presence_gate` (default ON, issue #3.0-P2):** on a *track change*
   the loop calls `get_teams_presence` *before* the status write.
@@ -124,6 +138,25 @@ Two `TeamsConfig` flags shape what the polling loop writes, and
   presence is clear (`Available`, `Away`, …); a transient gate-read
   failure at change time degrades to a logged warning and the write
   proceeds.
+- **`gate_when_presenting` (default OFF, #872):** folds
+  `SHQueryUserNotificationState` into the same gate through a
+  `PresentationState` enum behind a swappable trait
+  (`src-tauri/src/platform/focus.rs`). A full-screen app, a slide deck, or
+  Windows Focus Assist Quiet Time pauses the status write. The probe answers
+  `Unknown` on Linux and macOS, where the flag is a **no-op**. Reason
+  strings `presenting` (FullScreen | Presentation) and `quiet-time`
+  (QuietTime); `None` and `Unknown` both map to an empty reason and fall
+  through to the next layer. Lowest precedence of the presence-class reasons,
+  so it can never outrank `busy` or `in a call`.
+- **`idle_away_after_seconds` (default 0 = off, #873):** a second probe in
+  `src-tauri/src/platform/idle.rs` reports seconds since the last
+  keyboard/mouse event — `GetLastInputInfo` on Windows, `None` on
+  Linux/macOS. Non-zero values are clamped to **60–3600**. When the user has
+  been idle past the threshold the write is suppressed with reason `idle`.
+  The first iteration after the gate clears forces exactly one status write
+  through a `force_resume_write` clock that overrides the #384
+  byte-identical dedup — otherwise the gate could clear with Teams still
+  showing a stale status for as long as the keepalive window.
 - **`gate_when_out_of_office` (default OFF, #637):** the **lowest-precedence**
   reason, so a user who is busy or in a call still gets that more specific
   explanation. Fires on either documented signal —
@@ -225,6 +258,33 @@ Two `TeamsConfig` flags shape what the polling loop writes, and
 `polling::start_polling` is a pure thread-spawner; the panic guard + spawn-error
 map-err in `polling/state.rs` resets the flag so future claims don't wedge.
 
+### Now-playing fields the rules walker reads (v5, #868/#871)
+
+`TrackRuleEntry` gained eight fields in 5.0, fed by `process_track` from the
+`NowPlaying` poll body. The Rust field names, for anyone reading
+`config/schema.rs:635+`:
+
+| Field | Matched against |
+| --- | --- |
+| `match_kind` | how the text fields compare — `Substring` (legacy), `Exact`, `Glob` |
+| `album_substring` | the album title |
+| `show_substring` | the show name, when the item is a podcast episode |
+| `device_substring` | the active Spotify device's name |
+| `playlist_uri` | the context URI |
+| `min_duration_seconds` | a duration floor, capped at 24 h |
+| `negate` | inverts the whole match |
+| `action` | `Suppress` \| `Replace { status }` \| `SnoozeMinutes { value }` \| `Profile { id }` \| `Presence { availability, activity }` |
+
+`decision_from_rule` projects through `action` first and falls back to the
+legacy flat `replacement_status` / `presence_availability` / `presence_activity`
+fields, so a pre-#868 config keeps its rule text.
+
+`TrackInfo` also carries the active device's `volume_percent`,
+`supports_volume` and `actions` (a typed `DeviceActions` mirroring Spotify's
+documented `device.actions` object) — the flags that gate the Dashboard's volume
+slider and click-to-seek bar. See `USAGE.md` § Volume, seek and playback
+capabilities.
+
 ### User-editable config surface (4.6, #538)
 
 Three fields that existed in `config.json` but had no UI (and, for two of them,
@@ -249,8 +309,10 @@ mirroring the backend bound:
 `profanity.rs` screens the formatted status string before it hits Microsoft
 Graph. If matched, the status is replaced with `config.teams.profanity_placeholder`
 (default: `Currently Listening to Spotify`), with the `{emoji}` placeholder
-resolved to 🎵 or ⏸️. The replaced status is logged at info level; the
-**original profane text is never written to logs**.
+resolved to 🎵 or ⏸️. Since issue #912 the post-write log line carries only
+the byte count, never the text — the posted status is user content and a
+crafted track title must not reach the log, and the text itself goes to
+`debug!`. The **original profane text is never written to logs** at any level.
 
 Detection features (v4.1.1, #328–#344; `src-tauri/src/profanity.rs` is the source of truth — curated word list plus compounds like `asshole`/`bullshit`/`sonofabitch` (#411)):
 - **Extended leetspeak normalization:** `1/2→i, 3→e, $→s, @→a, 0→o, 5→s, 7→t, !→i, |→i, 6/8→b, 9→g, +→t, (→c, 4→a`, plus `/→v` folding, `ph→f` pre-fold, `x→ck` expansion, dropped-`c` `uk→uck` (scoped to `u`), terminal `z→s` (#377/#470), fullwidth→ASCII and a diacritic table; zero-width/format characters stripped.
@@ -259,7 +321,7 @@ Detection features (v4.1.1, #328–#344; `src-tauri/src/profanity.rs` is the sou
 - **Repeated-character collapse:** generic run-collapse (`shiiit → shit` regardless of excess length).
 - **Rescan of the placeholder** (case-insensitive `{emoji}`): a profane placeholder falls back to the default (`Currently Listening to Spotify`).
 - **Word-boundary safety:** prevents false positives on `class`, `assassin`, `cocktail bar`, `cockpit`, `Spice Girls`, `Push It`.
-- **Compound-word safe-suffixes:** `tail, head, hand, ...` allow `fishtail`, `forehead`, `handheld`.
+- **Compound-word safe-suffixes:** only `tail`/`tails` is whitelisted, and only for the `cock` stem — `cocktail` stays clean. `head` is *not* a safe suffix: it is a profane continuation (`dickhead`, issue #330).
 - **Strong stems + y-tail:** `shit/fuck/bitch` flag glued compounds; `shitty/bitchy/fucky` flag while `cocky/spicy/tardy` stay clean.
 
 ### Status formatting (4.6)

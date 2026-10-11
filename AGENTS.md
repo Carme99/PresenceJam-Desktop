@@ -86,9 +86,11 @@ frontend type-check reads stale generated types.
 ├── TROUBLESHOOTING.md
 ├── USAGE.md                 # day-to-day guide
 ├── docs/                    # long-form docs, per-topic
-│   ├── PLATFORMS.md
-│   ├── RELEASING.md
-│   ├── STATE-OF-FEATURES.md
+│   ├── README.md            # documentation index
+│   ├── PLATFORMS.md         # OS / architecture matrix + Linux requirements
+│   ├── HEADLESS.md          # `--serve` / `--daemon` + the packaging units
+│   ├── RELEASING.md         # version-bearing files, CI gates, tag → publish
+│   ├── STATE-OF-FEATURES.md # what is shipped and verified, row by row
 │   ├── architecture/        # six subject pages behind ARCHITECTURE.md
 │   └── link-audit.py
 ├── packaging/               # OS packaging units (systemd, launchd, Task Scheduler, …)
@@ -220,8 +222,14 @@ The CI workflow runs Ubuntu, macOS, and Windows jobs. The Linux and macOS Rust j
   the same tag.
 - **Logging**: `log::info!`, `log::warn!`, `log::error!`, `log::debug!`. Never
   `println!` or `eprintln!` in production code paths. `log!` macros at `info`
-  and above land in `PresenceJam.log`; `debug!` is filtered out by the default
-  tauri-plugin-log level.
+  and above always land in `PresenceJam.log`. `debug!` and `trace!` land there
+  **too** whenever `logging.log_level` is `Debug` or `Trace` — the default
+  `Info` is applied by `config::apply_log_level`
+  (`config/schema.rs:452-467`), *not* by the plugin, whose own default level is
+  `Trace` and which is built without a `.level()` call in `app.rs`. Treat
+  application logs as sensitive: at `Debug` the bounded Graph token-response
+  body written by `teams.rs::poll_teams_auth` is in them, which is why the
+  0600/0700 tightening is load-bearing. See [SECURITY.md](./SECURITY.md).
 - **Errors**: `Result<T, E>` everywhere on fallible I/O and parse paths.
   `unwrap()` is **disallowed** on any code that could see production data. The
   sole exception is the `tray/cache.rs` `cached_devices` cache-hit fast path, which
@@ -604,9 +612,16 @@ the v5 retrospectives track why each one was forbidden.
   refuses the commit if the directory is staged.
 - **Do NOT re-add a `--allow-…` Dependabot advisory** to the ignore list
   past its expiry. Issue #642 tracks the audit-clear backlog.
-- **Do NOT bump versions** (in `package.json`, `src-tauri/Cargo.toml`,
-  `src-tauri/tauri.conf.json`, `CHANGELOG.md`, `docs/STATE-OF-FEATURES.md`)
-  without bumping all four sites together.
+- **Do NOT bump versions** without bumping all **seven** version-bearing files
+  together. CI's `version-consistency` job checks only three of them, so the
+  other four are unchecked — the full list, the two `package-lock.json`
+  literals that are easy to get wrong, and the AppStream metainfo (which is not
+  a literal but is gated the same way) are in
+  [docs/RELEASING.md §1](./docs/RELEASING.md). The files: `package.json`,
+  `package-lock.json` (two literals), `src-tauri/tauri.conf.json`,
+  `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`,
+  `src-tauri/linux/com.presencejam.app.metainfo.xml`, plus `CHANGELOG.md` and
+  `docs/STATE-OF-FEATURES.md`.
 - **Do NOT bypass the navigation guard** to "just open the page". Every
   programmatic navigation goes through the guard.
 - **Do NOT skip the profanity filter** on any code path that ends at the

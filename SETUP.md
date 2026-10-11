@@ -157,8 +157,8 @@ If a track or artist name contains profanity, PresenceJam replaces the entire st
 
 Upgrading to 3.0 adds new OAuth scopes on both providers, so **both** require a **one-time re-auth** after the upgrade:
 
-- **Spotify** — the new `user-modify-playback-state` scope powers the tray playback controls. Until you reconnect, Settings shows a **"Playback control needs a one-time reconnect"** banner.
-- **Teams** — the current delegated scope set is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`. `Presence.Read` powers meeting/call-aware gating, `Calendars.ReadBasic` supports the upcoming-calendar gate, `MailboxSettings.Read` supports working-hours import, and `profile` supplies the object-id claim needed by the availability sync. Until you reconnect, Settings shows a **"Presence features need a one-time Teams reconnect"** banner.
+- **Spotify** — the `user-modify-playback-state` scope powers the tray playback controls. Until you reconnect, Settings warns that playback control needs a one-time Spotify reconnect; the banner is driven by the shared persist-warning copy.
+- **Teams** — the current delegated scope set is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`. `Presence.Read` powers meeting/call-aware gating, `Calendars.ReadBasic` supports the calendar gate, `MailboxSettings.Read` supports working-hours import, and `profile` supplies the object-id claim needed by the availability sync. Until you reconnect, Settings warns that presence features need a one-time Teams reconnect; both providers now share one banner (`settings.authPersistWarning`), which names the provider rather than carrying a per-scope string.
 
 Click **Reconnect** in the banner (or Settings → reconnect the service) — you only need to do this once per provider.
 
