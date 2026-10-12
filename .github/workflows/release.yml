@@ -792,7 +792,15 @@ jobs:
           # alongside the payloads by the release action's artifacts glob.
           MAC_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}.app.tar.gz.sig"
           WIN_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}-setup.exe.sig"
-          LINUX_SIG="artifacts/signatures/PresenceJam-${RELEASE_TAG}.AppImage.sig"
+          # The AppImage is the one updater payload that is NOT named after
+          # the tag: the build leg copies it to PresenceJam-linux-amd64.AppImage
+          # (the .deb/.rpm siblings carry no tag either), so the sign job signs
+          # that exact name and its .sig lands beside it. Expecting the
+          # tag-named PresenceJam-v5.0.0.AppImage.sig here made this the last
+          # step to fail on 5.0.0 — after the Release itself was published,
+          # leaving it on GitHub with no latest.json, which is the updater
+          # re-offer loop issue #605 describes.
+          LINUX_SIG="artifacts/signatures/PresenceJam-linux-amd64.AppImage.sig"
 
           for f in "$MAC_SIG" "$WIN_SIG" "$LINUX_SIG"; do
             if [ ! -s "$f" ]; then
