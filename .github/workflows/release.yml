@@ -507,7 +507,21 @@ jobs:
           # listing into a temp file first; grep then reads the file,
           # not the upstream, so SIGPIPE is impossible and grep's exit
           # code reflects ONLY whether the metainfo is in the listing.
+          #
+          # PREFIX: the two enumerators disagree about the leading dot.
+          # `dpkg-deb --fsys-tarfile | tar -t` emits the member name exactly
+          # as tauri-bundler stored it — `usr/share/metainfo/...`, with NO
+          # `./`. `rpm2cpio | cpio -t` emits `./usr/share/metainfo/...`.
+          # Matching `./$METAINFO_PATH` therefore made the .deb gate a
+          # guaranteed false negative: the metainfo was packaged correctly
+          # and the assertion rejected it anyway (six failed v5.0.0 runs,
+          # the first four masked by the crate/npm version skew fixed in
+          # #1176). Anchor on the path with an OPTIONAL `./` so both
+          # enumerators are accepted, and keep the end-anchored, escaped
+          # match so `other.xml`, a `.bak`, or any path that merely
+          # contains this one still fails.
           METAINFO_PATH="usr/share/metainfo/com.presencejam.app.metainfo.xml"
+          METAINFO_RE="^(\\./)?$(printf '%s' "$METAINFO_PATH" | sed 's/[.[\*^$()+?{|]/\\&/g')$"
           DEB_LISTING="$(mktemp)"
           RPM_LISTING="$(mktemp)"
           trap 'rm -f "$DEB_LISTING" "$RPM_LISTING"' EXIT
@@ -516,7 +530,7 @@ jobs:
             echo "::error::Failed to enumerate PresenceJam-linux-amd64.deb contents"
             exit 1
           fi
-          if ! grep -Fqx "./${METAINFO_PATH}" "$DEB_LISTING"; then
+          if ! grep -Eq "$METAINFO_RE" "$DEB_LISTING"; then
             echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.deb — check bundle.linux.deb.files"
             exit 1
           fi
@@ -524,7 +538,7 @@ jobs:
             echo "::error::Failed to enumerate PresenceJam-linux-amd64.rpm contents"
             exit 1
           fi
-          if ! grep -Fqx "./${METAINFO_PATH}" "$RPM_LISTING"; then
+          if ! grep -Eq "$METAINFO_RE" "$RPM_LISTING"; then
             echo "::error::${METAINFO_PATH} is not in PresenceJam-linux-amd64.rpm — check bundle.linux.rpm.files"
             exit 1
           fi
