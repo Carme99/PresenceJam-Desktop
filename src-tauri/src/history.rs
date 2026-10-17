@@ -255,21 +255,6 @@ mod tests {
     use super::*;
     use chrono::Duration as ChronoDuration;
 
-    fn sample_entry(kind: &str) -> PresenceHistoryEntry {
-        let now = Utc::now();
-        PresenceHistoryEntry {
-            at: now,
-            kind: kind.to_string(),
-            note: "test note".to_string(),
-            track_fingerprint: Some(TrackFingerprint {
-                title: "Song".to_string(),
-                artist: "Artist".to_string(),
-            }),
-            posted_status: Some("🎵 Artist - Song 🎧".to_string()),
-            gate_reason: None,
-        }
-    }
-
     /// Issue #877: the documented cap is enforced. After 200 + 1 pushes
     /// the ring holds exactly 200 entries and the oldest is gone.
     /// Exercises the same bounded writer helper used by [`append`].
@@ -335,20 +320,5 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("[REDACTED"));
         assert!(!lines[0].contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789xyz"));
-    }
-
-    /// Issue #877: the documented kinds are accepted by the entry
-    /// constructor as opaque strings — there is no validation in the
-    /// ring because the production decision sites already constrain the
-    /// call. A regression that introduces a new kind without an
-    /// accompanying docs change would be caught by code review.
-    #[test]
-    fn documented_kinds_match_acceptance_criteria() {
-        let _ = sample_entry("presence-updated");
-        let _ = sample_entry("presence-gated");
-        let _ = sample_entry("snooze-start");
-        let _ = sample_entry("snooze-end");
-        let _ = sample_entry("preferred-presence-armed");
-        let _ = sample_entry("preferred-presence-cleared");
     }
 }

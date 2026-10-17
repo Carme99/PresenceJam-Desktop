@@ -56,20 +56,11 @@ fn manager_slot(
 }
 
 /// `SmcSource` — the SMTC-backed playback source.
-pub struct SmcSource {
-    /// `true` after the first successful manager request. Used by tests
-    /// to assert the cache is exercised.
-    cached: bool,
-}
+pub struct SmcSource {}
 
 impl SmcSource {
     pub fn new() -> Self {
-        Self { cached: false }
-    }
-
-    /// The cached manager from a previous successful poll, or `None`.
-    pub fn has_cached_manager(&self) -> bool {
-        self.cached
+        Self {}
     }
 }
 
@@ -81,7 +72,7 @@ impl Default for SmcSource {
 
 impl PlaybackSource for SmcSource {
     fn poll(&mut self) -> Result<Option<NowPlaying>, SourceError> {
-        let manager = acquire_manager(&mut self.cached)?;
+        let manager = acquire_manager()?;
         let sessions = manager
             .GetSessions()
             .map_err(|e| SourceError::Other(format!("SMTC GetSessions failed: {e}")))?;
@@ -129,16 +120,11 @@ impl PlaybackSource for SmcSource {
     }
 }
 
-/// Acquire (or reuse) the process-wide SMTC manager. The `cached` flag
-/// is set to `true` on first successful acquisition so the caller can
-/// surface a state change in diagnostics.
-fn acquire_manager(
-    cached: &mut bool,
-) -> Result<GlobalSystemMediaTransportControlsSessionManager, SourceError> {
+/// Acquire (or reuse) the process-wide SMTC manager.
+fn acquire_manager() -> Result<GlobalSystemMediaTransportControlsSessionManager, SourceError> {
     {
         let slot = manager_slot().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(m) = slot.as_ref() {
-            *cached = true;
             return Ok(m.clone());
         }
     }
@@ -152,7 +138,6 @@ fn acquire_manager(
         let mut slot = manager_slot().lock().unwrap_or_else(|e| e.into_inner());
         *slot = Some(manager.clone());
     }
-    *cached = true;
     Ok(manager)
 }
 

@@ -40,9 +40,6 @@ use super::{NowPlaying, PlaybackSource, PlaybackSourceId, SourceCaps, SourceErro
 
 /// `MprisSource` — the MPRIS-backed playback source.
 pub struct MprisSource {
-    /// `true` after the first successful session-bus connection. Used by
-    /// tests to assert the cache is exercised.
-    cached: bool,
     /// Last-seen active bus name. Used as a hint when picking the
     /// "active" session — see [`pick_active_bus`]. Sticky on its own
     /// across polls so a momentarily paused Spotify does not flip the
@@ -53,14 +50,7 @@ pub struct MprisSource {
 
 impl MprisSource {
     pub fn new() -> Self {
-        Self {
-            cached: false,
-            last_active: None,
-        }
-    }
-
-    pub fn has_cached_connection(&self) -> bool {
-        self.cached
+        Self { last_active: None }
     }
 }
 
@@ -100,7 +90,6 @@ fn acquire_connection() -> Result<Connection, SourceError> {
 impl PlaybackSource for MprisSource {
     fn poll(&mut self) -> Result<Option<NowPlaying>, SourceError> {
         let conn = acquire_connection()?;
-        self.cached = true;
 
         let names = list_mpris_bus_names(&conn)?;
         if names.is_empty() {

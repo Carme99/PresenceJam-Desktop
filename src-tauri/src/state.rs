@@ -562,10 +562,6 @@ impl TokensLoadGate {
         );
     }
 
-    pub fn mark_ready(&self) {
-        let _recovery = self.recovery.lock();
-        self.mark_ready_locked();
-    }
     pub(crate) fn mark_ready_locked(&self) {
         self.state
             .store(TokensLoadState::Ready as u8, Ordering::Release);
