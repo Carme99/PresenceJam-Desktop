@@ -602,8 +602,16 @@ jobs:
   # any runner: nothing in ci.yml, release.yml, package.json, or the vitest /
   # playwright configs referenced it, so it had been silently unexecuted.
   # This job gives it a runner so the guard cannot rot again.
-  release-yaml-packaging-checks:
-    name: Release YAML packaging checks
+  #
+  # The second step is the same story for scripts/release/cut.sh, the release
+  # cut helper added by issue #1152. Its tests plant a dependency whose version
+  # equals the app's on purpose: package-lock.json puts every dependency's
+  # "version" at the same six-space indent as packages[""].version (222 of them
+  # at the current cut), so an indent-based anchor silently rewrites dependency
+  # blocks. docs/RELEASING.md §1 records an earlier cut where `cssstyle` did
+  # exactly that.
+  release-tooling-checks:
+    name: Release tooling checks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -616,6 +624,14 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/release-yaml-packaging-checks.test.sh
+
+      # cut.sh resolves its repo root from its own location, so this step runs
+      # the real script from the real checkout rather than a copy.
+      - name: Run the release-cut script regression checks
+        run: |
+          set -euo pipefail
+          bash -n scripts/release/cut.sh
+          bash tests/release-cut-script.test.sh
 
   # License + source gate (issue #776): `dep-audit` covers advisories only, so
   # a new dependency with an incompatible license (or a git/non-crates.io

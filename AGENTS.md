@@ -94,6 +94,7 @@ frontend type-check reads stale generated types.
 │   ├── architecture/        # six subject pages behind ARCHITECTURE.md
 │   └── link-audit.py
 ├── packaging/               # OS packaging units (systemd, launchd, Task Scheduler, …)
+├── scripts/release/         # cut.sh — the release cut helper (docs/RELEASING.md §5)
 ├── src/                     # SvelteKit app
 │   ├── app.css              # the design-token source of truth (see §5)
 │   ├── lib/

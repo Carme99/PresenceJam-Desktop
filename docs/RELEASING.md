@@ -69,6 +69,11 @@ changes the lock, never in a release build.
 
 Bump all six literals, every time.
 
+[`scripts/release/cut.sh`](../scripts/release/cut.sh) does exactly this and
+nothing else. Its regression suite,
+[`tests/release-cut-script.test.sh`](../tests/release-cut-script.test.sh), runs
+in CI as part of the `Release tooling checks` job.
+
 ## 2. CHANGELOG rules
 
 `CHANGELOG.md` is [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) with
@@ -331,23 +336,54 @@ every Beta-channel check fall through to stable silently.
 
 ## 5. Cutting a release — checklist
 
+Steps 2 and 3 are mechanical and are scripted by
+[`scripts/release/cut.sh`](../scripts/release/cut.sh). Run it; do not hand-edit
+the literals. Everything it does NOT do — the prose, the row flips, the choice
+of version — is yours.
+
 1. `main` is green, and every slice PR for the release is merged.
-2. Bump all six literals in §1 (branch `release/X.Y` or a PR into `main`).
-3. Update `CHANGELOG.md` per §2 — rename, add the new link definition and re-base
-   `[Unreleased]`, all in the same commit. If the release changes shipped behaviour, update
-   [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) too (including its version
-   header).
 
-   The AppStream metainfo carries a `<release>` entry per cut: add the new
-   version and its date to `src-tauri/linux/com.presencejam.app.metainfo.xml`
-   in the same commit. The Linux leg of `release.yml` requires the newest
-   entry to name the version being built, so a forgotten one fails the tag
-   instead of shipping a package that advertises an older release.
+2. Bump all six literals in §1 and prepend the metainfo entry:
 
-   Both are enforced at tag time as well: `resolve-tag` fails the run
-   before any build when the `## [X.Y.Z]` section or the
-   `# State of Features — vX.Y.Z` header is missing, so a forgotten rename
-   surfaces at the tag instead of as a published release with an empty body.
+   ```bash
+   ./scripts/release/cut.sh bump X.Y.Z
+   ```
+
+   This rewrites the six literals and prepends `<release version="X.Y.Z">` to
+   the metainfo. It anchors on the `packages` → `""` block rather than on
+   indentation, because every dependency in `package-lock.json` puts its
+   `"version"` at the same six-space indent — see §1. It leaves a `TODO` in the
+   metainfo `<description>`: **replace it with the release summary before
+   tagging.**
+
+3. Rename the CHANGELOG section per §2:
+
+   ```bash
+   ./scripts/release/cut.sh changelog X.Y.Z
+   ```
+
+   This renames `## [Unreleased]`, opens a fresh one above it, and writes both
+   link definitions — in one pass, which is what removes the §2 trap (rename and
+   definition must land together). The release-notes **prose** underneath the
+   new section is still yours to write; the script moves it, it does not author
+   it.
+
+   If the release changes shipped behaviour, update
+   [`STATE-OF-FEATURES.md`](./STATE-OF-FEATURES.md) too, including its
+   `# State of Features — vX.Y.Z` header.
+
+   Both the CHANGELOG and the STATE-OF-FEATURES header are enforced at tag time
+   as well: `resolve-tag` fails the run before any build when the `## [X.Y.Z]`
+   section or the `# State of Features — vX.Y.Z` header is missing, so a
+   forgotten rename surfaces at the tag instead of as a published release with
+   an empty body.
+
+   Check the whole thing before opening the PR — this is the safety net, and it
+   catches any literal the script missed or anything you edited by hand:
+
+   ```bash
+   ./scripts/release/cut.sh verify X.Y.Z
+   ```
 4. Open the release PR and wait for `version-consistency`, `changelog-links`,
    `docs-links`, `rust`, `rust-clippy`, `rust-platform-check`, `windows-cli-smoke`,
    `frontend`, `secret-scan`, `dep-audit`, `no-vendored-binaries`, `cargo-deny`,
