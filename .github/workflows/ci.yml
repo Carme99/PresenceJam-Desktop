@@ -590,6 +590,33 @@ jobs:
             exit 1
           fi
 
+  # Release-YAML packaging shape (issue #1177/#1178): the .deb/.rpm AppStream
+  # gate once piped an upstream listing straight into `grep -Fqx`. Under
+  # `set -o pipefail`, grep's early exit SIGPIPE'd the upstream (exit 141),
+  # pipefail surfaced 141, and the `if !` flipped that back to 0 -- so the gate
+  # passed precisely when the metainfo WAS present. The fix buffers each
+  # listing into a temp file and greps the file.
+  #
+  # `tests/release-yaml-packaging-checks.test.sh` regression-tests that shell
+  # shape AND cross-checks that release.yml still uses it. The file predates
+  # any runner: nothing in ci.yml, release.yml, package.json, or the vitest /
+  # playwright configs referenced it, so it had been silently unexecuted.
+  # This job gives it a runner so the guard cannot rot again.
+  release-yaml-packaging-checks:
+    name: Release YAML packaging checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the release-yaml packaging regression checks
+        run: |
+          set -euo pipefail
+          bash tests/release-yaml-packaging-checks.test.sh
+
   # License + source gate (issue #776): `dep-audit` covers advisories only, so
   # a new dependency with an incompatible license (or a git/non-crates.io
   # source) changes what the project ships with no CI signal. `licenses` +

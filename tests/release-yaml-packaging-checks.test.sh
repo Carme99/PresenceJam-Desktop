@@ -135,16 +135,54 @@ else
 fi
 
 echo
-echo "==> YAML literal cross-check: the pattern in release.yml matches this test"
+echo "==> release.yml cross-check: the fixed buffered shape is still in place"
+# Refreshed after #1177 ("the .deb metainfo gate asserted a './' prefix tar
+# never emits"). That fix kept the SIGPIPE fix -- listings are still
+# buffered to a temp file -- but replaced the literal
+# `grep -Fqx "./${METAINFO_PATH}"` with a `METAINFO_RE` that tolerates
+# BOTH the `./`-prefixed and unprefixed forms tauri-bundler may emit. The
+# cross-check below therefore asserts the CURRENT fixed shape:
+#   1. each listing is redirected into its temp file (no grep in the pipe),
+#   2. grep then runs `-Eq "$METAINFO_RE"` against the buffered file.
+# It also asserts the ORIGINAL buggy shape (`listing | grep`) has not
+# crept back, which is the actual regression this file exists to catch.
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$REPO_ROOT/.github/workflows/release.yml" ]; then
-  if grep -qE "grep -Fqx \"\\./\\\${METAINFO_PATH}\" \"\\\$DEB_LISTING\"" "$REPO_ROOT/.github/workflows/release.yml" \
-     && grep -qE "grep -Fqx \"\\./\\\${METAINFO_PATH}\" \"\\\$RPM_LISTING\"" "$REPO_ROOT/.github/workflows/release.yml"; then
-    echo "  ok    release.yml uses the fixed shape (grep against DEB_LISTING + RPM_LISTING)"
+  REL="$REPO_ROOT/.github/workflows/release.yml"
+  cross_ok=1
+  if grep -qF 'grep -Eq "$METAINFO_RE" "$DEB_LISTING"' "$REL" \
+     && grep -qF 'grep -Eq "$METAINFO_RE" "$RPM_LISTING"' "$REL"; then
+    echo "  ok    release.yml greps the buffered DEB_LISTING + RPM_LISTING"
     PASS=$((PASS + 1))
   else
-    echo "  FAIL  release.yml does not contain the expected fixed-pattern grep commands"
+    echo "  FAIL  release.yml does not grep METAINFO_RE against the buffered listings"
+    cross_ok=0
     FAIL=$((FAIL + 1))
+  fi
+
+  # Each upstream tool must redirect into its temp file rather than pipe
+  # straight into grep -- a pipe is what let SIGPIPE turn a match into a
+  # false failure under `set -o pipefail`.
+  if grep -qE 'tar -t > "\$DEB_LISTING"' "$REL" \
+     && grep -qE 'rpm -qp --list .* > "\$RPM_LISTING"' "$REL"; then
+    echo "  ok    release.yml buffers each listing to a temp file (no SIGPIPE path)"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL  release.yml does not buffer a listing into its temp file"
+    cross_ok=0
+    FAIL=$((FAIL + 1))
+  fi
+
+  # Regression guard: the buggy shape pipes an upstream straight into grep.
+  # Full-line comments are stripped first -- release.yml deliberately
+  # documents the OLD buggy shape in prose (the `#dpkg-deb ... | grep`
+  # comment block), and those prose lines must not be mistaken for live code.
+  if grep -vE '^[[:space:]]*#' "$REL" | grep -qE '\| *(grep|tar -t \| grep)'; then
+    echo "  FAIL  release.yml pipes a listing into grep again (SIGPIPE regression)"
+    FAIL=$((FAIL + 1))
+  else
+    echo "  ok    release.yml has no listing-into-grep pipe"
+    PASS=$((PASS + 1))
   fi
 else
   echo "  SKIP  release.yml not found at $REPO_ROOT/.github/workflows/release.yml"
