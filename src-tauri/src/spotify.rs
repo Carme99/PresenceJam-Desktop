@@ -772,11 +772,22 @@ fn parse_exchange_token_response(body: &str) -> Result<SpotifyTokens, String> {
 /// just obtained instead of POSTing again.
 static REFRESH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
-/// The last successful refresh, keyed by the refresh token it was performed
+/// Recent successful refreshes, keyed by the refresh token each was performed
 /// with — both the token that went in and the one that came back, since Spotify
 /// may rotate the refresh token. See [`REFRESH_LOCK`].
-static REFRESHED: LazyLock<parking_lot::Mutex<Option<(String, SpotifyTokens)>>> =
-    LazyLock::new(|| parking_lot::Mutex::new(None));
+///
+/// This is a keyed set rather than a single "last refresh" slot. A single slot
+/// is enough in production (one Spotify credential per process) but it is not
+/// enough under the test binary, where every test shares these process-global
+/// statics and runs in parallel: an unrelated test refreshing a DIFFERENT
+/// credential overwrote the slot, so the waiter in
+/// `concurrent_refreshes_of_the_same_token_make_exactly_one_request` missed the
+/// cache and POSTed a second time. That turned issue #930's one-POST-per-burst
+/// contract into a CI-only flake. Keying by credential makes each burst
+/// independent. Entries are pruned to unexpired on every write, so the set
+/// cannot grow without bound as Spotify rotates the refresh token.
+static REFRESHED: LazyLock<parking_lot::Mutex<Vec<(String, SpotifyTokens)>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(Vec::new()));
 
 /// The cached token pair for `refresh_token`, when a previous refresh used the
 /// same credential and the cached access token is still fresh.
@@ -785,11 +796,10 @@ static REFRESHED: LazyLock<parking_lot::Mutex<Option<(String, SpotifyTokens)>>> 
 /// lock order in the process is `REFRESH_LOCK` → `REFRESHED`.
 fn cached_refresh(refresh_token: &str, now: DateTime<Utc>) -> Option<SpotifyTokens> {
     let guard = REFRESHED.lock();
-    let (key, tokens) = guard.as_ref()?;
-    if key != refresh_token && tokens.refresh_token != refresh_token {
-        return None;
-    }
-    (tokens.expires_at > now).then(|| tokens.clone())
+    guard.iter().find_map(|(key, tokens)| {
+        let same_credential = key == refresh_token || tokens.refresh_token == refresh_token;
+        (same_credential && tokens.expires_at > now).then(|| tokens.clone())
+    })
 }
 
 /// Runs `fetch` under [`REFRESH_LOCK`], returning the cached token pair for
@@ -813,7 +823,13 @@ where
         return Ok(tokens);
     }
     let tokens = fetch()?;
-    *REFRESHED.lock() = Some((refresh_token.to_string(), tokens.clone()));
+    {
+        let mut guard = REFRESHED.lock();
+        // Keep the set to live credentials only: Spotify rotates the refresh
+        // token on each refresh, so the incoming key is usually new.
+        guard.retain(|(_, cached)| cached.expires_at > now);
+        guard.push((refresh_token.to_string(), tokens.clone()));
+    }
     Ok(tokens)
 }
 
