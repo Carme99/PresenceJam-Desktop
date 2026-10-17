@@ -49,6 +49,11 @@
   --fs-lg: 17px;
   --fs-xl: 20px;
   --fs-2xl: 26px;
+  /* #fs-3xl is not referenced by any component today, but it is a rung of
+     the declared type-scale ladder: `tests/theme-density.test.ts`
+     enumerates every `--fs-*` token and asserts each one shrinks under
+     compact density. Deleting the token makes that guard read NaN and
+     fail, so it stays as part of the scale contract. */
   --fs-3xl: 32px;
   --lh-tight: 1.25;
   --lh-normal: 1.5;
