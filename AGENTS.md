@@ -47,7 +47,7 @@ see [`docs/RELEASING.md`](./docs/RELEASING.md).
 | Frontend framework | SvelteKit with `@sveltejs/adapter-static` | Svelte `5.57`, SvelteKit `2.70` |
 | Frontend language | TypeScript | `5.9` |
 | Build / bundler | Vite | `6.4` |
-| Test runners | Vitest (`@vitest/coverage-v8`) + Playwright (Chromium and WebKit) | `4.1` / `1.63` |
+| Test runners | Vitest (`@vitest/coverage-v8`) + Playwright (Chromium and WebKit) | `4.1` / `1.64` |
 | Type checker | `svelte-check` | `4.7` |
 | Node | npm | `engines.node >= 22`; CI installs Node 24 |
 
