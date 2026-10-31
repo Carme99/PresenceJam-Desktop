@@ -1,4 +1,4 @@
-# State of Features — v5.0.0
+# State of Features — v5.0.1
 
 Quick, no-hedge answers to "does this thing actually work in *my* setup?"
 Most of the answers below are tied to a code path or a docs file you can read
