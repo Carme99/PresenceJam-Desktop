@@ -7,9 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-Every change merged after 5.0.0 lands here. At the next cut this section is
+Every change merged after 5.0.1 lands here. At the next cut this section is
 renamed to the released version and a fresh empty one is opened on top (see
 `docs/RELEASING.md` §2).
+
+## [5.0.1] - 2026-10-31
+
+Dependency refresh. No application behaviour changed.
+
+### Changed
+
+- **Rust / Tauri:** the grouped cargo minor-and-patch set (9 updates), including
+  `tauri-plugin-notification` 2.5 → 2.7, `tauri-plugin-updater` 2.13 → 2.14,
+  `tauri-plugin-dialog` 2.8.3, `tauri-plugin-opener` 2.7.2 and a
+  `tauri-build` patch. `tauri-plugin-deep-link` is pinned at **2.6.3**, not the
+  2.6.2 the group asked for: 2.6.2 builds an `ini::ParseOption` literal without
+  the two fields `rust-ini` 0.21.3 added, so it does not compile (see #1189).
+- **Frontend:** the grouped npm minor-and-patch set (10 updates) — Vite 6.4.5,
+  Vitest 4.1.12, Playwright 1.64.1, `svelte-check` 4.7.7, `@tauri-apps/cli`
+  2.12.4 and the matching JS plugins.
+- **CI:** `Swatinem/rust-cache` 2.9.2 → 2.9.3 and a `taiki-e/install-action`
+  pin refresh.
+
+### Security
+
+- `@vitest/mocker` is now 4.1.12, the release that fixes GHSA-qxg6-89mg-rqv8
+  (code injection via unauthenticated manual mock registration) and
+  GHSA-xp26-3454-mjgp (Windows path traversal). Test-only, but real.
+- Still open upstream with no published fix: `@sveltejs/kit` (two low advisories,
+  fixed only in the unreleased 3.x line), `source-map-js` (high, no patched
+  version exists) and `glib` (fixed only in 0.20+, which needs a gtk-rs 0.20
+  stack rather than the 0.18 line Tauri 2.12 pins). These are unchanged by this
+  release and are not fixable by a bump.
 
 ## [5.0.0] - 2026-10-11
 
@@ -1664,7 +1693,8 @@ Closes #60 #61 #62 #63
 - PowerShell script version — this is a full rewrite
 [5.0.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.7.0...v5.0.0
 [4.7.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.6.0...v4.7.0
-[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v5.0.0...HEAD
+[5.0.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v5.0.0...v5.0.1
+[Unreleased]: https://github.com/Carme99/PresenceJam-Desktop/compare/v5.0.1...HEAD
 [4.6.0]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.2...v4.6.0
 [4.5.2]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.1...v4.5.2
 [4.5.1]: https://github.com/Carme99/PresenceJam-Desktop/compare/v4.5.0...v4.5.1
