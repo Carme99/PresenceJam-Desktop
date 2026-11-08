@@ -1179,6 +1179,9 @@ mod tests {
     /// saving. This test records that consequence explicitly, so the limitation
     /// is a pinned fact rather than an unexamined assumption.
     ///
+    /// Proper isolation is #1205; this test pins TODAY'S behaviour so the fix
+    /// has to change it deliberately.
+    ///
     /// The reachable path in `--serve` mode is `clear_snooze_if_expired`
     /// (`polling/gate.rs:372`, called from `polling/iteration.rs:113` and
     /// `polling/loop.rs:287`): it clones the live config, clears the expired

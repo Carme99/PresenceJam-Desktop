@@ -69,7 +69,9 @@ In practice this means the restart guarantee is weaker than "never survives":
 The GUI-only writers (tray snooze, `update_config`, `window.rs`) are not
 reachable from `--serve`, so the expiry sweep is the one that matters. Proper
 isolation — keeping runtime overrides in their own layer that a whole-config save
-cannot see — is tracked separately rather than half-done here.
+cannot see — is tracked in
+[#1205](https://github.com/Carme99/PresenceJam-Desktop/issues/1205) rather than
+half-done here.
 
 **Scope note.** This section used to warn that `/snooze` and `/profile` were
 *inert* — they validated input, logged it, and returned `204` without changing
