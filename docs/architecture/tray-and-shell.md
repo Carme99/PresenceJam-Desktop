@@ -38,15 +38,24 @@ back in), VS Code detached-panel style:
   the main window only; dashboard nav shows a dot badge and focuses the child
   instead of navigating while detached.
 - **Capabilities:** `src-tauri/capabilities/detached.json` scopes the two
-  child labels to a minimal mirrored set: `core:default` (which carries the
-  `core:event` emit/emit-to/listen grants and the `core:window` defaults), the
-  `log:default` grant, four `notification` grants (`default`,
-  `allow-is-permission-granted`, `allow-request-permission`, `allow-notify`) and
-  one explicit window-management entry, `core:window:allow-close` (#594).
-  `opener` is **not** granted. `core:window:allow-close` is the one such
-  permission a detached render reaches, because **Pop back in** is `popIn()` →
-  `WebviewWindow.close()`, which Tauri resolves against the *calling* webview's
-  ACL, and `core:window:default` does not include it. Without that explicit entry
+  child labels to a minimal mirrored set. Four of its ten entries are the plugin
+  defaults — `core:default` (which expands to the `core:path`/`core:event`/
+  `core:window`/`core:webview`/`core:app`/`core:image`/`core:resources`/
+  `core:menu`/`core:tray` defaults), `log:default` (which is just
+  `allow-log`), and `notification:default` (which already grants every
+  notification permission, including the three that follow it) — so
+  `notification:allow-is-permission-granted`, `allow-request-permission` and
+  `allow-notify` are listed but redundant with `notification:default`. The
+  remaining grants are `core:event:allow-emit`, `allow-emit-to` and
+  `allow-listen` (also redundant with `core:event:default`) and
+  `core:window:allow-close` (#594).
+  `opener` is **not** granted, and neither is `core:window:allow-create`.
+  `core:window:allow-close` is the one window-management permission a detached
+  render reaches and the only one `core:window:default` does not already carry
+  (that default grants 28 read-only window queries and
+  `allow-internal-toggle-maximize`, not `close`), because **Pop back in** is
+  `popIn()` → `WebviewWindow.close()`, which Tauri resolves against the
+  *calling* webview's ACL. Without that explicit entry
   the close is rejected and the pane is marked not-detached while its window stays
   on screen; a refused close now leaves the badge alone instead of lying
   (`detach.ts::popIn`, with `reconcileDetachedPanes()` on boot). The main
