@@ -79,9 +79,9 @@ The app polls Microsoft's token endpoint at the server-provided device-code `int
 
 #### Borrowed application identity
 
-The device-code flow does **not** use a PresenceJam-owned Microsoft Entra app registration. `teams.rs::MICROSOFT_GRAPH_CLIENT_ID` borrows the public-client id `14d82eec-204b-4c2f-b7e8-296a70dab67e` from Microsoft's first-party **Microsoft Graph Command Line Tools** application registration. The id is not a secret, and this flow does not use a client secret or tenant credential.
+The device-code flow does **not** use a PresenceJam-owned Microsoft Entra app registration. `teams.rs::MICROSOFT_GRAPH_CLIENT_ID` borrows the public-client id `14d82eec-204b-4c2f-b7e8-296a70dab67e` — *project assertion; the id itself is byte-exact and test-pinned, but this repository cannot verify whose tenant owns that registration, and it maintains no copy of the registration record.* The project treats it as Microsoft's first-party **Microsoft Graph Command Line Tools** registration. The id is not a secret, and this flow does not use a client secret or tenant credential.
 
-That shared identity has shared consequences: Microsoft consent, attribution, policy, and service changes apply to PresenceJam and other consumers together. A user grant or revocation entry may be named Microsoft Graph Command Line Tools even when PresenceJam initiated it, and revoking that grant or the shared registration affects PresenceJam as well. When persistence succeeds, tokens issued to PresenceJam are stored in the encrypted local token store; if persistence fails, they remain only in `AppState` until restart. Runtime token-endpoint logging is bounded by `truncate_for_log`: bodies of 256 characters or fewer are logged unchanged, while longer bodies retain their first 256 Unicode scalar values plus a suffix containing the original byte count. The same helper bounds server-supplied descriptions before they are placed in user-visible sign-in failure messages. The helper does not separately redact `access_token` or `refresh_token` fields, so logs may contain those values in either an unchanged short body or a retained prefix.
+That shared identity has shared consequences: Microsoft consent, attribution, policy, and service changes apply to PresenceJam and other consumers together. A user grant or revocation entry *may* be labelled Microsoft Graph Command Line Tools even when PresenceJam initiated it — this is the project's expectation from the borrowed-id design rather than something confirmed against the Entra consent UI — and revoking that grant or the shared registration affects PresenceJam as well. When persistence succeeds, tokens issued to PresenceJam are stored in the encrypted local token store; if persistence fails, they remain only in `AppState` until restart. Runtime token-endpoint logging is bounded by `truncate_for_log`: bodies of 256 characters or fewer are logged unchanged, while longer bodies retain their first 256 Unicode scalar values plus a suffix containing the original byte count. The same helper bounds server-supplied descriptions before they are placed in user-visible sign-in failure messages. The helper does not separately redact `access_token` or `refresh_token` fields, so logs may contain those values in either an unchanged short body or a retained prefix.
 
 The exact delegated scope set in `MICROSOFT_GRAPH_SCOPES` is `Presence.ReadWrite Presence.Read Calendars.ReadBasic MailboxSettings.Read openid profile offline_access`.
 
@@ -91,7 +91,11 @@ The Graph **presence** surface (`setPresence` / `clearPresence` /
 `getPresence`) is v1.0, delegated through that scope set. `Presence.ReadWrite`
 powers status writes, `Presence.Read` powers the status gate, and `profile`
 adds the `oid` claim used by the `/users/{oid}` fallback to the access-token
-JWT. `Calendars.ReadBasic` and `MailboxSettings.Read` support the calendar
+JWT — Microsoft's access-token claims reference states this directly for `oid`:
+*"Because the `oid` allows multiple applications to correlate principals, to
+receive this claim for users use the `profile` scope."*
+([Access token claims reference](https://learn.microsoft.com/entra/identity-platform/access-token-claims-reference))
+`Calendars.ReadBasic` and `MailboxSettings.Read` support the calendar
 gate and working-hours import. All three endpoints hit
 `graph.microsoft.com/v1.0`, and `sessionId` is always the borrowed
 Microsoft Graph Command Line Tools client id (`MICROSOFT_GRAPH_CLIENT_ID`),
@@ -163,9 +167,20 @@ We piggyback two things on it:
 
 - **Windows:** writes `HKCU\Software\Classes\presencejam` — last-writer
   wins. A foreign app that pre-registered the scheme gets clobbered.
-- **Linux:** writes `~/.local/share/applications/presencejam.desktop` with
-  `MimeType=x-scheme-handler/presencejam;` and runs `xdg-mime default`.
-  Same last-writer semantics.
+- **Linux:** writes `<binary>-handler.desktop` — for this build
+  `~/.local/share/applications/presence-jam-handler.desktop` — with
+  `MimeType=x-scheme-handler/presencejam`, then runs `update-desktop-database`
+  on that directory and `xdg-mime default` against the file. The filename comes
+  from the running binary's own name (`bin.file_name()` in the plugin), so it
+  tracks `src-tauri/Cargo.toml`'s `name = "presence-jam"`, **not** the
+  `presencejam` product name. The directory is Tauri's `data_dir()`, which on
+  Linux is plain `$XDG_DATA_HOME`/`~/.local/share` with **no** bundle-id
+  subfolder — so the file lands in the same XDG applications directory a
+  package manager uses, under a different filename. Same last-writer
+  semantics. (`~/.local/share/applications/presencejam.desktop` is a
+  *different*, user-written launcher entry from the AppImage recipe in
+  [README](../../README.md) / [SETUP](../../SETUP.md); the app never creates
+  that one.)
 - **macOS:** the plugin's `register` returns `Err(UnsupportedPlatform)`, and the
   error arm of that call is now the load-bearing path (4.6, #66/#628). macOS
   claims a URL scheme through the app bundle's `CFBundleURLTypes`, and

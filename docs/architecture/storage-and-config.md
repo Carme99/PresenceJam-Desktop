@@ -4,9 +4,9 @@
 >
 > Part of the architecture docs — start at the [architecture index](../../ARCHITECTURE.md).
 
-## Config integrity (v4.6)
+## Config integrity (v4.6 → v5.0)
 
-Three layers keep a damaged or partial `config.json` from destroying working
+Four layers keep a damaged or partial `config.json` from destroying working
 settings:
 
 - **Field-level patch merge (#535):** `config::apply_patch` overwrites only the
@@ -33,6 +33,14 @@ settings:
   swallowed, and the flag is raised either way, so the original file is never
   truncated. A *schema-version* mismatch is **not** a quarantine — it goes through
   `migrate_config` in place.
+- **Per-section fallback (#926):** a `config.json` that parses as JSON but whose
+  body is only *partly* valid no longer fails as a whole. `config_from_sections`
+  (`config/io.rs`) partitions the document by top-level section and runs each one
+  through `field_or_fallback`, so a `teams` block with one out-of-range field
+  loses only that section — every other section loads, and the bad one falls back
+  to `AppConfig::default()` for that section with a `[CFG]` warning rather than
+  triggering the quarantine rename above. This is the reason a single corrupt
+  section no longer costs the user their whole configuration.
 
 The current config writer has a monotonic `revision` field and rejects stale
 whole-document payloads. The `revision` guard itself **is** live: a stale

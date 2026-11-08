@@ -70,3 +70,6 @@ playwright-report/
 # Must stay untracked+ignored: the no-vendored-binaries CI gate fails on
 # untracked, unignored root paths (`git status --porcelain | grep -E '^\?\? [^/]*/?$'`).
 .tmp/
+
+# macOS AppleDouble resource forks (appear on SMB/network shares; never meaningful in git).
+._*

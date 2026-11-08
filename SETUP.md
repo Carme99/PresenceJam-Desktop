@@ -212,7 +212,7 @@ No data is sent to any third-party server — all tokens stay on your machine.
    rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/com.presencejam.app/PresenceJam"
    rm -rf ~/.local/share/com.presencejam.app/logs
    ```
-4. **Remove the login entry** if **Launch at Login** was on: Windows and macOS remove it with the app; on Linux delete `~/.config/autostart/PresenceJam.desktop`. A `~/.local/share/applications/presencejam.desktop` exists only if you wrote one for an AppImage install — the app never creates it.
+4. **Remove the login entry** if **Launch at Login** was on: Windows and macOS remove it with the app; on Linux delete `~/.config/autostart/PresenceJam.desktop`. Also delete `~/.local/share/applications/presence-jam-handler.desktop` — the deep-link scheme registration writes that file on every Linux launch (`register_all`, issue #66), so it exists for every Linux install regardless of package format. A `~/.local/share/applications/presencejam.desktop` is separate and exists only if you wrote one for an AppImage install (see [AppImage launcher entry](#appimage-launcher-entry-linux-optional)).
 
 Your Spotify app credentials (Client ID/Secret) in the Spotify Developer Dashboard are unaffected — revoke them separately if you want to fully disconnect.
 
@@ -245,8 +245,8 @@ sudo pacman -S gnome-keyring libsecret
 ```
 
 > **Note:** the `presencejam://` deep-link scheme registration writes
-> `~/.local/share/applications/<scheme>.desktop` plus `xdg-mime default` on
-> Linux (`app.rs` `register_all`, issue #66) — that path needs
+> `~/.local/share/applications/presence-jam-handler.desktop` plus `xdg-mime
+> default` on Linux (`app.rs` `register_all`, issue #66) — that path needs
 > `update-desktop-database` (`desktop-file-utils`) to register launchers.
 
 After installing, **log in to a graphical session** (a headless SSH session can't reach the keyring). If you launched PresenceJam from a TTY, launch it from your desktop session instead. Then restart PresenceJam.
