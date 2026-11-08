@@ -442,14 +442,15 @@ require. Tracked by issue #642.
 **`glib` 0.18.5 (RUSTSEC-2024-0429) — accepted, unfixable on Tauri 2.x.** The
 advisory covers unsoundness in `VariantStrIter`'s `Iterator`/`DoubleEndedIterator`
 impls and is patched only in `glib >= 0.20`. No lockfile-only bump reaches it.
-The tree pins the whole gtk-rs stack at 0.18: twelve packages take a direct
-`gtk` dependency (`tauri`, `tauri-runtime`, `tauri-runtime-wry`, `tao`, `wry`,
-`webkit2gtk`, `muda`, `libappindicator`, `rfd`, and the gtk `-sys` crates) and
-twenty-six take `glib` directly (`atk`, `cairo-rs`, `gdk`, `gdk-pixbuf`,
-`gdkx11`, `gio`, `pango`, `soup3`, `javascriptcore-rs` and their `-sys`
-crates, alongside the gtk ones). `tray-icon` is not among them — it reaches
-gtk only through `muda` and `libappindicator`. Exactly one `glib` version is
-resolved, 0.18.5. Clearing the advisory needs a coordinated ecosystem bump in
+The tree pins the whole gtk-rs stack at 0.18. Counted from `Cargo.lock`
+(direct `[dependencies]` edges only, the crate itself excluded): **eight**
+crates depend on `gtk` — `libappindicator`, `muda`, `tao`, `tauri`,
+`tauri-runtime`, `tauri-runtime-wry`, `webkit2gtk`, `wry` — and **twelve** on
+`glib` (`atk`, `cairo-rs`, `gdk`, `gdk-pixbuf`, `gdkx11`, `gio`, `gtk`,
+`javascriptcore-rs`, `libappindicator`, `pango`, `soup3`, `webkit2gtk`).
+`rfd` is `gtk-sys`-only, so it appears in neither list; `tray-icon` is in
+neither either — it reaches gtk only through `muda` and `libappindicator`.
+Exactly one `glib` version is resolved, 0.18.5. Clearing the advisory needs a coordinated ecosystem bump in
 which those crates move to gtk-rs 0.20 together.
 RustSec classifies it `informational = "unsound"`, so `cargo audit` reports it
 as an allowed **warning** and still exits 0. Reachability: the affected impls

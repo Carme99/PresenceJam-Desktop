@@ -23,8 +23,9 @@
 //! publish a new **in-memory** `AppConfig` (through the config write guard, via
 //! `clamped_config`, never through `save_config`), so the poller sees the change
 //! on its next iteration while the on-disk document is untouched — an operator
-//! restart returns to the pre-call behaviour. Both emit `config-changed` so a
-//! mounted dashboard repaints.
+//! restart returns to the pre-call behaviour. Both emit `config-changed`;
+//! nothing in the webview listens for it yet, so an open dashboard refreshes on
+//! its next mount via `loadConfig()`, not by push.
 //!
 //! The HTTP server is a blocking `tiny_http` instance on its own thread; SSE
 //! is a streaming response via `Request::into_writer`, one event per
@@ -1124,24 +1125,51 @@ mod tests {
     fn runtime_routes_never_persist_config() {
         let src = include_str!("serve.rs");
         let production = &src[..src.find("\n#[cfg(test)]").expect("a test module")];
-        // The only config writers in the tree are `save_config` and
-        // `store_snooze`/`store_active_profile`; none may appear in this file.
-        for forbidden in ["save_config(", "store_snooze(", "store_active_profile("] {
+
+        // Strip comments and doc-comments first. The contract is about CODE, and
+        // the module doc legitimately names the writer it promises not to call —
+        // matching raw text made the guard fire on its own documentation.
+        let code: String = production
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("/*") && !t.starts_with('*')
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Match the WRITER NAMES, not call syntax. The previous version looked
+        // for the literal `"save_config("`, which a real disk write via
+        // `save_config_persisted` slipped past, as did `save_config (&cfg)` with
+        // a space and an aliased import.
+        for forbidden in [
+            "save_config",
+            "save_config_persisted",
+            "save_config_to",
+            "store_snooze",
+            "store_active_profile",
+            "atomic_write_json",
+        ] {
             assert!(
-                !production.contains(forbidden),
-                "serve.rs must never call {forbidden} — /snooze and /profile are \
+                !code.contains(forbidden),
+                "serve.rs must never reference {forbidden} — /snooze and /profile are \
                  documented as runtime-only in docs/HEADLESS.md and docs/API.md"
             );
         }
-        // And the in-memory publication path IS present, so the assertion above
+
+        // The in-memory publication path IS present, so the assertions above
         // cannot pass just because the routes were gutted again.
         assert!(
-            production.contains("state.config.get_mut()"),
+            code.contains("state.config.get_mut()"),
             "the runtime routes must publish through the config write guard"
         );
         assert!(
-            production.contains("emit_config_changed"),
+            code.contains("emit_config_changed"),
             "a runtime config change must be observable on the event bus"
+        );
+        assert!(
+            code.contains("apply_snooze_to_state") && code.contains("apply_profile_to_state"),
+            "the handlers must delegate to the mutation helpers"
         );
     }
 
@@ -1443,5 +1471,57 @@ mod tests {
         assert!(has_malformed_escape("%ZZ"));
         assert!(has_malformed_escape("%2Z"));
         assert!(has_malformed_escape("ok%then"));
+    }
+
+    /// The helpers were well covered but the HANDLERS were not: replacing
+    /// `handle_snooze` / `handle_profile` wholesale with the pre-fix inert body
+    /// (validate, log, 204, mutate nothing) left all 26 serve tests green,
+    /// because every mutation test drives `apply_*_to_state` directly.
+    ///
+    /// These tests pin the wiring the other tests cannot see: each handler must
+    /// delegate to its helper AND respond with what that helper produced.
+    #[test]
+    fn handlers_delegate_to_the_mutation_helpers() {
+        let src = include_str!("serve.rs");
+        let production = &src[..src.find("\n#[cfg(test)]").expect("a test module")];
+
+        for (handler, helper) in [
+            ("fn handle_snooze(", "apply_snooze_to_state"),
+            ("fn handle_profile(", "apply_profile_to_state"),
+        ] {
+            let start = production
+                .find(handler)
+                .unwrap_or_else(|| panic!("{handler} must exist"));
+            // Handler body: brace-matched from the opening brace.
+            let brace = start + production[start..].find('{').expect("handler has a body");
+            let mut depth = 0;
+            let mut end = brace;
+            for (i, ch) in production[brace..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = brace + i;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body = &production[brace..=end];
+
+            assert!(
+                body.contains(helper),
+                "{handler} must call {helper} — without it the route validates and \
+                 returns 204 while changing nothing, which is the exact bug this \
+                 branch fixed"
+            );
+            // And it must not ignore the outcome: the error arm has to be handled.
+            assert!(
+                body.contains(".body()") || body.contains("Err("),
+                "{handler} must handle the {helper} error, not discard it"
+            );
+        }
     }
 }
