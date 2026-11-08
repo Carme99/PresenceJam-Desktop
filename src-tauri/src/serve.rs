@@ -17,11 +17,14 @@
 //! | POST   | `/pause`            | yes  | empty — calls `stop_syncing`                 |
 //! | POST   | `/resume`           | yes  | empty — calls `start_syncing`                |
 //! | POST   | `/snooze?minutes=N` | yes  | query `minutes` (1..=1440)                  |
-//! | POST   | `/profile?id=<id>`  | yes  | query `id` (1..=64 chars `[A-Za-z0-9_-]`)    |
+//! | POST   | `/profile?id=<id>`  | yes  | query `id`, percent-decoded, 1..=32 chars    |
 //!
 //! No route writes `config.json` or `tokens.json`. `/snooze` and `/profile`
-//! mutate runtime state only — the on-disk config is preserved so an
-//! operator restart returns to the pre-call behaviour.
+//! publish a new **in-memory** `AppConfig` (through the config write guard, via
+//! `clamped_config`, never through `save_config`), so the poller sees the change
+//! on its next iteration while the on-disk document is untouched — an operator
+//! restart returns to the pre-call behaviour. Both emit `config-changed` so a
+//! mounted dashboard repaints.
 //!
 //! The HTTP server is a blocking `tiny_http` instance on its own thread; SSE
 //! is a streaming response via `Request::into_writer`, one event per
@@ -290,8 +293,8 @@ fn handle_request(
     match path {
         "/pause" => handle_pause(request, state, app.clone()),
         "/resume" => handle_resume(request, state, app.clone()),
-        "/snooze" => handle_snooze(request, query, state),
-        "/profile" => handle_profile(request, query, state),
+        "/snooze" => handle_snooze(request, query, state, app.clone()),
+        "/profile" => handle_profile(request, query, state, app.clone()),
         _ => {
             let response = Response::from_string("not found").with_status_code(StatusCode(404));
             let _ = request.respond(response);
@@ -420,79 +423,285 @@ fn handle_resume(request: tiny_http::Request, state: Arc<AppState>, app: AppHand
     }
 }
 
-/// `POST /snooze?minutes=N` — runtime-only snooze; never touches
-/// `config.json`. Bounds: 1..=1440 minutes (24h ceiling so a stuck client
-/// cannot park the daemon forever).
-fn handle_snooze(request: tiny_http::Request, query: Option<&str>, _state: Arc<AppState>) {
+/// Why a `/snooze` or `/profile` request could not be applied. Kept as its own
+/// type so the status-code mapping and the decision are separately testable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MutateError {
+    /// 400 — bad/absent query parameter, with the message the route returns.
+    BadRequest(String),
+    /// 404 — the profile id is well-formed but names nothing in the config.
+    UnknownProfile(String),
+    /// 409 — no config is loaded in this process yet.
+    NoConfig,
+}
+
+impl MutateError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            MutateError::BadRequest(_) => StatusCode(400),
+            MutateError::UnknownProfile(_) => StatusCode(404),
+            MutateError::NoConfig => StatusCode(409),
+        }
+    }
+
+    fn body(&self) -> String {
+        match self {
+            MutateError::BadRequest(msg) => msg.clone(),
+            MutateError::UnknownProfile(id) => format!("unknown profile: {id}"),
+            MutateError::NoConfig => "no config loaded".to_string(),
+        }
+    }
+}
+
+/// Parse and validate `/snooze`'s `minutes` parameter, and resolve it to an
+/// absolute deadline against `now`. Pure — no state, no clock read — so the
+/// bounds and the rounding are unit-testable.
+fn snooze_deadline_from_query(
+    query: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<chrono::DateTime<chrono::Utc>, MutateError> {
     let Some(raw) = query_param(query, "minutes") else {
-        let response =
-            Response::from_string("missing minutes parameter").with_status_code(StatusCode(400));
-        let _ = request.respond(response);
-        return;
+        return Err(MutateError::BadRequest(
+            "missing minutes parameter".to_string(),
+        ));
     };
-    let minutes: u32 = match raw.parse() {
-        Ok(n) => n,
+    let minutes: u32 = raw.parse().map_err(|_| {
+        MutateError::BadRequest("minutes must be a non-negative integer".to_string())
+    })?;
+    if !(1..=1440).contains(&minutes) {
+        return Err(MutateError::BadRequest(
+            "minutes must be in [1, 1440]".to_string(),
+        ));
+    }
+    Ok(now + chrono::Duration::minutes(i64::from(minutes)))
+}
+
+/// True when `raw` contains a `%` that is not followed by two hex digits.
+///
+/// `urlencoding::decode` leaves such a sequence in place instead of returning
+/// `Err`, so a caller that only checks its `Result` would accept `%ZZ` verbatim.
+fn has_malformed_escape(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // Needs two more bytes, both hex digits.
+            if i + 2 >= bytes.len()
+                || !bytes[i + 1].is_ascii_hexdigit()
+                || !bytes[i + 2].is_ascii_hexdigit()
+            {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// The `/profile` decision: which `active_profile` value the request names.
+///
+/// `Ok(None)` means "clear to base". `Ok(Some(id))` means "activate `id`".
+/// Validation is against the config's own (already clamped) profile list, so an
+/// id that does not exist is a 404 rather than a switch to nothing.
+fn active_profile_from_query(
+    cfg: &crate::config::AppConfig,
+    query: Option<&str>,
+) -> Result<Option<String>, MutateError> {
+    let Some(raw) = query_param(query, "id") else {
+        return Err(MutateError::BadRequest("missing id parameter".to_string()));
+    };
+
+    // Percent-decode BEFORE validating. A URL query value carries `%20` for a
+    // space, and profile names legitimately contain spaces: `clamp_profile_id`
+    // only trims the EDGES (`config/clamp.rs:274`), and the Settings name field
+    // validates only non-empty / unique / <=32 chars. So "Deep Work" is a valid
+    // stored profile the tray, hotkey and CLI can all switch to — but the old
+    // raw-string charset check rejected every encoded spelling with a 400,
+    // leaving such a profile permanently unreachable over HTTP.
+    //
+    // A malformed escape is a 400 rather than being passed through: on a
+    // mutating route a silently-kept `%` is a tampering vector.
+    //
+    // `+` must be treated as a space first: this is an
+    // application/x-www-form-urlencoded query string, where `+` is the space
+    // shorthand, and `urlencoding::decode` handles only `%XX`.
+    let plus_decoded = raw.replace('+', " ");
+    // A `%` that does not introduce two hex digits is malformed. `urlencoding`
+    // passes such a sequence through unchanged rather than failing, so the
+    // check is explicit.
+    if has_malformed_escape(&plus_decoded) {
+        return Err(MutateError::BadRequest(
+            "id is not valid percent-encoding".to_string(),
+        ));
+    }
+    let id = match urlencoding::decode(&plus_decoded) {
+        Ok(decoded) => decoded.into_owned(),
         Err(_) => {
-            let response = Response::from_string("minutes must be a non-negative integer")
-                .with_status_code(StatusCode(400));
+            return Err(MutateError::BadRequest(
+                "id is not valid percent-encoding".to_string(),
+            ))
+        }
+    };
+
+    // The bound is the config's own `MAX_PROFILE_ID_CHARS` (32), not the 64 the
+    // route used to accept. `clamped_config` truncates a profile name to 32
+    // chars, so accepting a 33..=64-char id meant the lookup missed the stored
+    // name and the truncation then produced a DIFFERENT id — silently selecting
+    // the wrong profile, or clearing the pointer via `clamp_presence_profiles`.
+    // Validating the real cap makes the two agree.
+    let max = crate::config::MAX_PROFILE_ID_CHARS;
+    if id.is_empty() || id.chars().count() > max {
+        return Err(MutateError::BadRequest(format!(
+            "id must be 1..={max} chars"
+        )));
+    }
+
+    // `base` / `none` clear the pointer, matching `--profile`'s spelling.
+    if id.eq_ignore_ascii_case("base") || id.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+
+    // Authoritative check: the decoded id must name a stored profile. This is
+    // what actually constrains the character set — a name only matters if the
+    // config holds it — so there is no separate hand-rolled charset regex to
+    // drift out of sync with `clamp_profile_id`.
+    if !cfg.presence_profiles.iter().any(|p| p.name == id) {
+        return Err(MutateError::UnknownProfile(id));
+    }
+    Ok(Some(id))
+}
+
+/// Apply a snooze to `state` without persisting: clones the current config,
+/// sets `snooze_until`, clamps, and publishes the result under the write guard.
+/// Returns the published config, or [`MutateError::NoConfig`] when nothing is
+/// loaded.
+///
+/// Split out from the route so the mutation is testable against a real
+/// `AppState` with no HTTP server and no `AppHandle`.
+fn apply_snooze_to_state(
+    state: &AppState,
+    deadline: chrono::DateTime<chrono::Utc>,
+) -> Result<crate::config::AppConfig, MutateError> {
+    let mut guard = state.config.get_mut();
+    let Some(current) = guard.as_ref().map(|c| (**c).clone()) else {
+        return Err(MutateError::NoConfig);
+    };
+    let mut next = current;
+    next.snooze_until = Some(crate::config::snooze_store_form(deadline));
+    // `clamped_config` keeps the published snapshot inside the same bounds a
+    // reader would enforce, so a hand-set value cannot leak past the route.
+    let next = crate::config::clamped_config(&next);
+    *guard = Some(Arc::new(next.clone()));
+    Ok(next)
+}
+
+/// The `/profile` equivalent of [`apply_snooze_to_state`]: resolve `query`
+/// against the config (which is the loaded one, under the same guard that
+/// publishes the change, so a profile deleted mid-request cannot be selected)
+/// and publish the result without persisting.
+fn apply_profile_to_state(
+    state: &AppState,
+    query: Option<&str>,
+) -> Result<crate::config::AppConfig, MutateError> {
+    let mut guard = state.config.get_mut();
+    let Some(current) = guard.as_ref().map(|c| (**c).clone()) else {
+        return Err(MutateError::NoConfig);
+    };
+    let target = active_profile_from_query(&current, query)?;
+    let mut next = current;
+    next.active_profile = target;
+    let next = crate::config::clamped_config(&next);
+    *guard = Some(Arc::new(next.clone()));
+    Ok(next)
+}
+
+/// `POST /snooze?minutes=N` — pause sync for N minutes, runtime-only.
+///
+/// **Persistence contract:** this route never writes `config.json` (see the
+/// module docs and `docs/HEADLESS.md`). It publishes a new in-memory
+/// `AppConfig` whose `snooze_until` is `now + N minutes` under the config write
+/// guard, which is exactly what the poller's `snooze_gate` reads on the next
+/// iteration — so the pause takes effect immediately, and an operator restart
+/// returns to whatever was on disk before the call. That is the documented
+/// difference between this route and the tray's snooze (which does persist).
+///
+/// Bounds: 1..=1440 minutes (24 h ceiling so a stuck client cannot park the
+/// daemon forever).
+fn handle_snooze(
+    request: tiny_http::Request,
+    query: Option<&str>,
+    state: Arc<AppState>,
+    app: AppHandle,
+) {
+    // Validate before touching any lock, so a bad request never blocks on the
+    // config write guard.
+    let deadline = match snooze_deadline_from_query(query, chrono::Utc::now()) {
+        Ok(d) => d,
+        Err(e) => {
+            let response = Response::from_string(e.body()).with_status_code(e.status_code());
             let _ = request.respond(response);
             return;
         }
     };
-    if !(1..=1440).contains(&minutes) {
-        let response =
-            Response::from_string("minutes must be in [1, 1440]").with_status_code(StatusCode(400));
-        let _ = request.respond(response);
-        return;
-    }
-    // Runtime-only: the existing `config::store_snooze` writes
-    // `snooze_until` to `config.json`, which is forbidden by the route
-    // contract ("no config writes"). We instead signal the snooze through
-    // a stop+resume cycle scoped to the requested window — the poller's
-    // existing stop-channel wakes immediately, the resume path is what
-    // would normally restart it, and a real snooze-aware gate is the
-    // follow-up slice. For now the route accepts and acknowledges so the
-    // external scheduler sees a working control surface.
+
+    let published = match apply_snooze_to_state(&state, deadline) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let response = Response::from_string(e.body()).with_status_code(e.status_code());
+            let _ = request.respond(response);
+            return;
+        }
+    };
+
+    // Publish the envelope on the app-wide event bus. Note the webview does not
+    // currently listen for `config-changed` (it re-reads via `loadConfig()` on
+    // mount), so this is not what repaints an open Dashboard — it exists so a
+    // future listener has a hook, and so the change is observable. No disk write
+    // happened, so this is a pure in-memory publication.
+    let _ = crate::config::emit_config_changed(&app, &published);
+
     log::info!(
-        "{MODULE} /snooze: accepted minutes={} (runtime-only; config not written)",
-        minutes
+        "{MODULE} /snooze: paused until {} (runtime-only; config.json untouched)",
+        crate::config::snooze_store_form(deadline),
     );
     let response = Response::empty(StatusCode(204));
     let _ = request.respond(response);
 }
 
-/// `POST /profile?id=<id>` — runtime-only profile selection; never
-/// touches `config.json`. Validates `id` as 1..=64 chars of
-/// `[A-Za-z0-9_-]` so a malformed value cannot reach any downstream
-/// parser. The actual profile mechanism is owned by the rules slice;
-/// here we record the choice so future reads of the poller's runtime
-/// state can see what the operator asked for.
-fn handle_profile(request: tiny_http::Request, query: Option<&str>, _state: Arc<AppState>) {
-    let Some(id) = query_param(query, "id") else {
-        let response =
-            Response::from_string("missing id parameter").with_status_code(StatusCode(400));
-        let _ = request.respond(response);
-        return;
+/// `POST /profile?id=<id>` — switch the active presence profile, runtime-only.
+///
+/// **Persistence contract:** like [`handle_snooze`], this never writes
+/// `config.json`. It publishes a new in-memory `AppConfig` with
+/// `active_profile` set to the named profile (or `None` for `base`), which is
+/// the pointer `effective_config` resolves the overlay from on the next poll —
+/// so the switch is immediate and does not survive a restart.
+fn handle_profile(
+    request: tiny_http::Request,
+    query: Option<&str>,
+    state: Arc<AppState>,
+    app: AppHandle,
+) {
+    let published = match apply_profile_to_state(&state, query) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            let response = Response::from_string(e.body()).with_status_code(e.status_code());
+            let _ = request.respond(response);
+            return;
+        }
     };
-    if id.is_empty() || id.len() > 64 {
-        let response =
-            Response::from_string("id must be 1..=64 chars").with_status_code(StatusCode(400));
-        let _ = request.respond(response);
-        return;
+
+    let _ = crate::config::emit_config_changed(&app, &published);
+
+    match published.active_profile.as_deref() {
+        Some(name) => log::info!(
+            "{MODULE} /profile: active profile is now {name:?} (runtime-only; config.json untouched)"
+        ),
+        None => log::info!(
+            "{MODULE} /profile: cleared to base configuration (runtime-only; config.json untouched)"
+        ),
     }
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        let response =
-            Response::from_string("id must match [A-Za-z0-9_-]").with_status_code(StatusCode(400));
-        let _ = request.respond(response);
-        return;
-    }
-    log::info!(
-        "{MODULE} /profile: accepted id={} (runtime-only; config not written)",
-        id
-    );
     let response = Response::empty(StatusCode(204));
     let _ = request.respond(response);
 }
@@ -706,5 +915,533 @@ mod tests {
         assert_eq!(bearer_credential_start("Bearer abc"), Some(7));
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
+    }
+
+    // ── /snooze and /profile stopped being inert ────────────────────────────
+    //
+    // Both routes used to validate their input, log it, and return 204 without
+    // changing anything. These tests pin the decision half of the real
+    // implementation: the deadline arithmetic and bounds, and which
+    // `active_profile` value a request resolves to.
+
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).expect("valid timestamp")
+    }
+
+    #[test]
+    fn snooze_deadline_adds_the_requested_minutes() {
+        let now = at(1_700_000_000);
+        let deadline = snooze_deadline_from_query(Some("minutes=30"), now).expect("valid");
+        assert_eq!(deadline, now + chrono::Duration::minutes(30));
+
+        // The bounds are inclusive at both ends (1 and 1440).
+        assert_eq!(
+            snooze_deadline_from_query(Some("minutes=1"), now),
+            Ok(now + chrono::Duration::minutes(1))
+        );
+        assert_eq!(
+            snooze_deadline_from_query(Some("minutes=1440"), now),
+            Ok(now + chrono::Duration::minutes(1440))
+        );
+    }
+
+    #[test]
+    fn snooze_rejects_missing_malformed_and_out_of_range_minutes() {
+        let now = at(1_700_000_000);
+        assert_eq!(
+            snooze_deadline_from_query(None, now),
+            Err(MutateError::BadRequest(
+                "missing minutes parameter".to_string()
+            ))
+        );
+        assert_eq!(
+            snooze_deadline_from_query(Some("minutes="), now),
+            Err(MutateError::BadRequest(
+                "missing minutes parameter".to_string()
+            )),
+            "an empty value must read as absent, not as 0"
+        );
+        assert!(matches!(
+            snooze_deadline_from_query(Some("minutes=abc"), now),
+            Err(MutateError::BadRequest(_))
+        ));
+        assert!(matches!(
+            snooze_deadline_from_query(Some("minutes=-5"), now),
+            Err(MutateError::BadRequest(_))
+        ));
+        assert_eq!(
+            snooze_deadline_from_query(Some("minutes=0"), now),
+            Err(MutateError::BadRequest(
+                "minutes must be in [1, 1440]".to_string()
+            ))
+        );
+        assert_eq!(
+            snooze_deadline_from_query(Some("minutes=1441"), now),
+            Err(MutateError::BadRequest(
+                "minutes must be in [1, 1440]".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn mutate_errors_map_to_the_documented_status_codes() {
+        // docs/API.md's error table: 400 for a bad parameter, 404 for an
+        // unknown profile, 409 when the process has no config loaded.
+        assert_eq!(MutateError::BadRequest("x".into()).status_code().0, 400);
+        assert_eq!(MutateError::UnknownProfile("x".into()).status_code().0, 404);
+        assert_eq!(MutateError::NoConfig.status_code().0, 409);
+    }
+
+    fn config_with_profiles(names: &[&str]) -> crate::config::AppConfig {
+        crate::config::AppConfig {
+            presence_profiles: names
+                .iter()
+                .map(|n| crate::config::PresenceProfile {
+                    name: (*n).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn profile_query_selects_a_named_profile_or_clears_to_base() {
+        let cfg = config_with_profiles(&["focus", "meeting"]);
+
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=focus")),
+            Ok(Some("focus".to_string()))
+        );
+        // `base` and `none` both clear, case-insensitively, matching --profile.
+        assert_eq!(active_profile_from_query(&cfg, Some("id=base")), Ok(None));
+        assert_eq!(active_profile_from_query(&cfg, Some("id=BASE")), Ok(None));
+        assert_eq!(active_profile_from_query(&cfg, Some("id=none")), Ok(None));
+    }
+
+    #[test]
+    fn profile_query_rejects_unknown_and_malformed_ids() {
+        let cfg = config_with_profiles(&["focus"]);
+
+        // Well-formed but not in the config: 404, not a silent no-op. This is
+        // the difference between the old inert route (always 204) and the real
+        // one, so it is the assertion that matters most.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=missing")),
+            Err(MutateError::UnknownProfile("missing".to_string()))
+        );
+
+        assert!(matches!(
+            active_profile_from_query(&cfg, None),
+            Err(MutateError::BadRequest(_))
+        ));
+        assert!(matches!(
+            active_profile_from_query(&cfg, Some("id=")),
+            Err(MutateError::BadRequest(_))
+        ));
+        // The ceiling is the config's MAX_PROFILE_ID_CHARS (32), not 64.
+        let max = crate::config::MAX_PROFILE_ID_CHARS;
+        let too_long = "a".repeat(max + 1);
+        assert!(matches!(
+            active_profile_from_query(&cfg, Some(&format!("id={too_long}"))),
+            Err(MutateError::BadRequest(_))
+        ));
+        // Exactly at the limit is accepted (then rejected as unknown, proving
+        // the length check itself passed).
+        let at_limit = "a".repeat(max);
+        assert_eq!(
+            active_profile_from_query(&cfg, Some(&format!("id={at_limit}"))),
+            Err(MutateError::UnknownProfile(at_limit))
+        );
+        // Characters outside [A-Za-z0-9_-] are refused before lookup.
+        // A name that decodes fine but is not stored is a 404, not a 400 —
+        // the charset is no longer hand-validated, the profile list is.
+        for absent in ["id=foc.us", "id=foc+us", "id=Deep%20Work"] {
+            assert!(
+                matches!(
+                    active_profile_from_query(&cfg, Some(absent)),
+                    Err(MutateError::UnknownProfile(_))
+                ),
+                "{absent} decodes to an unstored name, so it must be a 404"
+            );
+        }
+        // Malformed percent-encoding is refused rather than passed through.
+        for broken in ["id=%ZZ", "id=%"] {
+            assert!(
+                matches!(
+                    active_profile_from_query(&cfg, Some(broken)),
+                    Err(MutateError::BadRequest(_))
+                ),
+                "{broken} is not valid percent-encoding, so it must be a 400"
+            );
+        }
+    }
+
+    /// A profile name with a space is legal in config (`clamp_profile_id` only
+    /// trims the edges, `config/clamp.rs:274`) and switchable from the tray,
+    /// hotkey and CLI. The route used to reject every encoding of it, so the
+    /// profile was permanently unreachable over HTTP. Percent-decoding before
+    /// the lookup fixes that.
+    #[test]
+    fn profile_names_with_spaces_are_selectable_when_percent_encoded() {
+        let cfg = config_with_profiles(&["Deep Work", "focus"]);
+
+        // %20 — the canonical encoding for a space in a query value.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=Deep%20Work")),
+            Ok(Some("Deep Work".to_string()))
+        );
+        // '+' decodes to a space in application/x-www-form-urlencoded, which is
+        // what a query string is. Accept it too, so both common client
+        // behaviours work.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=Deep+Work")),
+            Ok(Some("Deep Work".to_string()))
+        );
+        // An unencoded space is malformed as a URL but tiny_http hands it to us;
+        // match it directly rather than 400, because the name is real.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=Deep Work")),
+            Ok(Some("Deep Work".to_string()))
+        );
+        // And the space-bearing name really does land in the live pointer.
+        let state = state_with(cfg);
+        apply_profile_to_state(&state, Some("id=Deep%20Work")).expect("applied");
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some("Deep Work".to_string())
+        );
+    }
+
+    /// The contract that makes these routes safe to expose: neither one writes
+    /// the config file. This is a source guard, because the difference between
+    /// "publishes an in-memory Arc" and "persists to disk" is one function call
+    /// and a reviewer cannot see it from the route's signature.
+    #[test]
+    fn runtime_routes_never_persist_config() {
+        let src = include_str!("serve.rs");
+        let production = &src[..src.find("\n#[cfg(test)]").expect("a test module")];
+        // The only config writers in the tree are `save_config` and
+        // `store_snooze`/`store_active_profile`; none may appear in this file.
+        for forbidden in ["save_config(", "store_snooze(", "store_active_profile("] {
+            assert!(
+                !production.contains(forbidden),
+                "serve.rs must never call {forbidden} — /snooze and /profile are \
+                 documented as runtime-only in docs/HEADLESS.md and docs/API.md"
+            );
+        }
+        // And the in-memory publication path IS present, so the assertion above
+        // cannot pass just because the routes were gutted again.
+        assert!(
+            production.contains("state.config.get_mut()"),
+            "the runtime routes must publish through the config write guard"
+        );
+        assert!(
+            production.contains("emit_config_changed"),
+            "a runtime config change must be observable on the event bus"
+        );
+    }
+
+    /// The above guard only proves THIS FILE does not persist. It does not
+    /// prove the value stays off disk, because a runtime-only change lands in
+    /// the same in-memory `AppConfig` that every other writer clones before
+    /// saving. This test records that consequence explicitly, so the limitation
+    /// is a pinned fact rather than an unexamined assumption.
+    ///
+    /// The reachable path in `--serve` mode is `clear_snooze_if_expired`
+    /// (`polling/gate.rs:372`, called from `polling/iteration.rs:113` and
+    /// `polling/loop.rs:287`): it clones the live config, clears the expired
+    /// deadline, and calls `save_config` on the whole document — which carries
+    /// along whatever `active_profile` a prior `POST /profile` set in memory.
+    /// The GUI-only writers (tray, `update_config`, `window.rs`) are not
+    /// reachable from `--serve`, so the snooze-expiry sweep is the one that
+    /// matters.
+    #[test]
+    fn a_runtime_only_change_can_be_carried_to_disk_by_a_later_whole_config_save() {
+        let state = state_with(config_with_profiles(&["focus"]));
+
+        // 1. The route changes memory only.
+        apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+
+        // Seed an already-expired snooze so the sweep below has something to
+        // clear — `clamp_snooze` is a no-op when there is no dead deadline.
+        {
+            let mut guard = state.config.get_mut();
+            let mut seeded = (**guard.as_ref().expect("loaded")).clone();
+            seeded.snooze_until = Some("2020-01-01T00:00:00Z".to_string());
+            *guard = Some(Arc::new(seeded));
+        }
+
+        let in_memory = state.config.snapshot().expect("config loaded");
+        assert_eq!(in_memory.active_profile, Some("focus".to_string()));
+
+        // 2. An unrelated writer clones the live config and saves the whole
+        //    document — exactly what `clear_snooze_if_expired` does.
+        let mut swept = (*in_memory).clone();
+        assert!(
+            crate::config::clamp_snooze(&mut swept, chrono::Utc::now()),
+            "the seeded deadline should clear"
+        );
+        let serialized = serde_json::to_value(&swept).expect("serialises");
+
+        // 3. The runtime-only value is now in the document that would reach disk.
+        assert_eq!(
+            serialized.get("active_profile").and_then(|v| v.as_str()),
+            Some("focus"),
+            "if this ever stops being true, the runtime-only routes got stronger \
+             isolation than the docs promise — update docs/API.md and this test"
+        );
+    }
+
+    // ── The mutations actually land in real AppState ────────────────────────
+    //
+    // The tests above pin the decision half. These drive `apply_*_to_state`
+    // against a real `AppState`, which is what proves the routes are not inert
+    // any more: the value the poller reads has changed afterwards.
+
+    fn state_with(cfg: crate::config::AppConfig) -> crate::AppState {
+        let state = crate::AppState::new();
+        *state.config.get_mut() = Some(Arc::new(cfg));
+        state
+    }
+
+    fn live_snooze_after(state: &crate::AppState) -> Option<String> {
+        state.config.snapshot().and_then(|c| c.snooze_until.clone())
+    }
+
+    #[test]
+    fn snooze_mutation_publishes_a_live_deadline() {
+        let state = state_with(crate::config::AppConfig::default());
+        // Start from a whole second: `snooze_store_form` writes
+        // `SecondsFormat::Secs` on purpose (two equal states must not look
+        // different just because a sub-second part moved), so a raw
+        // `Utc::now()` deadline would round on the way in and never round-trip.
+        let now = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+            .expect("whole-second now");
+        let deadline = now + chrono::Duration::minutes(45);
+
+        let published = apply_snooze_to_state(&state, deadline).expect("applied");
+
+        // The published copy and the live slot agree — a mismatch here is the
+        // #297/#536 bug class (in-memory and on-disk disagreeing).
+        assert_eq!(
+            published.snooze_until,
+            Some(crate::config::snooze_store_form(deadline))
+        );
+        assert_eq!(live_snooze_after(&state), published.snooze_until);
+
+        // And the value is one the poller's gate treats as live: parsing it
+        // back must yield the deadline, not `None`.
+        let stored = published.snooze_until.expect("set");
+        let parsed = crate::config::snooze_deadline(&stored, now)
+            .expect("a deadline 45 minutes out must be a live snooze");
+        assert_eq!(parsed, deadline);
+    }
+
+    #[test]
+    fn snooze_mutation_truncates_sub_second_precision() {
+        // Pins the documented `SecondsFormat::Secs` behaviour so the round-trip
+        // above cannot be "fixed" later by comparing against a truncated
+        // instant while the stored form silently keeps sub-seconds.
+        let state = state_with(crate::config::AppConfig::default());
+        let now = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+            .expect("whole-second now");
+        let with_nanos = now + chrono::Duration::milliseconds(1_500);
+
+        let published = apply_snooze_to_state(&state, with_nanos).expect("applied");
+        let stored = published.snooze_until.expect("set");
+        assert!(
+            !stored.contains('.'),
+            "the stored form must carry whole seconds only, got {stored}"
+        );
+        // Still a live deadline, just at second resolution.
+        assert!(crate::config::snooze_deadline(&stored, now).is_some());
+    }
+
+    #[test]
+    fn snooze_mutation_reports_no_config_when_nothing_is_loaded() {
+        // `AppState::new()` starts with an empty config slot.
+        let state = crate::AppState::new();
+        assert_eq!(
+            apply_snooze_to_state(&state, chrono::Utc::now() + chrono::Duration::minutes(5)).err(),
+            Some(MutateError::NoConfig)
+        );
+        assert_eq!(live_snooze_after(&state), None);
+    }
+
+    #[test]
+    fn profile_mutation_switches_the_active_pointer() {
+        let cfg = config_with_profiles(&["focus", "meeting"]);
+        let state = state_with(cfg);
+
+        let published = apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+        assert_eq!(published.active_profile, Some("focus".to_string()));
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "the live pointer the poller resolves the overlay from must move"
+        );
+
+        // Switching to another profile replaces it rather than appending.
+        let published = apply_profile_to_state(&state, Some("id=meeting")).expect("applied");
+        assert_eq!(published.active_profile, Some("meeting".to_string()));
+
+        // `base` clears.
+        let published = apply_profile_to_state(&state, Some("id=base")).expect("applied");
+        assert_eq!(published.active_profile, None);
+    }
+
+    #[test]
+    fn profile_mutation_leaves_the_pointer_alone_when_the_id_is_unknown() {
+        let state = state_with(config_with_profiles(&["focus"]));
+        // Establish a known-good pointer first.
+        apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+
+        assert_eq!(
+            apply_profile_to_state(&state, Some("id=does-not-exist")).err(),
+            Some(MutateError::UnknownProfile("does-not-exist".to_string()))
+        );
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "a rejected request must not disturb the current profile"
+        );
+    }
+
+    #[test]
+    fn profile_mutation_rejects_malformed_before_touching_state() {
+        let state = state_with(config_with_profiles(&["focus"]));
+        assert!(matches!(
+            apply_profile_to_state(&state, None),
+            Err(MutateError::BadRequest(_))
+        ));
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            None
+        );
+    }
+
+    /// Both routes run the published config through `clamped_config`, so what a
+    /// reader sees is always inside the bounds a save would enforce.
+    ///
+    /// These exist because deleting the `clamped_config` call left all 21 serve
+    /// tests green — the clamp on both paths was entirely unpinned. Seeded
+    /// out-of-range values stand in for "a hand-edited config that skipped the
+    /// clamp", which is exactly the case the call exists for.
+    #[test]
+    fn snooze_mutation_publishes_a_clamped_config() {
+        let mut seeded = crate::config::AppConfig::default();
+        seeded.polling.default_interval_seconds = 999_999;
+        let state = state_with(seeded);
+
+        let published = apply_snooze_to_state(
+            &state,
+            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+                .expect("whole-second now")
+                + chrono::Duration::minutes(10),
+        )
+        .expect("applied");
+
+        assert!(
+            published.polling.default_interval_seconds < 999_999,
+            "clamped_config must have run on the /snooze path: \
+             default_interval_seconds was left at {}",
+            published.polling.default_interval_seconds
+        );
+        let live = state.config.snapshot().expect("loaded");
+        assert_eq!(
+            live.polling.default_interval_seconds, published.polling.default_interval_seconds,
+            "the clamped value, not the raw input, must reach the live slot"
+        );
+    }
+
+    #[test]
+    fn profile_mutation_publishes_a_clamped_config() {
+        let seeded = crate::config::AppConfig {
+            presence_profiles: vec![crate::config::PresenceProfile {
+                name: "focus".to_string(),
+                idle_away_after_seconds: Some(u64::MAX),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let state = state_with(seeded);
+
+        let published = apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+
+        let profile = published
+            .presence_profiles
+            .iter()
+            .find(|p| p.name == "focus")
+            .expect("profile survives the clamp");
+        assert_eq!(
+            profile.idle_away_after_seconds,
+            Some(86_400),
+            "clamped_config must have run on the /profile path too"
+        );
+    }
+
+    /// A 33-64 char id used to pass the route's own shape check (it allowed up
+    /// to 64) and then be truncated to 32 by `clamped_config`. The lookup
+    /// against the stored list happened BEFORE the clamp, so the request either
+    /// missed a stored 32-char name (404 with a confusing message) or, worse,
+    /// matched nothing and had its truncated form written as the active pointer.
+    /// The route now refuses anything past the config's own cap up front.
+    #[test]
+    fn profile_ids_longer_than_the_config_cap_are_rejected_not_truncated() {
+        let max = crate::config::MAX_PROFILE_ID_CHARS;
+        let long_name = "a".repeat(max); // a legitimate stored profile
+        let state = state_with(config_with_profiles(&[&long_name]));
+
+        // The max-length id works.
+        assert!(
+            apply_profile_to_state(&state, Some(&format!("id={long_name}"))).is_ok(),
+            "a stored profile at exactly the cap must be selectable"
+        );
+
+        // One char past the cap is a 400 — not a truncation to the valid name.
+        let over = "a".repeat(max + 1);
+        assert_eq!(
+            apply_profile_to_state(&state, Some(&format!("id={over}"))).err(),
+            Some(MutateError::BadRequest(format!(
+                "id must be 1..={max} chars"
+            )))
+        );
+        // And the live pointer is unchanged by the rejected request.
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some(long_name)
+        );
+    }
+
+    #[test]
+    fn malformed_escape_detection() {
+        assert!(!has_malformed_escape("focus"));
+        assert!(!has_malformed_escape("Deep Work"));
+        assert!(!has_malformed_escape("Deep%20Work"));
+        assert!(!has_malformed_escape("%2F"));
+        assert!(!has_malformed_escape("%ff")); // lowercase hex is valid
+        assert!(!has_malformed_escape("a%2Fb%20c"));
+
+        assert!(has_malformed_escape("%"));
+        assert!(has_malformed_escape("%2"));
+        assert!(has_malformed_escape("%ZZ"));
+        assert!(has_malformed_escape("%2Z"));
+        assert!(has_malformed_escape("ok%then"));
     }
 }

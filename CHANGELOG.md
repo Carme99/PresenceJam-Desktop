@@ -50,6 +50,53 @@ renamed to the released version and a fresh empty one is opened on top (see
   cannot verify either claim.
 
 
+### Features
+
+
+- **`--serve`'s `/snooze` and `/profile` routes now do what they say.** Both
+  previously validated their input, logged it, and returned `204` without
+  changing anything — a documented trap, because an external scheduler saw
+  success and concluded the snooze or profile switch had happened. They now
+  publish a new in-memory `AppConfig` through the config write guard (via
+  `clamped_config`, so the published snapshot is always inside the bounds a
+  reader would enforce) and emit `config-changed`, which is what the poller's
+  `snooze_gate` and `effective_config` read on the next iteration. The pause or
+  switch is therefore immediate for the poller. The webview does not listen for
+  `config-changed`, so an open Dashboard refreshes on its next mount rather than
+  live — these routes are the event's first callers, not a push notification.
+
+  The persistence contract is unchanged and now stated precisely: **no route
+  writes `config.json`.** The tray's snooze and profile picker persist; these
+  routes do not write on their own, so a restart returns to the pre-call on-disk
+  state.
+
+  One honest caveat, found in review: the value lives in the same in-memory
+  `AppConfig` other writers clone before saving, so it can reach disk indirectly.
+  In `--serve` mode the reachable path is `clear_snooze_if_expired`
+  (`polling/gate.rs`), which saves the whole document when a snooze lapses —
+  carrying a runtime-set `active_profile` with it. So `/profile` survives a
+  restart *if* a snooze expires afterwards; `/snooze` does not, because that sweep
+  clears the very field. `docs/API.md` carries the per-scenario matrix and a test
+  pins the behaviour so it cannot change silently. Full isolation (runtime
+  overrides in a layer a whole-config save cannot see) is a separate change.
+
+  A previously valid call now takes effect, which is a behaviour change an
+  existing scheduler may notice.
+
+  `/profile` also gained real validation: an id that names no configured profile
+  is now `404 unknown profile: <id>` instead of a silent success, `base` / `none`
+  clear to the base configuration, and the id is matched against the config's own
+  clamped profile list under the same guard that publishes the change — so a
+  profile deleted mid-request cannot be selected. A request arriving before any
+  config is loaded is `409 no config loaded` rather than a panic.
+
+  The decision logic moved into two pure helpers (`snooze_deadline_from_query`,
+  `active_profile_from_query`), which is what makes the bounds, the 400/404/409
+  mapping and the length/character rules unit-testable without a live server. A
+  source guard asserts `serve.rs` never calls `save_config`, `store_snooze` or
+  `store_active_profile`, so the runtime-only contract cannot regress silently.
+
+
 ## [5.0.1] - 2026-10-31
 
 Dependency refresh. No application behaviour changed.

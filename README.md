@@ -164,7 +164,7 @@ ignored, so the app starts normally exactly as it always has.
 | `presencejam --set-status <message>` | Writes a manual Teams status, then exits. Replacement text is capped at 128 characters.
 | `presencejam --set-status-expiry <minutes>` | Sets how long that manual status lives before the poller clears it.
 | `presencejam --clear-status` | Clears any manual status immediately.
-| `presencejam --serve[=PORT]` | Serves a token-guarded localhost control API on `127.0.0.1` (default port `8649`). `GET /status` and `GET /events` are read-only; `POST /pause`, `/resume`, `/snooze` and `/profile` are mutating and all five require `Authorization: Bearer <token>`.
+| `presencejam --serve[=PORT]` | Serves a token-guarded localhost control API on `127.0.0.1` (default port `8649`). `GET /status` and `GET /events` are read-only; `POST /pause`, `/resume`, `/snooze` and `/profile` are mutating and require an `Authorization: Bearer <token>` header. All four mutate runtime state only — none writes `config.json`. See [docs/API.md](./docs/API.md). |
 | `presencejam --daemon` | Runs the background daemon without a window — what the systemd unit, the launchd plist and the Windows Task Scheduler definitions under `packaging/` invoke. |
 | `presencejam --profile <id>` | Switches the active presence profile to `<id>`, or to the base configuration with `--profile base`. Third switch surface alongside the tray submenu and the hotkey. |
 | `presencejam --help` | Prints the usage text and exits `0`. Fully headless. |

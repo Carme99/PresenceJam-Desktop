@@ -20,22 +20,64 @@ authentication boundary. See [Token](#token) below.
 
 ---
 
-## ⚠ Two of the four mutating routes do nothing yet
+## Mutating routes: runtime state, never on-disk config
 
-`POST /snooze` and `POST /profile` validate their input, log it, and return
-`204 No Content`. **They do not change any runtime state.** No poller state,
-no config, no active profile — nothing.
+All four mutating routes change **runtime state only**. None writes
+`config.json` or `tokens.json`, so an operator restart returns to whatever was
+on disk before the call. That is the deliberate difference between this API and
+the tray/GUI: the tray's snooze and profile picker persist, the HTTP routes do
+not.
 
-This is deliberate in the code and documented in its own comments: the route
-contract forbids writing `config.json`, and the real snooze and profile
-mechanisms are owned elsewhere, so these two routes were landed as
-acknowledgement-only ahead of their follow-up slice. `/pause` and `/resume`,
-which *do* call `stop_syncing` / `start_syncing`, work today.
+- `POST /pause` / `POST /resume` call the same `stop_syncing` / `start_syncing`
+  machinery the tray uses.
+- `POST /snooze?minutes=N` publishes a new in-memory `AppConfig` whose
+  `snooze_until` is `now + N`. The poller's `snooze_gate` reads that value on its
+  next iteration, so the pause takes effect immediately.
+- `POST /profile?id=<id>` publishes a new in-memory `AppConfig` whose
+  `active_profile` is `id` (or `None` for `base` / `none`). `effective_config`
+  resolves the overlay from that pointer on the next poll.
+  `id` is **percent-decoded** before lookup and must name a profile that exists
+  in the config — that list, not a charset rule, is what validates it. Profile
+  names may contain spaces (the Settings field and `clamp_profile_id` both allow
+  them), so `id=Deep%20Work` and `id=Deep+Work` both select a profile named
+  `Deep Work`. An id that decodes cleanly but names nothing is `404`; malformed
+  percent-encoding is `400`.
 
-The practical trap: an external scheduler that polls these routes sees `204`
-and concludes the snooze or the profile switch happened. It did not. Do not
-drive a schedule from `/snooze` or `/profile` in 5.0.0. Use `/pause` and
-`/resume`, which are real.
+Both of the latter two emit `config-changed` on the app-wide event bus. **The
+webview does not currently listen for that event** — an open Dashboard learns
+about the change when it next mounts and calls `loadConfig()`, not by being
+pushed. `emit_config_changed` had no call site before these routes; they are its
+only callers today, so the event is observable but not yet consumed. Treat the
+dashboard's freshness as "on next mount", not "live".
+
+**Precision on "runtime-only".** No route *writes* `config.json` — that part is
+true and is enforced by a source guard in `serve.rs`. But the value does live in
+the same in-memory `AppConfig` that other writers clone before saving, so it can
+reach disk *indirectly*. One path is reachable in `--serve` mode:
+`clear_snooze_if_expired` (`polling/gate.rs`) clones the live config, clears an
+expired deadline, and saves the whole document — carrying any `active_profile`
+or `snooze_until` a route set earlier along with it.
+
+In practice this means the restart guarantee is weaker than "never survives":
+
+| Scenario | Survives a restart? |
+| --- | --- |
+| `/profile` or `/snooze`, then the process exits with no intervening save | **No** |
+| `/profile`, then a snooze expires while the daemon keeps running | **Yes** — the expiry sweep persists it |
+| `/snooze`, then it expires (the sweep clears the field it was asked to) | **No** — the deadline is what gets cleared |
+
+The GUI-only writers (tray snooze, `update_config`, `window.rs`) are not
+reachable from `--serve`, so the expiry sweep is the one that matters. Proper
+isolation — keeping runtime overrides in their own layer that a whole-config save
+cannot see — is tracked separately rather than half-done here.
+
+**Scope note.** This section used to warn that `/snooze` and `/profile` were
+*inert* — they validated input, logged it, and returned `204` without changing
+anything. They now apply the change. A previously valid call therefore behaves
+differently after this version: it takes effect. An external scheduler that
+worked around the old no-op by also driving `/pause` + `/resume` should drop
+that workaround, and one that relied on these routes being harmless should
+re-read the caller.
 
 ---
 
@@ -47,19 +89,19 @@ drive a schedule from `/snooze` or `/profile` in 5.0.0. Use `/pause` and
 | `GET` | `/events` | none | `200` — `text/event-stream` |
 | `POST` | `/pause` | **Bearer** | `204` on success, `409` if the poller could not stop |
 | `POST` | `/resume` | **Bearer** | `204` on success, `409` if no session is available to start |
-| `POST` | `/snooze?minutes=N` | **Bearer** | `204` — **inert**, see above |
-| `POST` | `/profile?id=<id>` | **Bearer** | `204` — **inert**, see above |
+| `POST` | `/snooze?minutes=N` | **Bearer** | `204` — pauses sync until `now + N` (runtime-only) |
+| `POST` | `/profile?id=<id>` | **Bearer** | `204` — switches the active profile (runtime-only); `404` for an unknown id |
 
 Error responses, in full:
 
 | Status | When | Body |
 | --- | --- | --- |
 | `400` | `minutes` missing, non-integer, or outside `[1, 1440]` | `minutes must be …` |
-| `400` | `id` missing, empty, longer than 64 chars, or outside `[A-Za-z0-9_-]` | `id must be …` |
-| `401` | mutating route without a valid `Authorization: Bearer` header | `{"error":"unauthorized", …}` |
-| `404` | any other path | `not found` |
+| `400` | `id` missing, empty, longer than 32 chars, or malformed percent-encoding | `id must be …` |
+| `401` | mutating route without a valid `Authorization: Bearer <token>` header | `{"error":"unauthorized", …}` |
+| `404` | any other path, **or** `/profile` with an id that names no configured profile | `not found` / `unknown profile: <id>` |
 | `405` | a known mutating path reached with a non-`POST` method | `method not allowed` |
-| `409` | `/pause` or `/resume` could not complete | `pause failed: …` / `resume failed: …` |
+| `409` | `/pause` or `/resume` could not complete, or no config is loaded yet | `pause failed: …` / `resume failed: …` / `no config loaded` |
 | `500` | `/status` snapshot could not be serialised | `internal error` |
 
 Every error body except `401` is plain text. Do not parse them as JSON.
