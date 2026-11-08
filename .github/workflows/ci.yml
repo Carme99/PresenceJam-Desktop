@@ -520,7 +520,9 @@ jobs:
   # The quick-xml `ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was dropped in
   # #642 once the lockfile cleared both IDs, restoring REPORTING of those two
   # IDs (not enforcement). Accepted risks: SECURITY.md "Accepted transitive
-  # risks".
+  # risks". The one standing acceptance — glib 0.18.5 / RUSTSEC-2024-0429 — is
+  # kept honest by src-tauri/tests/accepted_risk_currency.rs, which fails the
+  # moment glib resolves at or above 0.20.0 (issue #1197).
   dep-audit:
     name: Dependency audit (cargo + npm)
     runs-on: ubuntu-latest

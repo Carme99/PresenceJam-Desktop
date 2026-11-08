@@ -97,6 +97,22 @@ renamed to the released version and a fresh empty one is opened on top (see
   cannot verify either claim.
 
 
+### Testing
+
+
+- **The `glib` accepted risk now expires by test, not by memory (#1197).**
+  `SECURITY.md` accepts `glib` 0.18.5 (RUSTSEC-2024-0429) as unfixable on
+  Tauri 2.x and said to re-evaluate "when Tauri 3 lands" — an instruction in
+  prose, which nothing enforces. `cargo update -p glib --precise 0.22.10` fails
+  (`gtk v0.18.2` requires `glib "^0.18"`), and Tauri 3.0.0-alpha.6 still takes
+  `gtk = "^0.18"`, so the migration genuinely has not arrived. The new
+  `src-tauri/tests/accepted_risk_currency.rs` reads `Cargo.lock` and fails the
+  moment `glib` resolves at or above 0.20.0 — or vanishes from the tree — so the
+  exception cannot outlive the condition that justified it. The advisory's
+  practical reach is also narrowed in `SECURITY.md`: the unsound type's only
+  entry point is `Variant::array_iter_str`, which has zero call sites anywhere
+  in the dependency graph outside `glib` itself.
+
 ## [5.0.1] - 2026-10-31
 
 Dependency refresh. No application behaviour changed.
