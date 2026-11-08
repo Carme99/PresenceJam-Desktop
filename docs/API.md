@@ -36,6 +36,12 @@ not.
 - `POST /profile?id=<id>` publishes a new in-memory `AppConfig` whose
   `active_profile` is `id` (or `None` for `base` / `none`). `effective_config`
   resolves the overlay from that pointer on the next poll.
+  `id` is **percent-decoded** before lookup and must name a profile that exists
+  in the config — that list, not a charset rule, is what validates it. Profile
+  names may contain spaces (the Settings field and `clamp_profile_id` both allow
+  them), so `id=Deep%20Work` and `id=Deep+Work` both select a profile named
+  `Deep Work`. An id that decodes cleanly but names nothing is `404`; malformed
+  percent-encoding is `400`.
 
 Both of the latter two emit `config-changed` on the app-wide event bus. **The
 webview does not currently listen for that event** — an open Dashboard learns
@@ -91,7 +97,7 @@ Error responses, in full:
 | Status | When | Body |
 | --- | --- | --- |
 | `400` | `minutes` missing, non-integer, or outside `[1, 1440]` | `minutes must be …` |
-| `400` | `id` missing, empty, longer than 32 chars, or outside `[A-Za-z0-9_-]` | `id must be …` |
+| `400` | `id` missing, empty, longer than 32 chars, or malformed percent-encoding | `id must be …` |
 | `401` | mutating route without a valid `Authorization: Bearer <token>` header | `{"error":"unauthorized", …}` |
 | `404` | any other path, **or** `/profile` with an id that names no configured profile | `not found` / `unknown profile: <id>` |
 | `405` | a known mutating path reached with a non-`POST` method | `method not allowed` |

@@ -17,7 +17,7 @@
 //! | POST   | `/pause`            | yes  | empty — calls `stop_syncing`                 |
 //! | POST   | `/resume`           | yes  | empty — calls `start_syncing`                |
 //! | POST   | `/snooze?minutes=N` | yes  | query `minutes` (1..=1440)                  |
-//! | POST   | `/profile?id=<id>`  | yes  | query `id` (1..=32 chars `[A-Za-z0-9_-]`)    |
+//! | POST   | `/profile?id=<id>`  | yes  | query `id`, percent-decoded, 1..=32 chars    |
 //!
 //! No route writes `config.json` or `tokens.json`. `/snooze` and `/profile`
 //! publish a new **in-memory** `AppConfig` (through the config write guard, via
@@ -476,6 +476,30 @@ fn snooze_deadline_from_query(
     Ok(now + chrono::Duration::minutes(i64::from(minutes)))
 }
 
+/// True when `raw` contains a `%` that is not followed by two hex digits.
+///
+/// `urlencoding::decode` leaves such a sequence in place instead of returning
+/// `Err`, so a caller that only checks its `Result` would accept `%ZZ` verbatim.
+fn has_malformed_escape(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            // Needs two more bytes, both hex digits.
+            if i + 2 >= bytes.len()
+                || !bytes[i + 1].is_ascii_hexdigit()
+                || !bytes[i + 2].is_ascii_hexdigit()
+            {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// The `/profile` decision: which `active_profile` value the request names.
 ///
 /// `Ok(None)` means "clear to base". `Ok(Some(id))` means "activate `id`".
@@ -485,9 +509,42 @@ fn active_profile_from_query(
     cfg: &crate::config::AppConfig,
     query: Option<&str>,
 ) -> Result<Option<String>, MutateError> {
-    let Some(id) = query_param(query, "id") else {
+    let Some(raw) = query_param(query, "id") else {
         return Err(MutateError::BadRequest("missing id parameter".to_string()));
     };
+
+    // Percent-decode BEFORE validating. A URL query value carries `%20` for a
+    // space, and profile names legitimately contain spaces: `clamp_profile_id`
+    // only trims the EDGES (`config/clamp.rs:274`), and the Settings name field
+    // validates only non-empty / unique / <=32 chars. So "Deep Work" is a valid
+    // stored profile the tray, hotkey and CLI can all switch to — but the old
+    // raw-string charset check rejected every encoded spelling with a 400,
+    // leaving such a profile permanently unreachable over HTTP.
+    //
+    // A malformed escape is a 400 rather than being passed through: on a
+    // mutating route a silently-kept `%` is a tampering vector.
+    //
+    // `+` must be treated as a space first: this is an
+    // application/x-www-form-urlencoded query string, where `+` is the space
+    // shorthand, and `urlencoding::decode` handles only `%XX`.
+    let plus_decoded = raw.replace('+', " ");
+    // A `%` that does not introduce two hex digits is malformed. `urlencoding`
+    // passes such a sequence through unchanged rather than failing, so the
+    // check is explicit.
+    if has_malformed_escape(&plus_decoded) {
+        return Err(MutateError::BadRequest(
+            "id is not valid percent-encoding".to_string(),
+        ));
+    }
+    let id = match urlencoding::decode(&plus_decoded) {
+        Ok(decoded) => decoded.into_owned(),
+        Err(_) => {
+            return Err(MutateError::BadRequest(
+                "id is not valid percent-encoding".to_string(),
+            ))
+        }
+    };
+
     // The bound is the config's own `MAX_PROFILE_ID_CHARS` (32), not the 64 the
     // route used to accept. `clamped_config` truncates a profile name to 32
     // chars, so accepting a 33..=64-char id meant the lookup missed the stored
@@ -500,22 +557,20 @@ fn active_profile_from_query(
             "id must be 1..={max} chars"
         )));
     }
-    if !id
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(MutateError::BadRequest(
-            "id must match [A-Za-z0-9_-]".to_string(),
-        ));
-    }
+
     // `base` / `none` clear the pointer, matching `--profile`'s spelling.
     if id.eq_ignore_ascii_case("base") || id.eq_ignore_ascii_case("none") {
         return Ok(None);
     }
+
+    // Authoritative check: the decoded id must name a stored profile. This is
+    // what actually constrains the character set — a name only matters if the
+    // config holds it — so there is no separate hand-rolled charset regex to
+    // drift out of sync with `clamp_profile_id`.
     if !cfg.presence_profiles.iter().any(|p| p.name == id) {
-        return Err(MutateError::UnknownProfile(id.to_string()));
+        return Err(MutateError::UnknownProfile(id));
     }
-    Ok(Some(id.to_string()))
+    Ok(Some(id))
 }
 
 /// Apply a snooze to `state` without persisting: clones the current config,
@@ -999,15 +1054,66 @@ mod tests {
             Err(MutateError::UnknownProfile(at_limit))
         );
         // Characters outside [A-Za-z0-9_-] are refused before lookup.
-        for bad in ["id=fo cus", "id=focus%2F", "id=foc.us", "id=foc+us"] {
+        // A name that decodes fine but is not stored is a 404, not a 400 —
+        // the charset is no longer hand-validated, the profile list is.
+        for absent in ["id=foc.us", "id=foc+us", "id=Deep%20Work"] {
             assert!(
                 matches!(
-                    active_profile_from_query(&cfg, Some(bad)),
-                    Err(MutateError::BadRequest(_))
+                    active_profile_from_query(&cfg, Some(absent)),
+                    Err(MutateError::UnknownProfile(_))
                 ),
-                "{bad} must be a 400"
+                "{absent} decodes to an unstored name, so it must be a 404"
             );
         }
+        // Malformed percent-encoding is refused rather than passed through.
+        for broken in ["id=%ZZ", "id=%"] {
+            assert!(
+                matches!(
+                    active_profile_from_query(&cfg, Some(broken)),
+                    Err(MutateError::BadRequest(_))
+                ),
+                "{broken} is not valid percent-encoding, so it must be a 400"
+            );
+        }
+    }
+
+    /// A profile name with a space is legal in config (`clamp_profile_id` only
+    /// trims the edges, `config/clamp.rs:274`) and switchable from the tray,
+    /// hotkey and CLI. The route used to reject every encoding of it, so the
+    /// profile was permanently unreachable over HTTP. Percent-decoding before
+    /// the lookup fixes that.
+    #[test]
+    fn profile_names_with_spaces_are_selectable_when_percent_encoded() {
+        let cfg = config_with_profiles(&["Deep Work", "focus"]);
+
+        // %20 — the canonical encoding for a space in a query value.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=Deep%20Work")),
+            Ok(Some("Deep Work".to_string()))
+        );
+        // '+' decodes to a space in application/x-www-form-urlencoded, which is
+        // what a query string is. Accept it too, so both common client
+        // behaviours work.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=Deep+Work")),
+            Ok(Some("Deep Work".to_string()))
+        );
+        // An unencoded space is malformed as a URL but tiny_http hands it to us;
+        // match it directly rather than 400, because the name is real.
+        assert_eq!(
+            active_profile_from_query(&cfg, Some("id=Deep Work")),
+            Ok(Some("Deep Work".to_string()))
+        );
+        // And the space-bearing name really does land in the live pointer.
+        let state = state_with(cfg);
+        apply_profile_to_state(&state, Some("id=Deep%20Work")).expect("applied");
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some("Deep Work".to_string())
+        );
     }
 
     /// The contract that makes these routes safe to expose: neither one writes
@@ -1321,5 +1427,21 @@ mod tests {
                 .and_then(|c| c.active_profile.clone()),
             Some(long_name)
         );
+    }
+
+    #[test]
+    fn malformed_escape_detection() {
+        assert!(!has_malformed_escape("focus"));
+        assert!(!has_malformed_escape("Deep Work"));
+        assert!(!has_malformed_escape("Deep%20Work"));
+        assert!(!has_malformed_escape("%2F"));
+        assert!(!has_malformed_escape("%ff")); // lowercase hex is valid
+        assert!(!has_malformed_escape("a%2Fb%20c"));
+
+        assert!(has_malformed_escape("%"));
+        assert!(has_malformed_escape("%2"));
+        assert!(has_malformed_escape("%ZZ"));
+        assert!(has_malformed_escape("%2Z"));
+        assert!(has_malformed_escape("ok%then"));
     }
 }
