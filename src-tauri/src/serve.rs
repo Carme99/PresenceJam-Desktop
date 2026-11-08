@@ -1218,4 +1218,64 @@ mod tests {
             None
         );
     }
+
+    /// Both routes run the published config through `clamped_config`, so what a
+    /// reader sees is always inside the bounds a save would enforce.
+    ///
+    /// These exist because deleting the `clamped_config` call left all 21 serve
+    /// tests green — the clamp on both paths was entirely unpinned. Seeded
+    /// out-of-range values stand in for "a hand-edited config that skipped the
+    /// clamp", which is exactly the case the call exists for.
+    #[test]
+    fn snooze_mutation_publishes_a_clamped_config() {
+        let mut seeded = crate::config::AppConfig::default();
+        seeded.polling.default_interval_seconds = 999_999;
+        let state = state_with(seeded);
+
+        let published = apply_snooze_to_state(
+            &state,
+            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+                .expect("whole-second now")
+                + chrono::Duration::minutes(10),
+        )
+        .expect("applied");
+
+        assert!(
+            published.polling.default_interval_seconds < 999_999,
+            "clamped_config must have run on the /snooze path: \
+             default_interval_seconds was left at {}",
+            published.polling.default_interval_seconds
+        );
+        let live = state.config.snapshot().expect("loaded");
+        assert_eq!(
+            live.polling.default_interval_seconds, published.polling.default_interval_seconds,
+            "the clamped value, not the raw input, must reach the live slot"
+        );
+    }
+
+    #[test]
+    fn profile_mutation_publishes_a_clamped_config() {
+        let seeded = crate::config::AppConfig {
+            presence_profiles: vec![crate::config::PresenceProfile {
+                name: "focus".to_string(),
+                idle_away_after_seconds: Some(u64::MAX),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let state = state_with(seeded);
+
+        let published = apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+
+        let profile = published
+            .presence_profiles
+            .iter()
+            .find(|p| p.name == "focus")
+            .expect("profile survives the clamp");
+        assert_eq!(
+            profile.idle_away_after_seconds,
+            Some(86_400),
+            "clamped_config must have run on the /profile path too"
+        );
+    }
 }
