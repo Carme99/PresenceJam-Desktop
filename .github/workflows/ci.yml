@@ -513,6 +513,23 @@ jobs:
   # reporter fires on every run and on push runs `continue-on-error` IS
   # load-bearing: without it this job would be permanently red.
   #
+  # In 2026-11 this action's severity threshold let THREE real vulnerabilities
+  # ship to main with this job green: ctutils RUSTSEC-2026-0385 (AES-GCM mask
+  # timing -- the app encrypts its token store with aes-gcm), rustls-webpki
+  # RUSTSEC-2026-0382 and webpki-root-certs RUSTSEC-2026-0383 (certificate
+  # verification and trust roots, both under the updater that delivers
+  # executable code). `cargo audit` exited 1 on main the whole time. The
+  # gating leg below exists so that cannot recur; do not remove it to
+  # "simplify".
+  #
+  # Current `cargo audit` inventory (10 allowed warnings, 0 vulnerabilities).
+  # Re-derive with: cargo audit 2>&1 | grep -E '^(Crate|Warning):' | paste - -
+  # from src-tauri/. It is 7 unmaintained entries across 4 crates
+  # (proc-macro-error, zbus_names x2, zvariant x2, zvariant_derive x2) plus
+  # 3 unsound (anyhow, event-listener, glib -- all three documented in
+  # SECURITY.md "Accepted transitive risks"). The five `unic-*` crates named
+  # in the previous revision of this comment left the tree when zbus arrived.
+  #
   # Do NOT "fix" this by deleting the flag alone — that turns every push run
   # red. A genuinely gating cargo leg needs BOTH `checks: write` in this job's
   # `permissions` AND an explicit `run: cargo audit` step.
@@ -544,6 +561,23 @@ jobs:
           # Accepted transitive risks and the reporting-vs-enforcement caveat
           # are documented in SECURITY.md "Accepted transitive risks" and in
           # this job's header comment above.
+
+      # Gating leg, mirroring the npm gating leg below. `cargo audit` exits 1
+      # on ANY vulnerability regardless of severity and exits 0 when only
+      # allowed warnings remain, so the accepted risks (glib, anyhow,
+      # event-listener) never block while a new advisory always does. This is
+      # the leg the audit-check action's severity threshold could not provide.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e  # 1.96
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@68a389c788b2cd04016ce8c80ee23b80d2ab3d68  # v2.88.1
+        with:
+          tool: cargo-audit
+
+      - name: Cargo audit (vulnerabilities, gating)
+        working-directory: src-tauri
+        run: cargo audit
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0

@@ -432,12 +432,55 @@ cleared by different routes:
 
 `cargo audit` now reports **0 vulnerabilities**. The matching
 `ignore: RUSTSEC-2026-0194,RUSTSEC-2026-0195` was removed from the `dep-audit`
-job in `.github/workflows/ci.yml` at the same time. Note that this restores
-**reporting**, not enforcement: the cargo leg remains non-gating
-(`continue-on-error: true`), because `RustSec/audit-check@v2.0.0` cannot reach
-the Checks API under this job's `contents: read` permission. See the `dep-audit`
-job header in `ci.yml` for the full mechanism and for what a real gate would
-require. Tracked by issue #642.
+job in `.github/workflows/ci.yml` at the same time.
+
+**The cargo leg is now gated.** For a time it was reporting-only:
+`RustSec/audit-check@v2.0.0` fails only when `stats.critical > 0`, and it cannot
+reach the Checks API under this job's `contents: read` permission, so
+`continue-on-error: true` is load-bearing on push runs. That severity threshold
+is why three vulnerabilities below shipped to `main` with this job green —
+`cargo audit` exited 1 locally on every one of those runs. The `dep-audit` job
+now runs an explicit `run: cargo audit` step (with `dtolnay/rust-toolchain` +
+`taiki-e/install-action`), which exits 1 on **any** vulnerability and exits 0
+when only allowed warnings remain: the accepted risks in this section never
+block, a new advisory always does. The `audit-check` action stays as the
+advisory/reporting leg. Tracked by issue #642.
+
+**Three `cargo audit` vulnerabilities — FIXED 2026-11-08, no longer accepted.**
+All three were live on `main` (lockfile resolves, `cargo audit` exit 1) while the
+`dep-audit` job stayed green, and all three cleared in place with no semver bump
+and no API change:
+
+- **`ctutils` 0.4.2 → 0.4.4 (RUSTSEC-2026-0385)** — non-constant-time mask
+  generation and `u128` comparisons. This one is on the app's own crypto path:
+  `aes-gcm` is a direct dependency and is what encrypts the token store, so the
+  timing leak sat in code that protects Spotify/Teams credentials, not in a
+  dormant transitively-pulled crate.
+- **`rustls-webpki` 0.103.15 → 0.103.16 (RUSTSEC-2026-0382)** — certificate
+  verification may accept distrusted intermediates. Reached through
+  `tauri-plugin-updater` → `reqwest` → `hyper-rustls`, i.e. the channel that
+  downloads and executes signed updates: accepting a distrusted intermediate
+  there is a supply-chain-shaped failure, not an academic one.
+- **`webpki-root-certs` 1.0.9 → 1.0.10 (RUSTSEC-2026-0383)** — bundled root
+  certificates allowed trust in distrusted emSign intermediates. Same updater
+  path as above.
+
+Two `unsound`/`yanked` warnings were also cleared in the same pass, both
+in-place: **`tokio` 1.52.3 → 1.54.1** (RUSTSEC-2026-0386, `AsyncFd::new`
+I/O-safety) and **`async-executor` 1.14.0 → 1.14.1** (yanked; pulled by `zbus`
+through `notify-rust`, `tauri-plugin-opener` and `tauri-plugin-single-instance`).
+
+**The unmaintained family — accepted.** Four crates in the tree are flagged
+`unmaintained` (7 advisory entries: `zbus_names`, `zvariant` and
+`zvariant_derive` are reported twice each, plus `proc-macro-error`). They have no
+fix available short of a `zbus` major, and `zbus` **is** a direct dependency
+(`src-tauri/Cargo.toml`, Linux target) used for MPRIS playback detection —
+`src-tauri/src/sources/mpris.rs` imports `zbus::blocking::{Connection, Proxy}`.
+The same honest statement as `event-listener` below applies: the crates sit on a
+dependency the app calls directly, so this is "no upstream fix exists", not "not
+in the app's call path". `cargo audit` reports them as allowed warnings and
+exits 0; they are recorded here so the CI job's warning count is explained
+rather than merely tolerated.
 
 **`glib` 0.18.5 (RUSTSEC-2024-0429) — accepted, unfixable on Tauri 2.x.** The
 advisory covers unsoundness in `VariantStrIter`'s `Iterator`/`DoubleEndedIterator`
