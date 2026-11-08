@@ -455,7 +455,21 @@ RustSec classifies it `informational = "unsound"`, so `cargo audit` reports it
 as an allowed **warning** and still exits 0. Reachability: the affected impls
 require `glib` object iteration, which this app does not perform — it uses
 Tauri's tray and dialog APIs and never iterates a `glib` object collection
-itself.
+itself. The only entry point to the unsound type is `Variant::array_iter_str`,
+the sole constructor of `VariantStrIter`, and `grep -rn array_iter_str` over
+every vendored crate in the dependency graph returns **zero** call sites outside
+`glib` itself.
+
+**Expiry is enforced, not remembered.** The "re-evaluate when Tauri 3 lands"
+instruction this policy used to carry is prose, and prose does not notice that
+the ecosystem moved. `src-tauri/tests/accepted_risk_currency.rs` now reads
+`Cargo.lock` on every `cargo test` and **fails** the moment `glib` resolves at or
+above 0.20.0 (or disappears from the tree entirely). That failure is the signal
+to delete this section and the matching commentary in the `dep-audit` job of
+`ci.yml`. Today's tree resolves 0.18.5, so the acceptance is live, and a
+`cargo update -p glib --precise 0.22.10` probe confirms it cannot be raised in
+place: `gtk v0.18.2` requires `glib "^0.18"`. Tauri 3.0.0-alpha.6 still takes
+`gtk = "^0.18"` too, so the migration has not arrived.
 
 Two further `unsound` warnings are accepted. Neither is a *direct* dependency of
 this crate, but they differ in how far the app actually reaches them:
