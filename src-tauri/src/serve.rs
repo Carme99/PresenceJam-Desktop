@@ -585,17 +585,23 @@ fn apply_snooze_to_state(
     state: &AppState,
     deadline: chrono::DateTime<chrono::Utc>,
 ) -> Result<crate::config::AppConfig, MutateError> {
-    let mut guard = state.config.get_mut();
-    let Some(current) = guard.as_ref().map(|c| (**c).clone()) else {
-        return Err(MutateError::NoConfig);
-    };
-    let mut next = current;
-    next.snooze_until = Some(crate::config::snooze_store_form(deadline));
-    // `clamped_config` keeps the published snapshot inside the same bounds a
-    // reader would enforce, so a hand-set value cannot leak past the route.
-    let next = crate::config::clamped_config(&next);
-    *guard = Some(Arc::new(next.clone()));
-    Ok(next)
+    // Issue #1205: the override goes to the sidecar, NOT into the document.
+    // Mutating the shared `AppConfig` made "runtime-only" untrue — the route
+    // never saved, but `clear_snooze_if_expired` clones the live config and
+    // saves the whole thing, so a `/profile` (and potentially this) could reach
+    // disk. The sidecar is applied only at `snapshot_effective`, and every
+    // writer takes the raw `get_mut` guard, so it cannot be carried.
+    let base = state.config.snapshot().ok_or(MutateError::NoConfig)?;
+    state
+        .runtime_overrides
+        .set_snooze(Some(crate::config::snooze_store_form(deadline)));
+    // Return the *effective* config so the route can echo what a reader sees,
+    // clamped by the same rules a reader enforces.
+    let effective = state
+        .runtime_overrides
+        .applied_to(&base)
+        .unwrap_or_else(|| (*base).clone());
+    Ok(crate::config::clamped_config(&effective))
 }
 
 /// The `/profile` equivalent of [`apply_snooze_to_state`]: resolve `query`
@@ -606,16 +612,17 @@ fn apply_profile_to_state(
     state: &AppState,
     query: Option<&str>,
 ) -> Result<crate::config::AppConfig, MutateError> {
-    let mut guard = state.config.get_mut();
-    let Some(current) = guard.as_ref().map(|c| (**c).clone()) else {
-        return Err(MutateError::NoConfig);
-    };
-    let target = active_profile_from_query(&current, query)?;
-    let mut next = current;
-    next.active_profile = target;
-    let next = crate::config::clamped_config(&next);
-    *guard = Some(Arc::new(next.clone()));
-    Ok(next)
+    // Issue #1205: resolve against the *persisted* profile list (never the
+    // overlaid view, or a runtime choice could validate against itself) and
+    // publish to the sidecar.
+    let base = state.config.snapshot().ok_or(MutateError::NoConfig)?;
+    let target = active_profile_from_query(&base, query)?;
+    state.runtime_overrides.set_active_profile(target);
+    let effective = state
+        .runtime_overrides
+        .applied_to(&base)
+        .unwrap_or_else(|| (*base).clone());
+    Ok(crate::config::clamped_config(&effective))
 }
 
 /// `POST /snooze?minutes=N` — pause sync for N minutes, runtime-only.
@@ -1105,13 +1112,12 @@ mod tests {
             active_profile_from_query(&cfg, Some("id=Deep Work")),
             Ok(Some("Deep Work".to_string()))
         );
-        // And the space-bearing name really does land in the live pointer.
+        // And the space-bearing name really does land in the effective pointer.
         let state = state_with(cfg);
         apply_profile_to_state(&state, Some("id=Deep%20Work")).expect("applied");
         assert_eq!(
             state
-                .config
-                .snapshot()
+                .snapshot_effective()
                 .and_then(|c| c.active_profile.clone()),
             Some("Deep Work".to_string())
         );
@@ -1157,11 +1163,28 @@ mod tests {
             );
         }
 
-        // The in-memory publication path IS present, so the assertions above
-        // cannot pass just because the routes were gutted again.
+        // The override path IS present, so the assertions above cannot pass
+        // just because the routes were gutted again. Since #1205 the override
+        // lives in the sidecar and is applied at the read seam, so the marker is
+        // the sidecar, not a document write — asserting `get_mut()` here would
+        // demand exactly the bug #1205 removed.
+        // Whitespace-normalised, because these calls are chained across lines
+        // and a literal match on `state.runtime_overrides.set_snooze(` failed
+        // for exactly that reason — the same syntax-matching mistake the writer
+        // names above were changed to avoid.
+        let dense: String = code.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            code.contains("state.config.get_mut()"),
-            "the runtime routes must publish through the config write guard"
+            dense.contains(".runtime_overrides.set_snooze("),
+            "the /snooze helper must record a sidecar override"
+        );
+        assert!(
+            dense.contains(".runtime_overrides.set_active_profile("),
+            "the /profile helper must record a sidecar override"
+        );
+        assert!(
+            !code.contains("state.config.get_mut()"),
+            "the runtime routes must NOT write the persisted document (that was \
+             the #1205 bug); the override belongs in the sidecar"
         );
         assert!(
             code.contains("emit_config_changed"),
@@ -1176,28 +1199,46 @@ mod tests {
     /// The above guard only proves THIS FILE does not persist. It does not
     /// prove the value stays off disk, because a runtime-only change lands in
     /// the same in-memory `AppConfig` that every other writer clones before
-    /// saving. This test records that consequence explicitly, so the limitation
-    /// is a pinned fact rather than an unexamined assumption.
+    /// saving. That limitation is now fixed (issue #1205) and this test is its
+    /// regression guard, inverted from the one that used to pin the bug.
     ///
-    /// Proper isolation is #1205; this test pins TODAY'S behaviour so the fix
-    /// has to change it deliberately.
+    /// The reachable path was `clear_snooze_if_expired`
+    /// (`polling/gate.rs`, called from the polling iteration and `loop.rs`): it
+    /// clones the live config, clears the expired deadline, and calls
+    /// `save_config` on the whole document — carrying along whatever
+    /// `active_profile` a prior `POST /profile` had set in memory.
     ///
-    /// The reachable path in `--serve` mode is `clear_snooze_if_expired`
-    /// (`polling/gate.rs:372`, called from `polling/iteration.rs:113` and
-    /// `polling/loop.rs:287`): it clones the live config, clears the expired
-    /// deadline, and calls `save_config` on the whole document — which carries
-    /// along whatever `active_profile` a prior `POST /profile` set in memory.
-    /// The GUI-only writers (tray, `update_config`, `window.rs`) are not
-    /// reachable from `--serve`, so the snooze-expiry sweep is the one that
-    /// matters.
+    /// With the override in the sidecar that clone cannot see it, because
+    /// `snapshot()` returns the persisted document and only
+    /// `snapshot_effective()` applies overrides. The sweep is deliberately
+    /// driven here through the real `get_mut` guard + whole-document save, so
+    /// the guard is exercised the way the production writer does it.
     #[test]
-    fn a_runtime_only_change_can_be_carried_to_disk_by_a_later_whole_config_save() {
+    fn a_runtime_only_change_cannot_be_carried_to_disk_by_a_later_whole_config_save() {
         let state = state_with(config_with_profiles(&["focus"]));
 
-        // 1. The route changes memory only.
+        // 1. The route records a runtime override.
         apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+        // The poller sees it…
+        assert_eq!(
+            state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "the override must be visible to the sync loop"
+        );
+        // …but the persisted document does not.
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            None,
+            "the override must not be in the document a writer clones"
+        );
 
-        // Seed an already-expired snooze so the sweep below has something to
+        // Seed an already-expired snooze through the RAW guard, the way a
+        // persisted value would arrive, so the sweep below has something to
         // clear — `clamp_snooze` is a no-op when there is no dead deadline.
         {
             let mut guard = state.config.get_mut();
@@ -1206,24 +1247,27 @@ mod tests {
             *guard = Some(Arc::new(seeded));
         }
 
-        let in_memory = state.config.snapshot().expect("config loaded");
-        assert_eq!(in_memory.active_profile, Some("focus".to_string()));
-
-        // 2. An unrelated writer clones the live config and saves the whole
-        //    document — exactly what `clear_snooze_if_expired` does.
-        let mut swept = (*in_memory).clone();
+        // 2. An unrelated writer clones the document and saves the whole thing —
+        //    exactly what `clear_snooze_if_expired` does.
+        let persisted_view = state.config.snapshot().expect("config loaded");
+        let mut swept = (*persisted_view).clone();
         assert!(
             crate::config::clamp_snooze(&mut swept, chrono::Utc::now()),
             "the seeded deadline should clear"
         );
         let serialized = serde_json::to_value(&swept).expect("serialises");
 
-        // 3. The runtime-only value is now in the document that would reach disk.
+        // 3. The runtime-only value is NOT in what would reach disk.
         assert_eq!(
             serialized.get("active_profile").and_then(|v| v.as_str()),
-            Some("focus"),
-            "if this ever stops being true, the runtime-only routes got stronger \
-             isolation than the docs promise — update docs/API.md and this test"
+            None,
+            "a whole-config save must never carry a runtime override to disk; \
+             if this fails, the sidecar leaked back into the document"
+        );
+        assert_eq!(
+            serialized.get("snooze_until").and_then(|v| v.as_str()),
+            None,
+            "the runtime snooze must not reach disk either"
         );
     }
 
@@ -1239,8 +1283,11 @@ mod tests {
         state
     }
 
+    /// What the poller would actually see, overrides included (#1205).
     fn live_snooze_after(state: &crate::AppState) -> Option<String> {
-        state.config.snapshot().and_then(|c| c.snooze_until.clone())
+        state
+            .snapshot_effective()
+            .and_then(|c| c.snooze_until.clone())
     }
 
     #[test]
@@ -1263,6 +1310,12 @@ mod tests {
             Some(crate::config::snooze_store_form(deadline))
         );
         assert_eq!(live_snooze_after(&state), published.snooze_until);
+        // #1205: and the override lives in the sidecar, not the document.
+        assert_eq!(
+            state.config.snapshot().and_then(|c| c.snooze_until.clone()),
+            None,
+            "a runtime snooze must not be written into the persisted document"
+        );
 
         // And the value is one the poller's gate treats as live: parsing it
         // back must yield the deadline, not `None`.
@@ -1312,11 +1365,19 @@ mod tests {
         assert_eq!(published.active_profile, Some("focus".to_string()));
         assert_eq!(
             state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "the effective pointer the poller resolves the overlay from must move"
+        );
+        // #1205: and the persisted document must NOT have moved.
+        assert_eq!(
+            state
                 .config
                 .snapshot()
                 .and_then(|c| c.active_profile.clone()),
-            Some("focus".to_string()),
-            "the live pointer the poller resolves the overlay from must move"
+            None,
+            "the runtime override must not touch the persisted document"
         );
 
         // Switching to another profile replaces it rather than appending.
@@ -1340,8 +1401,7 @@ mod tests {
         );
         assert_eq!(
             state
-                .config
-                .snapshot()
+                .snapshot_effective()
                 .and_then(|c| c.active_profile.clone()),
             Some("focus".to_string()),
             "a rejected request must not disturb the current profile"
@@ -1391,10 +1451,10 @@ mod tests {
              default_interval_seconds was left at {}",
             published.polling.default_interval_seconds
         );
-        let live = state.config.snapshot().expect("loaded");
+        let live = state.snapshot_effective().expect("loaded");
         assert_eq!(
             live.polling.default_interval_seconds, published.polling.default_interval_seconds,
-            "the clamped value, not the raw input, must reach the live slot"
+            "the clamped value, not the raw input, must reach the effective config"
         );
     }
 
@@ -1450,13 +1510,117 @@ mod tests {
                 "id must be 1..={max} chars"
             )))
         );
-        // And the live pointer is unchanged by the rejected request.
+        // And the effective pointer is unchanged by the rejected request.
+        assert_eq!(
+            state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone()),
+            Some(long_name)
+        );
+    }
+
+    // ── Issue #1205: the override layer itself ──────────────────────────────
+
+    #[test]
+    fn an_override_reaches_the_effective_view_but_never_the_document() {
+        let state = state_with(config_with_profiles(&["focus"]));
+        assert!(
+            state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone())
+                .is_none(),
+            "no override set yet"
+        );
+
+        apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+
+        assert_eq!(
+            state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "the poller must see the runtime profile"
+        );
         assert_eq!(
             state
                 .config
                 .snapshot()
                 .and_then(|c| c.active_profile.clone()),
-            Some(long_name)
+            None,
+            "the document must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_base_override_outranks_a_profile_named_in_the_document() {
+        // `id=base` must pin the base configuration even when `config.json`
+        // names a profile — otherwise "switch to base" is a no-op on a config
+        // whose stored `active_profile` is already set.
+        let mut cfg = config_with_profiles(&["focus"]);
+        cfg.active_profile = Some("focus".to_string());
+        let state = state_with(cfg);
+        assert_eq!(
+            state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "precondition: the document names a profile"
+        );
+
+        apply_profile_to_state(&state, Some("id=base")).expect("applied");
+
+        assert_eq!(
+            state
+                .snapshot_effective()
+                .and_then(|c| c.active_profile.clone()),
+            None,
+            "id=base must clear the effective pointer, not inherit the document's"
+        );
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some("focus".to_string()),
+            "and must not rewrite the document"
+        );
+    }
+
+    #[test]
+    fn an_expired_runtime_snooze_is_not_applied() {
+        // Mirrors `snooze_deadline`'s rule: a past instant is not a snooze. The
+        // poller must not be paused by a deadline that already went by.
+        let state = state_with(crate::config::AppConfig::default());
+        state
+            .runtime_overrides
+            .set_snooze(Some("2020-01-01T00:00:00Z".to_string()));
+        let effective = state.snapshot_effective().expect("loaded");
+        assert!(
+            effective
+                .snooze_until
+                .as_deref()
+                .map(|s| crate::config::snooze_deadline(s, chrono::Utc::now()).is_none())
+                .unwrap_or(true),
+            "an expired override must not look like a live snooze"
+        );
+    }
+
+    #[test]
+    fn the_override_layer_is_dropped_by_construction_not_by_cleanup() {
+        // A fresh AppState is what a restart produces. If the overrides lived in
+        // the persisted document, this would need a cleanup step that a future
+        // refactor could forget; in the sidecar it is structural.
+        let state = state_with(config_with_profiles(&["focus"]));
+        apply_profile_to_state(&state, Some("id=focus")).expect("applied");
+        assert!(state
+            .snapshot_effective()
+            .and_then(|c| c.active_profile.clone())
+            .is_some());
+
+        let restarted = crate::AppState::new();
+        assert!(
+            restarted.snapshot_effective().is_none(),
+            "a fresh state has no config at all, let alone an override"
         );
     }
 

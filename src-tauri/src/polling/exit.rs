@@ -50,7 +50,7 @@ pub(crate) fn clear_presence_on_exit(app: &AppHandle) {
     };
     // Clone out of the read guard before any blocking call: the guard must not
     // be held across a Graph round-trip on the exit path.
-    let config = state.config.snapshot();
+    let config = state.snapshot_effective();
     let snapshot = super::state::load_exit_snapshot(&state.session);
     let plan = exit_cleanup_plan(
         &snapshot,

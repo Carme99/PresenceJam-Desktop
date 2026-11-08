@@ -213,7 +213,7 @@ fn run_inner(
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
     }
 
-    let config = state.config.snapshot();
+    let config = state.snapshot_effective();
     log::debug!("[POLLING] poll_once: config loaded");
 
     // Issue #866: the iteration-head expiry tick for the preferred-presence
@@ -1071,6 +1071,38 @@ mod tests {
     /// isolated with the same routine.
     fn prod_fn_body<'a>(prod: &'a str, sig: &str) -> &'a str {
         brace_counted_body(prod, sig)
+    }
+
+    /// Issue #1205: the override must actually reach the sync loop.
+    ///
+    /// `poll_once` reads its config once at the head and threads it through the
+    /// whole iteration, so this one line is the entire delivery path for a
+    /// `POST /snooze` or `POST /profile`. Reverting it to `config.snapshot()`
+    /// silently makes both routes inert again while every test stays green —
+    /// which is exactly what happened when I mutation-tested the seam. The
+    /// iteration needs an `AppHandle` to drive end to end, so a source guard is
+    /// the honest instrument here.
+    #[test]
+    fn the_iteration_reads_config_through_the_runtime_override_seam() {
+        let prod = prod_source();
+        let code: String = prod
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                !t.starts_with("//") && !t.starts_with("/*") && !t.starts_with('*')
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("state.snapshot_effective()"),
+            "poll_once must read config via snapshot_effective(), or the \
+             runtime-only /snooze and /profile overrides never reach the poller"
+        );
+        assert!(
+            !code.contains("state.config.snapshot()"),
+            "poll_once must not read the raw document — runtime overrides are \
+             applied only at the effective seam (issue #1205)"
+        );
     }
 
     /// Brace-count the block that starts at the first `{` after `anchor`.

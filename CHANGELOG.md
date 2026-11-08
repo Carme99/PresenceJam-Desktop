@@ -168,6 +168,30 @@ Dependency refresh. No application behaviour changed.
 - **CI:** `Swatinem/rust-cache` 2.9.2 → 2.9.3 and a `taiki-e/install-action`
   pin refresh.
 
+### Fixed
+
+- **`/snooze` and `/profile` are now genuinely runtime-only (#1205).** They were
+  documented as runtime-only, and the routes themselves never saved — but they
+  published their change into the *shared* `AppConfig`, so any other writer that
+  cloned the live config and saved the whole document carried the value to disk.
+  The reachable case in `--serve` mode is the snooze-expiry sweep
+  (`polling::gate::clear_snooze_if_expired`): a `POST /profile` followed by a
+  lapsed snooze persisted the runtime profile, so it survived the restart it was
+  documented not to survive.
+
+  The overrides now live in a separate `RuntimeOverrides` layer beside the
+  document instead of inside it. The routes write there; the sync loop reads
+  through `AppState::snapshot_effective()`, the only place they are applied. Every
+  writer takes the raw `config.get_mut()` guard, so none can see an override.
+  This is structural rather than a convention to remember, and it also fixes a
+  bug the old shape could not express: `id=base` must outrank a profile named in
+  `config.json`, which needs an explicit pin rather than an `Option<String>` in
+  the document.
+
+  Behaviour change for callers: none observable, except that a runtime profile no
+  longer leaks into `config.json`. `docs/API.md`'s restart matrix now says No for
+  every sequence.
+
 ### Security
 
 - `@vitest/mocker` is now 4.1.12, the release that fixes GHSA-qxg6-89mg-rqv8

@@ -822,11 +822,107 @@ impl Default for AppCaches {
     }
 }
 
+/// Runtime-only overrides for the `--serve` control API (issue #1205).
+///
+/// `POST /snooze` and `POST /profile` are documented as runtime-only: an
+/// operator restart must return to the on-disk behaviour, and no route writes
+/// `config.json`. Holding them in the persisted [`crate::config::AppConfig`]
+/// satisfied neither promise properly — the route never called `save_config`,
+/// but *any other writer* that cloned the live config and saved the whole
+/// document (notably `polling::gate::clear_snooze_if_expired`) carried the
+/// value to disk anyway, so `/profile` survived a restart it was documented not
+/// to survive.
+///
+/// This sidecar is the fix: the overrides live beside the document, are applied
+/// only at the poller's read seam ([`Config::snapshot_effective`]), and are
+/// invisible to every writer because they all take the raw
+/// [`Config::get_mut`] guard. A restart drops them by construction.
+#[derive(Debug, Default)]
+pub struct RuntimeOverrides {
+    /// Runtime snooze deadline, RFC3339 UTC — the same spelling
+    /// `AppConfig::snooze_until` uses, so the read path needs no conversion.
+    snooze_until: RwLock<Option<String>>,
+    /// Runtime active-profile id, or `None` for the base configuration.
+    active_profile: RwLock<Option<String>>,
+    /// Distinguishes "no runtime profile override" from "override = base".
+    /// `POST /profile?id=base` must pin the base configuration for the life of
+    /// the process even when `config.json` names a profile, so `None` alone
+    /// cannot carry that instruction.
+    profile_pinned: std::sync::atomic::AtomicBool,
+}
+
+impl RuntimeOverrides {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set (or clear) the runtime snooze deadline. `None` clears it.
+    pub fn set_snooze(&self, deadline: Option<String>) {
+        *self.snooze_until.write() = deadline;
+    }
+
+    pub fn snooze(&self) -> Option<String> {
+        self.snooze_until.read().clone()
+    }
+
+    /// Pin the runtime active profile. `None` means "base", and is remembered
+    /// as a pin so it outranks whatever `config.json` holds.
+    pub fn set_active_profile(&self, name: Option<String>) {
+        *self.active_profile.write() = name;
+        self.profile_pinned
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn active_profile(&self) -> Option<Option<String>> {
+        self.profile_pinned
+            .load(std::sync::atomic::Ordering::Acquire)
+            .then(|| self.active_profile.read().clone())
+    }
+
+    /// Drop every override — used by the tests and available to a future
+    /// "reload from disk" path.
+    pub fn clear(&self) {
+        self.set_snooze(None);
+        *self.active_profile.write() = None;
+        self.profile_pinned
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Apply the overrides to a base config, or return `None` when there is
+    /// nothing to override (so the caller can keep sharing the `Arc`).
+    ///
+    /// An expired runtime snooze is dropped rather than applied, mirroring
+    /// `config::snooze_deadline`'s "a past instant is not a snooze" rule.
+    pub fn applied_to(&self, base: &crate::config::AppConfig) -> Option<crate::config::AppConfig> {
+        let snooze = self.snooze();
+        let profile = self.active_profile();
+        if snooze.is_none() && profile.is_none() {
+            return None;
+        }
+        let mut out = base.clone();
+        if let Some(deadline) = snooze {
+            out.snooze_until = Some(deadline);
+        }
+        if let Some(name) = profile {
+            out.active_profile = name;
+        }
+        // Clamp at the seam as well as at the route: this is the view the poller
+        // reads, so a hand-edited `config.json` gets the same bounds a routed
+        // value would, and `clamped_config` is idempotent so the faithful case
+        // is unchanged.
+        Some(crate::config::clamped_config(&out))
+    }
+}
+
 pub struct AppState {
     pub tokens: Tokens,
     pub polling: Polling,
     pub pending: PendingAuths,
     pub config: Config,
+    /// Issue #1205: runtime-only overrides set by the `--serve` control API.
+    /// Kept beside the document, never inside it, so no whole-config save can
+    /// carry them to disk.
+    pub runtime_overrides: RuntimeOverrides,
     pub onboarding_cache: OnboardingCache,
     /// Issue #867: cached Outlook calendar gate. Shared between the polling
     /// loop (consults `busy_at` + `next_boundary`) and the tray snooze
@@ -915,6 +1011,7 @@ impl AppState {
             polling: Polling::new(),
             pending: PendingAuths::new(),
             config: Config::new(),
+            runtime_overrides: RuntimeOverrides::new(),
             onboarding_cache: OnboardingCache::new(),
             calendar: crate::calendar::CalendarGate::new(),
             launch_binding,
@@ -926,6 +1023,26 @@ impl AppState {
             session: crate::polling::SessionState::new(),
             locale: crate::i18n::LocaleState::new(),
             caches: AppCaches::new(),
+        }
+    }
+}
+
+impl AppState {
+    /// Snapshot with the `--serve` runtime overrides applied (issue #1205).
+    ///
+    /// Poller reads go through this instead of `config.snapshot()`:
+    /// `POST /snooze` and `POST /profile` set overrides on `AppState` rather
+    /// than mutating the persisted document, so this is the only place a
+    /// runtime-only change becomes visible to the sync loop.
+    ///
+    /// **Writers must not use this.** They take the raw `config.get_mut()`
+    /// guard and clone the base, so an override can never be carried into a
+    /// whole-config save.
+    pub fn snapshot_effective(&self) -> Option<Arc<crate::config::AppConfig>> {
+        let base = self.config.snapshot()?;
+        match self.runtime_overrides.applied_to(&base) {
+            None => Some(base),
+            Some(overlaid) => Some(Arc::new(overlaid)),
         }
     }
 }
