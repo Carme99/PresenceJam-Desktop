@@ -7,9 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+
 Every change merged after 5.0.1 lands here. At the next cut this section is
 renamed to the released version and a fresh empty one is opened on top (see
 `docs/RELEASING.md` §2).
+
+### Documentation
+
+
+- **Batched P2 documentation defects from the v5 grounding audit (#1171).** The
+  Linux deep-link `.desktop` path was wrong in five files. `tauri-plugin-deep-link`
+  names the file from the running binary's own filename, not the product name and
+  not the scheme — so it is `presence-jam-handler.desktop`, written into Tauri's
+  `data_dir()`, which on Linux is plain `~/.local/share` with no bundle-id
+  subfolder. `SETUP.md` and `TROUBLESHOOTING.md` told the reader the app never
+  creates that file, which is false and left a stale launcher behind on uninstall.
+  Also corrected: the main-window guard count (13 → the actual 19 guarded
+  commands, 18 in `commands/*.rs` plus `stage_deferred_update` in `updater_bg.rs`);
+  the detached capability set (it never granted `opener`, and carries four
+  notification grants, not one); the `RuleDecision` shape, which has had a fourth
+  field, `preferred_presence`, since #866, plus its "the two presence fields can
+  never both be `Some`" invariant; the config-integrity layer count (three →
+  four — `config_from_sections`/`field_or_fallback` is the #926 fourth); the
+  `commands/` family count in the system diagram (nine → thirteen); the glossary's
+  CLI-flag count (five → nine); the tray rebuild dedup key (six → the actual nine
+  inputs, adding `devices_bucket`, `queue_bucket` and `active_profile_key`); and
+  the two stale `(vX)` section labels. The keychain slot names are now literal in
+  `frontend.md` so they are greppable.
+- **`link-audit.py`'s docstring now states its real scope.** It claimed to audit
+  "every" relative link and "every anchor a browser can reach". Both were false:
+  `LINK` matches only the inline markdown-link form, so the 48 reference-style
+  definitions in `CHANGELOG.md` are never resolved, and `EXPLICIT_ANCHOR` requires
+  a literal `<a`, so `<h2 id="…">` anchors are reported dead. No behaviour change —
+  the docstring now says what the script does and does not cover.
+- **The `profile` → `oid` auth claim is now cited rather than asserted.** The
+  grounding audit marked it `EXTERNAL-UNVERIFIED` because the repo's own comment
+  was the only source. Microsoft's access-token claims reference states it
+  directly, so the page now quotes it with a link. Conversely, the borrowed
+  app-registration's ownership and how the consent entry is *displayed* in the
+  Entra portal are now marked as project assertions — the id is byte-exact and
+  test-pinned, but the repository maintains no copy of the registration record and
+  cannot verify either claim.
+
 
 ## [5.0.1] - 2026-10-31
 

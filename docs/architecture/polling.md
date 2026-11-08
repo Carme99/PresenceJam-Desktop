@@ -226,11 +226,18 @@ platform signals below:
   a non-empty replacement never gates; its text flows into the normal #384
   identical-write dedup.
 
-  **Rule-driven presence (4.6, #634).** `rule_gate_at` returns a `RuleDecision`
-  — `{ reason, replacement, presence }` — built by `decision_from`, where an
+  **Rule-driven presence (4.6, #634; preferred presence added 5.0, #866).**
+  `rule_gate_at` returns a `RuleDecision` — `{ reason, replacement, presence,
+  preferred_presence }` — built by `decision_from`, where an
   empty replacement means *suppress* and an empty/unsupported presence pair means
   *don't touch presence* (the same normalization, repeated so an in-memory config
   that skipped the clamp cannot send Graph an unsupported pair).
+  `preferred_presence` is the fourth field (#866): the `setUserPreferredPresence`
+  pair to arm *instead of* `presence` when the matched rule carries no pair of its
+  own. `decision_from` keeps the invariant that the two can never both be `Some` —
+  rule presence always wins, and `preferred_presence` is filtered out whenever
+  `presence` resolved to something. It is `None` when the feature is off, when the
+  user's manual status is in force, or when the rule names its own pair.
   `RuleDecision::suppresses()` is `reason.is_some() && replacement.is_none()`.
   Two behaviours fall out of that shape:
 

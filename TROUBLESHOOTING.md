@@ -383,6 +383,6 @@ To fully remove PresenceJam:
    Remove-Item -Recurse -Force "$env:APPDATA\com.presencejam.app\PresenceJam"
    Remove-Item -Recurse -Force "$env:LOCALAPPDATA\com.presencejam.app\logs"
    ```
-4. **Remove the login entry** if **Launch at Login** was on — delete `~/.config/autostart/PresenceJam.desktop` on Linux; Windows and macOS remove it with the app. `~/.local/share/applications/presencejam.desktop` exists only if you created one for an AppImage install.
+4. **Remove the login entry** if **Launch at Login** was on — delete `~/.config/autostart/PresenceJam.desktop` on Linux; Windows and macOS remove it with the app. Also delete `~/.local/share/applications/presence-jam-handler.desktop`: the deep-link registration writes it on every Linux launch, so it is there for every Linux install. A `~/.local/share/applications/presencejam.desktop` is separate and exists only if you created one for an AppImage install.
 
 Note: Your Spotify app credentials in the Spotify Developer Dashboard are unaffected.

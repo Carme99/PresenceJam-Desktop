@@ -21,10 +21,14 @@ back in), VS Code detached-panel style:
   they call `save_config` / `load_config`, `reconnect_spotify` /
   `reconnect_teams`, `poll_teams_auth` and `open_logs_folder` directly, none
   of which take a `window` argument — so config/polling state is shared by
-  construction. The 13 commands that assume the main window (auth *starts*,
+  construction. The 19 commands that assume the main window (auth *starts*,
   the token refreshes, `relaunch_app`, `app_exit`, `stage_deferred_update`,
   `start_syncing` / `stop_syncing`, …) are rejected by
-  `require_main_window` (issue #241). That does not strand a detached user:
+  `require_main_window` (issue #241) — the authoritative list is the
+  caller-location matrix in `commands/mod.rs`. Each one takes a `window`
+  parameter and calls the guard as its first statement; there are 19 such call
+  sites (18 in `commands/*.rs`, plus `stage_deferred_update` in `updater_bg.rs`).
+  That does not strand a detached user:
   `reconnect_spotify` / `reconnect_teams` are unguarded and emit
   `*-reconnect-required` app-wide, and `+layout.svelte` registers its
   reconnect/update listeners **only** in the main window
@@ -33,12 +37,21 @@ back in), VS Code detached-panel style:
   (backend truth). `src/lib/stores/detach.ts` tracks pane→popped-out state in
   the main window only; dashboard nav shows a dot badge and focuses the child
   instead of navigating while detached.
-- **Capabilities:** `src-tauri/capabilities/detached.json` scopes the two
-  child labels to a minimal mirrored set (`core/event/log/opener/notification`),
-  plus `core:window:allow-close` (#594) — the one window-management permission a
-  detached render reaches, because **Pop back in** is `popIn()` →
-  `WebviewWindow.close()`, which Tauri resolves against the *calling* webview's
-  ACL, and `core:window:default` does not include it. Without that explicit entry
+- **Capabilities:** `src-tauri/capabilities/detached.json` holds ten entries,
+  three of which are plugin defaults: `core:default`, `log:default` and
+  `notification:default`. Six of the remaining seven are **redundant** with
+  those defaults and add nothing — `core:event:allow-emit` / `allow-emit-to` /
+  `allow-listen` are all inside `core:event:default`, which `core:default`
+  pulls in, and `notification:allow-is-permission-granted` /
+  `allow-request-permission` / `allow-notify` are all inside
+  `notification:default`. That leaves exactly **one** entry that grants
+  anything beyond the defaults: `core:window:allow-close` (#594), because
+  `core:window:default` carries 28 read-only window queries plus
+  `allow-internal-toggle-maximize` but **not** `close`.
+  `opener` is **not** granted, and neither is `core:window:allow-create`.
+  `allow-close` is what a detached render reaches, because **Pop back in** is
+  `popIn()` -> `WebviewWindow.close()`, which Tauri resolves against the
+  *calling* webview's ACL. Without that explicit entry
   the close is rejected and the pane is marked not-detached while its window stays
   on screen; a refused close now leaves the badge alone instead of lying
   (`detach.ts::popIn`, with `reconcileDetachedPanes()` on boot). The main
@@ -53,7 +66,7 @@ rationale for a tray-resident app: no second window at boot, tray
 `show_window` targets only `main`, and deep-link/single-instance routing is
 unchanged.
 
-### Interface Languages (v4.0)
+### Interface Languages (v4.6 → v5.0)
 
 The UI is localized to eight languages via the i18n barrel — English, German, French, Spanish, Italian, Polish, Brazilian Portuguese (`pt`, with `pt-BR` resolving to it) and Dutch
 (`src/lib/i18n.ts` re-exporting `src/lib/i18n/{en,de,fr}.ts` +
@@ -224,10 +237,18 @@ matrix builds **aarch64 macOS only** — Intel Macs never receive updates
   Devices/Queue listings; those are display fetches, not playback commands.
 - **Refresh cadence:** the polling loop calls `update_tray_menu` after every
   iteration, behind a dedup key built by `tray_snapshot_for`
-  (`src-tauri/src/tray/dedup.rs::tray_snapshot_for`) from `(is_syncing, is_window_visible,
-  "artist|title|is_playing", shuffle, repeat, snooze deadline + minute bucket)`.
+  (`src-tauri/src/tray/dedup.rs::tray_snapshot_for`). The snapshot carries
+  **nine** inputs, not just the visible mode/track state:
+  `is_syncing`, `is_window_visible`, `track_key` (`"artist|title|is_playing"`),
+  `shuffle`, `repeat`, `devices_bucket`, `queue_bucket`, the snooze key
+  (deadline + minute bucket) and `active_profile_key`.
   The mode atoms and the snooze key are in the key on purpose: a Shuffle/Repeat
   change made from another Spotify client has to force a rebuild, otherwise the
   marks stayed on the previous mode (#691), and the snooze bucket keeps the
   countdown repainting rather than freezing at the minute it was set (#677).
-  The `mode_change_forces_a_tray_rebuild` test pins that behaviour.
+  The two bucket fields (#805) are why the submenus no longer starve: without
+  them the early return skipped the Devices/Up Next fetches themselves, so the
+  submenus kept whatever the last rebuild rendered, indefinitely. The active
+  profile id (#869) is what makes a profile switch — from the tray, the CLI or
+  Settings — repaint the "Active profile" check mark instead of freezing after
+  the switch. The `mode_change_forces_a_tray_rebuild` test pins that behaviour.

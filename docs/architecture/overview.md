@@ -58,7 +58,7 @@ graph TD
     end
 
     subgraph Backend ["Backend (Rust / Tauri 2)"]
-        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / playback<br/>misc / logs"]
+        Commands["commands/ submodule<br/>config / spotify_auth / teams_auth<br/>sync / window / onboarding / playback<br/>misc / logs / shortcuts / status<br/>rules / shortcut_reason"]
         Polling["polling/ submodule<br/>loop (driver) + state (lifecycle)<br/>poll_once (single-source-of-truth iteration)<br/>+ mod.rs (ErrorSeverity, emit_error)"]
         SpotifyAPI["spotify.rs<br/>Spotify Web API (Authorization Code + PKCE)"]
         TeamsAPI["teams.rs<br/>Microsoft Graph (device code)"]

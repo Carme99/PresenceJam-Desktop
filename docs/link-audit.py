@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
-"""Audit every relative markdown link — and every source citation — in the repo.
+"""Audit relative markdown links, anchors and source citations in the repo.
 
-Checks, for every `*.md` file outside the build/vendor directories:
+Scope — what this checks, for every `*.md` file outside the build/vendor
+directories:
 
-* each relative link target exists on disk (directories allowed), and
+* each **inline** relative link target `[text](path)` exists on disk
+  (directories allowed), and
 * each `#anchor` resolves against the target file's headings — including
   explicit `<a name="...">` / `<a id="...">` anchors, which plain
   heading-slug matching would report as dead, and
 * each `` `src-tauri/src/**/*.rs` `` / `` `src/lib/**` `` citation in a
   **documentation** file names a file that exists on disk.
 
-Absolute URLs, `mailto:` links and bare fragments of code fences are ignored.
+Scope — what this deliberately does **not** check:
+
+* **Reference-style link definitions** (`[label]: ./path`). `LINK` matches only
+  the inline `[text](target)` form, so the ~48 definitions in `CHANGELOG.md` are
+  never resolved and a broken reference-style target is invisible here.
+* **Anchors carried on an HTML element other than `<a>`** — `<h2 id="...">`,
+  `<div id="...">`. `EXPLICIT_ANCHOR` requires the literal `<a` tag, so a link
+  to one of those ids is reported dead even though a browser reaches it.
+* **Liveness of absolute URLs.** `https://...`, `mailto:` and bare fragments are
+  skipped; no network request is made.
 
 The citation half exists because the #754/#755/#756/#757 module split left ~60
 `path:line` citations in the docs pointing at files that no longer exist

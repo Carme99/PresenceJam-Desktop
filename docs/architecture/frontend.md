@@ -15,8 +15,9 @@ matching SECURITY.md's No Telemetry promise. The snapshot contains:
   the keychain and never enters config).
 - OAuth token **metadata only** — RFC3339 expiry timestamps + presence flags;
   never a token value.
-- Keychain presence flags for the two slots exposed by the diagnostics snapshot
-  (the Spotify client-secret slot and the tokens AES-key slot).
+- Keychain presence flags for the two slots exposed by the diagnostics snapshot —
+  the Spotify client-secret slot (`spotify_client_secret:com.presencejam.app`) and
+  the tokens AES-key slot (`tokens_aes_key:com.presencejam.app`).
 - The most recent exit-time update install that failed, if any (issue #244) —
   read from the marker `updater_bg::install_pending_on_exit` writes, so a failed
   install is visible on the next launch instead of silently lost.

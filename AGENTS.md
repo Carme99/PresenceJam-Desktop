@@ -696,7 +696,7 @@ one outside this list, treat it as a bug and file an issue.
 | `gate_when_*` | The opt-in presence gates (`gate_when_out_of_office`, `gate_when_presenting`, `idle_away_after_seconds`). |
 | `respect_manual_status` | The opt-in that prevents overwriting a hand-set Teams status. |
 | `pause_polling` | The "polling paused until…" window. Snooze and resume operate on it. |
-| `--status` / `--sync-once` / `--serve` / `--daemon` / `--minimized` | The five documented CLI flags. See README §Command-line flags. |
+| `--status` / `--sync-once` / `--serve` / `--daemon` / `--minimized` / `--set-status` / `--set-status-expiry` / `--clear-status` / `--profile` | The nine documented CLI flags (`src-tauri/src/cli.rs`). See README §Command-line flags. |
 | `presencejam://` | The deep-link scheme for the Spotify PKCE callback. |
 | `devLog()` | The frontend debug logger. No-op in production. |
 | `t()` | The i18n lookup from `$lib/i18n`. |

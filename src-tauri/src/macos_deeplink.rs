@@ -2,8 +2,10 @@
 //!
 //! `tauri-plugin-deep-link` re-registers the app's custom URL scheme at every
 //! launch on Windows (`HKCU\Software\Classes\<scheme>`) and Linux
-//! (`~/.local/share/applications/<scheme>.desktop` plus `xdg-mime default`),
-//! so a foreign app that pre-registered the scheme is clobbered by our
+//! (`~/.local/share/applications/<binary>-handler.desktop` plus `xdg-mime
+//! default` — `<binary>` is the running executable's own name, `presence-jam`,
+//! not the `presencejam` product name), so a foreign app that pre-registered
+//! the scheme is clobbered by our
 //! last-write. On macOS that call is a no-op returning
 //! `Err(UnsupportedPlatform)`: schemes are claimed through the app bundle's
 //! `CFBundleURLTypes`, and LaunchServices gives the *first* claimant
