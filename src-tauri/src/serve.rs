@@ -17,7 +17,7 @@
 //! | POST   | `/pause`            | yes  | empty — calls `stop_syncing`                 |
 //! | POST   | `/resume`           | yes  | empty — calls `start_syncing`                |
 //! | POST   | `/snooze?minutes=N` | yes  | query `minutes` (1..=1440)                  |
-//! | POST   | `/profile?id=<id>`  | yes  | query `id` (1..=64 chars `[A-Za-z0-9_-]`)    |
+//! | POST   | `/profile?id=<id>`  | yes  | query `id` (1..=32 chars `[A-Za-z0-9_-]`)    |
 //!
 //! No route writes `config.json` or `tokens.json`. `/snooze` and `/profile`
 //! publish a new **in-memory** `AppConfig` (through the config write guard, via
@@ -488,10 +488,17 @@ fn active_profile_from_query(
     let Some(id) = query_param(query, "id") else {
         return Err(MutateError::BadRequest("missing id parameter".to_string()));
     };
-    if id.is_empty() || id.len() > 64 {
-        return Err(MutateError::BadRequest(
-            "id must be 1..=64 chars".to_string(),
-        ));
+    // The bound is the config's own `MAX_PROFILE_ID_CHARS` (32), not the 64 the
+    // route used to accept. `clamped_config` truncates a profile name to 32
+    // chars, so accepting a 33..=64-char id meant the lookup missed the stored
+    // name and the truncation then produced a DIFFERENT id — silently selecting
+    // the wrong profile, or clearing the pointer via `clamp_presence_profiles`.
+    // Validating the real cap makes the two agree.
+    let max = crate::config::MAX_PROFILE_ID_CHARS;
+    if id.is_empty() || id.chars().count() > max {
+        return Err(MutateError::BadRequest(format!(
+            "id must be 1..={max} chars"
+        )));
     }
     if !id
         .bytes()
@@ -977,15 +984,16 @@ mod tests {
             active_profile_from_query(&cfg, Some("id=")),
             Err(MutateError::BadRequest(_))
         ));
-        // 65 chars — one past the documented ceiling.
-        let too_long = "a".repeat(65);
+        // The ceiling is the config's MAX_PROFILE_ID_CHARS (32), not 64.
+        let max = crate::config::MAX_PROFILE_ID_CHARS;
+        let too_long = "a".repeat(max + 1);
         assert!(matches!(
             active_profile_from_query(&cfg, Some(&format!("id={too_long}"))),
             Err(MutateError::BadRequest(_))
         ));
-        // Exactly 64 is allowed (and then rejected as unknown, proving the
-        // length check passed).
-        let at_limit = "a".repeat(64);
+        // Exactly at the limit is accepted (then rejected as unknown, proving
+        // the length check itself passed).
+        let at_limit = "a".repeat(max);
         assert_eq!(
             active_profile_from_query(&cfg, Some(&format!("id={at_limit}"))),
             Err(MutateError::UnknownProfile(at_limit))
@@ -1276,6 +1284,42 @@ mod tests {
             profile.idle_away_after_seconds,
             Some(86_400),
             "clamped_config must have run on the /profile path too"
+        );
+    }
+
+    /// A 33-64 char id used to pass the route's own shape check (it allowed up
+    /// to 64) and then be truncated to 32 by `clamped_config`. The lookup
+    /// against the stored list happened BEFORE the clamp, so the request either
+    /// missed a stored 32-char name (404 with a confusing message) or, worse,
+    /// matched nothing and had its truncated form written as the active pointer.
+    /// The route now refuses anything past the config's own cap up front.
+    #[test]
+    fn profile_ids_longer_than_the_config_cap_are_rejected_not_truncated() {
+        let max = crate::config::MAX_PROFILE_ID_CHARS;
+        let long_name = "a".repeat(max); // a legitimate stored profile
+        let state = state_with(config_with_profiles(&[&long_name]));
+
+        // The max-length id works.
+        assert!(
+            apply_profile_to_state(&state, Some(&format!("id={long_name}"))).is_ok(),
+            "a stored profile at exactly the cap must be selectable"
+        );
+
+        // One char past the cap is a 400 — not a truncation to the valid name.
+        let over = "a".repeat(max + 1);
+        assert_eq!(
+            apply_profile_to_state(&state, Some(&format!("id={over}"))).err(),
+            Some(MutateError::BadRequest(format!(
+                "id must be 1..={max} chars"
+            )))
+        );
+        // And the live pointer is unchanged by the rejected request.
+        assert_eq!(
+            state
+                .config
+                .snapshot()
+                .and_then(|c| c.active_profile.clone()),
+            Some(long_name)
         );
     }
 }

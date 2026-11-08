@@ -91,7 +91,7 @@ Error responses, in full:
 | Status | When | Body |
 | --- | --- | --- |
 | `400` | `minutes` missing, non-integer, or outside `[1, 1440]` | `minutes must be …` |
-| `400` | `id` missing, empty, longer than 64 chars, or outside `[A-Za-z0-9_-]` | `id must be …` |
+| `400` | `id` missing, empty, longer than 32 chars, or outside `[A-Za-z0-9_-]` | `id must be …` |
 | `401` | mutating route without a valid `Authorization: Bearer <token>` header | `{"error":"unauthorized", …}` |
 | `404` | any other path, **or** `/profile` with an id that names no configured profile | `not found` / `unknown profile: <id>` |
 | `405` | a known mutating path reached with a non-`POST` method | `method not allowed` |
