@@ -58,20 +58,32 @@ reach disk *indirectly*. One path is reachable in `--serve` mode:
 expired deadline, and saves the whole document — carrying any `active_profile`
 or `snooze_until` a route set earlier along with it.
 
-In practice this means the restart guarantee is weaker than "never survives":
+The guarantee holds for **every** sequence, and structurally rather than by
+convention:
 
 | Scenario | Survives a restart? |
 | --- | --- |
 | `/profile` or `/snooze`, then the process exits with no intervening save | **No** |
-| `/profile`, then a snooze expires while the daemon keeps running | **Yes** — the expiry sweep persists it |
-| `/snooze`, then it expires (the sweep clears the field it was asked to) | **No** — the deadline is what gets cleared |
+| `/profile`, then a snooze expires while the daemon keeps running | **No** |
+| `/snooze`, then it expires | **No** |
+| Any sequence at all, including an unrelated writer saving the whole config | **No** |
 
-The GUI-only writers (tray snooze, `update_config`, `window.rs`) are not
-reachable from `--serve`, so the expiry sweep is the one that matters. Proper
-isolation — keeping runtime overrides in their own layer that a whole-config save
-cannot see — is tracked in
-[#1205](https://github.com/Carme99/PresenceJam-Desktop/issues/1205) rather than
-half-done here.
+The overrides are held in a separate `RuntimeOverrides` layer beside the config
+document, not inside it (`src-tauri/src/state.rs`). `POST /snooze` and
+`POST /profile` write there; the sync loop reads them through
+`AppState::snapshot_effective()`, the only place they are applied. Every writer
+— the tray, `update_config`, `window.rs`, and `polling::gate::clear_snooze_if_expired`
+— takes the raw `config.get_mut()` guard and clones the persisted document, so
+none of them can see an override, let alone serialise one. A restart drops the
+layer because a `RuntimeOverrides` only exists on a live `AppState`.
+
+Earlier versions of this document described the opposite: the override lived in
+the shared `AppConfig`, no route saved it, but the snooze-expiry sweep cloned the
+live config and saved the whole document, carrying a runtime `active_profile` to
+disk. `id=base` is the case that shows why the old design could not be patched
+cosmetically — "base" has to outrank a profile named in `config.json`, which an
+`Option<String>` in the document cannot express. The layer carries an explicit
+pin for that.
 
 **Scope note.** This section used to warn that `/snooze` and `/profile` were
 *inert* — they validated input, logged it, and returned `204` without changing

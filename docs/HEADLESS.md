@@ -51,9 +51,10 @@ The three events streamed on `/events` are `presence-updated`,
 `spotify-track-changed` and `presence-gated`, as Server-Sent Events.
 
 **No route writes `config.json` or `tokens.json`.** `/snooze` and `/profile`
-mutate runtime state only, so an operator restart returns to the pre-call
-on-disk behaviour — a snooze started over HTTP does **not** survive a restart.
-Persistence is what the GUI and `update_config` are for.
+record runtime overrides in a separate layer beside the config document, so an
+operator restart returns to the pre-call on-disk behaviour — neither a snooze nor
+a profile set over HTTP survives a restart, even if another writer saves the
+whole config in between. Persistence is what the GUI and `update_config` are for.
 
 ### Retrieving the bearer token
 
