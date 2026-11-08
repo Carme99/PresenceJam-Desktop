@@ -153,7 +153,7 @@ npm run tauri build
 
 ## Command-line flags
 
-PresenceJam is a tray app, but the binary also answers nine CLI flags — useful from a script,
+PresenceJam is a tray app, but the binary also answers ten CLI flags — useful from a script,
 a cron job or a support session. None of them opens the app window, and any *other* argument is
 ignored, so the app starts normally exactly as it always has.
 

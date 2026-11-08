@@ -437,7 +437,7 @@ The current log level is set in **Settings → Logging** (the same value lives i
 
 ## Command-line flags
 
-PresenceJam is a tray app, but the binary also answers seven CLI flags plus `--help` — handy from a script, a
+PresenceJam is a tray app, but the binary also answers ten CLI flags (including `--help`) — handy from a script, a
 cron job or a support session. None of them opens the app window. Any *other* argument is
 ignored and the app starts normally, exactly as it always has (that includes the autostart
 plugin's `--minimized` and a `presencejam://` deep-link URL, which are both normal GUI

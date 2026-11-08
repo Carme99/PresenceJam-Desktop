@@ -1095,5 +1095,29 @@ mod tests {
             body.contains("retrying next iteration"),
             "a failed clear must say it will retry"
         );
+
+        // Closing a real hole found in review: every marker above is a substring
+        // test, so an early `return` inserted at the top of the fn — making it a
+        // no-op — satisfied all of them and left the whole suite green. Pin the
+        // ORDER instead: the first control-flow statement must be the guard
+        // acquisition, not a bail-out.
+        // `prod_fn_body` keeps the signature, so start after the opening brace.
+        let inner = &body[body.find('{').expect("a body") + 1..];
+        let first_stmt = inner
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with('*'))
+            .expect("a body");
+        assert!(
+            first_stmt.starts_with("let mut guard = state.config.get_mut();"),
+            "clear_snooze_if_expired must acquire the config write guard first, \
+             with no early return before it (found `{first_stmt}`)"
+        );
+        // And the mutate-and-persist block must not be unreachable behind an
+        // unconditional bail-out.
+        assert!(
+            !body.contains("if true") && !body.contains("return;\n    };\n    return;"),
+            "clear_snooze_if_expired must not be short-circuited before persisting"
+        );
     }
 }

@@ -250,8 +250,13 @@ platform signals below:
     (a playing write suppressed by quiet hours or a track rule) and arms the
     rule's pair — otherwise "while my Focus playlist plays, show me Do Not
     Disturb" would move nothing, since its whole point is that no status write
-    happens. It is **inert unless `availability_sync` is on** (the hint text in
-    the UI says the same thing).
+    happens. `availability_sync` gates only the **rule's own** `presence` pair.
+    A rule that carries a `preferred_presence` pair (the #866
+    `setUserPreferredPresence` feature) arms even when `availability_sync` is
+    off: `arm_rule_presence` returns through
+    `arm_preferred_presence_session` *before* the `availability_sync_enabled`
+    check, because that feature is independent of the per-track listening
+    session. The UI hint describes the `availability_sync` case only.
 
   `should_arm_presence` arms immediately when the desired pair *differs* from the
   armed one (a rule starting or stopping must move the bubble on the next

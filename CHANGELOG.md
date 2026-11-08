@@ -112,6 +112,44 @@ renamed to the released version and a fresh empty one is opened on top (see
   entry point is `Variant::array_iter_str`, which has zero call sites anywhere
   in the dependency graph outside `glib` itself.
 
+### Fixed
+
+- **Post-merge review follow-ups (#1171, #1197, #1201).** Adversarial review of
+  the three merged PRs found six defects that shipped:
+
+  - `polling.md` still said the rule-presence arm is "inert unless
+    `availability_sync` is on". Since #866 a rule carrying a
+    `preferred_presence` pair arms *before* the `availability_sync_enabled`
+    check, so that sentence described pre-5.0 behaviour.
+  - The CLI has **ten** documented flags, not nine: nine `_FLAG` consts in
+    `cli.rs` plus `MINIMIZED_FLAG` in `app.rs`. `README.md`, `USAGE.md` (which
+    also still said "seven plus `--help`") and the `AGENTS.md` glossary — whose
+    list omitted `--help` — now agree.
+  - `SECURITY.md`'s gtk-rs counts were both wrong. Counted from `Cargo.lock`:
+    **eight** crates depend on `gtk` directly, **twelve** on `glib` — not twelve
+    and twenty-six. `rfd` is `gtk-sys`-only and appears in neither list.
+  - `serve.rs`'s module doc still promised that `config-changed` makes "a
+    mounted dashboard repaint", which no frontend listener supports.
+
+  Three of the four test-quality defects were also real and are now closed:
+
+  - **The route handlers had zero coverage.** Replacing `handle_snooze` or
+    `handle_profile` wholesale with the pre-fix inert body left all 26 serve
+    tests green — every mutation test drove the helpers directly.
+    `handlers_delegate_to_the_mutation_helpers` now brace-matches each handler
+    and requires it to call its helper and handle the error.
+  - **`runtime_routes_never_persist_config` was substring-evadable.** A real
+    disk write via `save_config_persisted` slipped past it, as did
+    `save_config (&cfg)` with a space. It now strips comments, matches on writer
+    names rather than call syntax, and covers all four config writers.
+  - **`clear_snooze_if_expired` could be gutted silently.** Its four marker
+    assertions were all substring tests, so an early `return` at the top left
+    the whole suite green. The test now pins the guard acquisition as the first
+    statement.
+
+  All three are mutation-proven: each defect is reintroduced and the specific
+  test goes red.
+
 ## [5.0.1] - 2026-10-31
 
 Dependency refresh. No application behaviour changed.
